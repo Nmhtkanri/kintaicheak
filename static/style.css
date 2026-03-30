@@ -1,0 +1,317 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: "Meiryo", "メイリオ", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+    background: #f4f6f8;
+    color: #333;
+    font-size: 14px;
+}
+
+.app-header {
+    background: #2c3e50;
+    color: #fff;
+    padding: 14px 24px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+.header-inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+}
+.header-title {
+    font-size: 20px;
+    font-weight: bold;
+}
+.header-sub {
+    font-size: 12px;
+    color: #bdc3c7;
+}
+
+.main-content {
+    max-width: 1100px;
+    margin: 24px auto;
+    padding: 0 16px;
+}
+
+.container {
+    background: #fff;
+    border-radius: 8px;
+    padding: 28px 32px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+}
+
+.upload-section {
+    margin-bottom: 20px;
+}
+.section-title {
+    font-size: 15px;
+    font-weight: bold;
+    margin-bottom: 10px;
+    color: #2c3e50;
+}
+
+.drop-zone {
+    border: 2px dashed #adb5bd;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    background: #f8f9fa;
+    transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
+}
+.drop-zone.drag-over {
+    border-color: #3498db;
+    background: #ebf5fb;
+}
+.drop-zone-inner {
+    pointer-events: none;
+}
+.drop-zone-inner .drop-icon {
+    font-size: 2rem;
+    margin-bottom: 8px;
+}
+.drop-zone-inner p {
+    color: #666;
+    margin-bottom: 8px;
+}
+.hint {
+    font-size: 12px;
+    color: #999 !important;
+}
+
+.selected-files {
+    margin-top: 10px;
+    text-align: left;
+    font-size: 13px;
+}
+.selected-file-item {
+    display: inline-flex;
+    align-items: center;
+    background: #e8f4fd;
+    border: 1px solid #bee3f8;
+    border-radius: 4px;
+    padding: 4px 10px;
+    margin: 3px;
+    color: #2980b9;
+}
+
+.settings-section {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 16px 0 20px;
+    padding: 14px 16px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+}
+.settings-label {
+    font-weight: bold;
+    color: #555;
+}
+.threshold-input {
+    width: 70px;
+    padding: 6px 8px;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 14px;
+    text-align: center;
+}
+
+.btn {
+    display: inline-block;
+    padding: 8px 18px;
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.2s, opacity 0.2s;
+}
+.btn:hover { opacity: 0.85; }
+.btn-primary {
+    background: #2980b9;
+    color: #fff;
+}
+.btn-secondary {
+    background: #6c757d;
+    color: #fff;
+    pointer-events: auto;
+    cursor: pointer;
+}
+.btn-run {
+    width: 100%;
+    padding: 12px;
+    font-size: 16px;
+    font-weight: bold;
+    background: #27ae60;
+    color: #fff;
+    margin-top: 4px;
+}
+.btn-run:disabled {
+    background: #95a5a6;
+    cursor: not-allowed;
+    opacity: 1;
+}
+.btn-download {
+    background: #2980b9;
+    color: #fff;
+    padding: 10px 24px;
+    font-size: 15px;
+}
+
+.alert {
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 13px;
+}
+.alert-warning {
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    color: #856404;
+}
+.alert-error {
+    background: #f8d7da;
+    border: 1px solid #f5c2c7;
+    color: #842029;
+}
+
+.progress-area {
+    margin: 16px 0;
+    padding: 16px;
+    background: #f0f8ff;
+    border-radius: 6px;
+    border: 1px solid #bee3f8;
+}
+.progress-bar-wrap {
+    height: 8px;
+    background: #dee2e6;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 10px;
+}
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #2980b9, #27ae60);
+    border-radius: 4px;
+    width: 0%;
+    transition: width 0.5s;
+    animation: progress-pulse 1.5s infinite;
+}
+@keyframes progress-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+.progress-message {
+    font-size: 13px;
+    color: #2c3e50;
+}
+
+.divider {
+    border: none;
+    border-top: 1px solid #dee2e6;
+    margin: 24px 0;
+}
+
+.summary-cards {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+.summary-card {
+    flex: 1;
+    min-width: 120px;
+    border-radius: 8px;
+    padding: 16px 20px;
+    text-align: center;
+    border: 1px solid transparent;
+}
+.card-label {
+    font-size: 13px;
+    font-weight: bold;
+    margin-bottom: 6px;
+}
+.card-value {
+    font-size: 28px;
+    font-weight: bold;
+}
+.card-ok { background: #d4edda; border-color: #c3e6cb; color: #155724; }
+.card-ng { background: #f8d7da; border-color: #f5c2c7; color: #721c24; }
+.card-caution { background: #fff3cd; border-color: #ffc107; color: #856404; }
+.card-missing { background: #cce5ff; border-color: #b8daff; color: #004085; }
+
+.all-ok-msg {
+    text-align: center;
+    font-size: 18px;
+    color: #155724;
+    background: #d4edda;
+    padding: 16px;
+    border-radius: 8px;
+    margin: 12px 0;
+    font-weight: bold;
+}
+
+.table-wrap {
+    overflow-x: auto;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+}
+.result-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.result-table th {
+    background: #495057;
+    color: #fff;
+    padding: 9px 10px;
+    text-align: center;
+    white-space: nowrap;
+}
+.result-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #dee2e6;
+    white-space: nowrap;
+}
+.result-table tr:last-child td { border-bottom: none; }
+.result-table tr:hover td { background: #f8f9fa; }
+
+.judge-ok  { background: #d4edda; color: #155724; font-weight: bold; text-align: center; }
+.judge-ng  { background: #f8d7da; color: #721c24; font-weight: bold; text-align: center; }
+.judge-caution { background: #fff3cd; color: #856404; font-weight: bold; text-align: center; }
+.judge-missing { background: #cce5ff; color: #004085; font-weight: bold; text-align: center; }
+
+.download-area {
+    margin-top: 20px;
+    text-align: center;
+}
+
+.unsubmitted-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 0;
+}
+.unsubmitted-tag {
+    display: inline-block;
+    background: #fff0e0;
+    border: 1px solid #f4b084;
+    color: #8b4513;
+    padding: 5px 14px;
+    border-radius: 16px;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+@media (max-width: 600px) {
+    .container { padding: 16px; }
+    .summary-cards { flex-direction: column; }
+}

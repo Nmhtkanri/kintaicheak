@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}勤怠突合チェッカー{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-inner">
+            <h1 class="header-title">勤怠突合チェッカー</h1>
+            <span class="header-sub">勤務表 × jinjer CSV 自動突合システム</span>
+        </div>
+    </header>
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
