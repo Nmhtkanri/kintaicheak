@@ -82,12 +82,15 @@ function applyModeUI(mode) {
     const timesheetSection = document.getElementById('timesheet-section');
     const calendarSection = document.getElementById('calendar-section');
     const legendSection = document.getElementById('legend-section');
+    const targetYmSection = document.getElementById('target-ym-section');
     const jinjerRequiredTag = document.getElementById('jinjer-required-tag');
     const jinjerOptionalTag = document.getElementById('jinjer-optional-tag');
     const jinjerInput = document.getElementById('jinjer-input');
     const timesheetInput = document.getElementById('timesheet-input');
     const calendarInput = document.getElementById('calendar-input');
     const legendInput = document.getElementById('legend-input');
+    const targetYearInput = document.getElementById('target-year');
+    const targetMonthInput = document.getElementById('target-month');
     const settingsSection = document.getElementById('settings-section');
     const runBtn = document.getElementById('run-btn');
 
@@ -99,10 +102,13 @@ function applyModeUI(mode) {
         if (timesheetInput) timesheetInput.disabled = true;
 
         // CSV変換モード専用UIを表示・有効化
+        if (targetYmSection) targetYmSection.style.display = '';
         if (calendarSection) calendarSection.style.display = '';
         if (legendSection) legendSection.style.display = '';
         if (calendarInput) calendarInput.disabled = false;
         if (legendInput) legendInput.disabled = false;
+        if (targetYearInput) targetYearInput.disabled = false;
+        if (targetMonthInput) targetMonthInput.disabled = false;
 
         // 許容差分は不要
         if (settingsSection) settingsSection.style.display = 'none';
@@ -117,10 +123,13 @@ function applyModeUI(mode) {
         if (jinjerOptionalTag) jinjerOptionalTag.style.display = 'none';
 
         // CSV変換モード専用UIを非表示・無効化
+        if (targetYmSection) targetYmSection.style.display = 'none';
         if (calendarSection) calendarSection.style.display = 'none';
         if (legendSection) legendSection.style.display = 'none';
         if (calendarInput) calendarInput.disabled = true;
         if (legendInput) legendInput.disabled = true;
+        if (targetYearInput) targetYearInput.disabled = true;
+        if (targetMonthInput) targetMonthInput.disabled = true;
 
         if (settingsSection) settingsSection.style.display = '';
         if (runBtn) runBtn.textContent = 'チェック実行';

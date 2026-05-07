@@ -30,6 +30,7 @@ from services.jinjer_schedule_csv_exporter import (
     export_jinjer_schedule_csv,
     export_jinjer_schedule_csv_split,
 )
+from services.multi_year_shift_parser import parse_structured_files
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -127,6 +128,15 @@ def upload():
     timesheet_files = request.files.getlist("timesheet_files")
     threshold = int(request.form.get("threshold", Config.DEFAULT_THRESHOLD_MINUTES))
 
+    # 多年度横並びレイアウトを構造化パースする際に使う対象年月（任意）
+    def _safe_int(v, default=None):
+        try:
+            return int(v) if v not in (None, "") else default
+        except (TypeError, ValueError):
+            return default
+    target_year = _safe_int(request.form.get("target_year"))
+    target_month = _safe_int(request.form.get("target_month"))
+
     errors = []
     # match モードは jinjer CSV 必須、csv_export モードは任意
     if mode == "match":
@@ -180,6 +190,55 @@ def upload():
             direct_dfs: list[pd.DataFrame] = []
             code_sheets: list[dict] = []  # 凡例レビュー対象
             total = len(saved_timesheet_paths)
+
+            # ----- 構造化パース（多年度横並び xlsx + シフトルール xlsx 専用 fast path）-----
+            # target_year/month が指定されており、アップロードされた xlsx の中に
+            # 多年度シフト表があれば、Claude を経由せず確定的に解析する。
+            # 該当しないファイルや該当しないレイアウトはそのまま Claude フォールバックへ。
+            if target_year and target_month and saved_timesheet_paths:
+                try:
+                    yield _sse_event("progress", {"message": "シフト表を構造化解析中..."})
+                    structured_result = parse_structured_files(
+                        [p for p, _ in saved_timesheet_paths],
+                        target_year, target_month,
+                    )
+                except Exception as e:
+                    logger.warning("構造化パース失敗、Claudeフォールバックします: %s", e)
+                    structured_result = None
+
+                if structured_result:
+                    structured_sheets, consumed_paths = structured_result
+                    consumed_set = set(consumed_paths)
+                    for sheet in structured_sheets:
+                        code_sheets.append({
+                            "filename": sheet["filename"],
+                            "year": sheet["year"],
+                            "month": sheet["month"],
+                            "legend": sheet["legend"],
+                            "employees": sheet["employees"],
+                            "off_markers": sheet["off_markers"],
+                        })
+                        sec = sheet.get("section_info") or {}
+                        yield _sse_event("progress", {
+                            "message": (
+                                f"構造化解析完了: {sheet['filename']} "
+                                f"→ {sheet['year']}年{sheet['month']}月 "
+                                f"凡例 {len(sheet['legend'])}個 / "
+                                f"従業員 {len(sheet['employees'])}人 "
+                                f"(セクション{sec.get('section_index')} "
+                                f"曜日マッチ {sec.get('weekday_matched', 0)}/"
+                                f"{sec.get('weekday_total', 0)})"
+                            )
+                        })
+                    # 消費されたパスは Claude フォールバックから除外し、tmp も削除
+                    new_paths = []
+                    for p, fn in saved_timesheet_paths:
+                        if p in consumed_set:
+                            _safe_remove(p)
+                        else:
+                            new_paths.append((p, fn))
+                    saved_timesheet_paths = new_paths
+                    total = len(saved_timesheet_paths)
 
             for idx, (ts_path, ts_filename) in enumerate(saved_timesheet_paths, start=1):
                 yield _sse_event("progress", {

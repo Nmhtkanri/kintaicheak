@@ -69,6 +69,24 @@
             </div>
         </div>
 
+        <!-- 対象年月（CSV変換モードのみ）-->
+        <div class="upload-section" id="target-ym-section" style="display:none">
+            <div class="section-title">🗓️ 対象年月</div>
+            <div style="padding: 8px 14px; display:flex; align-items:center; gap:8px;">
+                <input type="number" name="target_year" id="target-year"
+                       placeholder="2026" min="2000" max="2099"
+                       style="width:90px; padding:4px 8px;">
+                <span>年</span>
+                <input type="number" name="target_month" id="target-month"
+                       placeholder="5" min="1" max="12"
+                       style="width:60px; padding:4px 8px;">
+                <span>月</span>
+                <span class="hint" style="margin-left: 12px;">
+                    ※xlsxシフト表＋シフトルールの組み合わせはこの年月で構造化解析します（未入力ならClaude経由）
+                </span>
+            </div>
+        </div>
+
         <!-- カレンダー画像（CSV変換モード用） -->
         <div class="upload-section" id="calendar-section" style="display:none">
             <div class="section-title">📅 カレンダー画像（シフト表）</div>
