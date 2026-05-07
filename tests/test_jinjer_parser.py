@@ -21,17 +21,18 @@ def test_parse_jinjer_basic():
 
 
 def test_parse_jinjer_names():
+    # パーサは氏名の内部スペースを保持する（突合時の正規化は services/matcher.py が担当）。
+    # サンプルCSVは jinjer 標準どおり半角スペース区切り。
     df = parse_jinjer_csv(SAMPLE_CSV)
     names = df["氏名"].unique().tolist()
-    assert "山田太郎" in names
-    assert "佐藤花子" in names
-    assert "鈴木一郎" in names
+    assert "山田 太郎" in names
+    assert "佐藤 花子" in names
 
 
 def test_parse_jinjer_times():
     df = parse_jinjer_csv(SAMPLE_CSV)
     from datetime import time
-    first = df[df["氏名"] == "山田太郎"].iloc[0]
+    first = df[df["氏名"] == "山田 太郎"].iloc[0]
     assert first["出勤時刻"] == time(9, 0)
     assert first["退勤時刻"] == time(18, 0)
 

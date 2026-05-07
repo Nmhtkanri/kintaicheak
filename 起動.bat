@@ -12,6 +12,17 @@ echo.
 echo ============================================================
 echo.
 
+set "EXE=%~dp0dist\KintaiChecker\KintaiChecker.exe"
+if exist "%EXE%" (
+    "%EXE%"
+    echo.
+    echo ============================================================
+    echo   Server stopped.
+    echo ============================================================
+    pause
+    exit /b 0
+)
+
 where python >nul 2>nul
 if errorlevel 1 goto :no_python
 
@@ -27,7 +38,9 @@ pause
 exit /b 0
 
 :no_python
-echo [ERROR] Python not found. Please install Python first.
+echo [ERROR] KintaiChecker.exe was not found and Python is not installed.
+echo.
+echo Please ask the administrator to run build_exe.bat first.
 echo.
 pause
 exit /b 1

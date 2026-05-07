@@ -172,6 +172,7 @@ def upload():
         saved_timesheet_paths.append((ts_path, ts_file.filename))
 
     def generate():
+        nonlocal saved_timesheet_paths
         try:
             jinjer_df = pd.DataFrame()
             if jinjer_path:

@@ -1,5 +1,8 @@
 __pycache__/
 .env
+build/
+dist/
+*.spec
 outputs/
 uploads/
 .pytest_cache/
