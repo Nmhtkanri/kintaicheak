@@ -315,3 +315,429 @@ body {
     .container { padding: 16px; }
     .summary-cards { flex-direction: column; }
 }
+
+/* ============================================================ */
+/* 凡例レビューモーダル                                           */
+/* ============================================================ */
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+.modal-content {
+    background: #fff;
+    border-radius: 10px;
+    max-width: 720px;
+    width: 100%;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+}
+.modal-wide {
+    max-width: 960px;
+}
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 24px;
+    border-bottom: 1px solid #dee2e6;
+}
+.modal-header h3 {
+    font-size: 18px;
+    color: #2c3e50;
+    margin: 0;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 22px;
+    color: #6c757d;
+    cursor: pointer;
+    padding: 0 6px;
+    line-height: 1;
+}
+.modal-close:hover { color: #000; }
+.modal-body {
+    padding: 18px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-intro {
+    color: #555;
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 14px 24px;
+    border-top: 1px solid #dee2e6;
+    background: #f8f9fa;
+    border-bottom-left-radius: 10px;
+    border-bottom-right-radius: 10px;
+}
+
+/* 凡例: 対象年月入力行 */
+.legend-ym-row {
+    padding: 8px 14px;
+    background: #fafafa;
+    border-bottom: 1px solid #ecf0f1;
+    font-size: 13px;
+    color: #2c3e50;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+.legend-ym-row input[type="number"] {
+    padding: 4px 6px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 13px;
+    text-align: center;
+    margin: 0 4px;
+}
+.legend-ym-hint {
+    font-size: 11px;
+    color: #999;
+}
+
+/* 凡例テーブル（編集可能） */
+.legend-sheet {
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    margin-bottom: 18px;
+    overflow: hidden;
+}
+.legend-sheet-header {
+    background: #ecf0f1;
+    padding: 10px 14px;
+    font-weight: bold;
+    color: #2c3e50;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.legend-sheet-header-meta {
+    font-size: 12px;
+    color: #666;
+    font-weight: normal;
+}
+.legend-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.legend-table th {
+    background: #34495e;
+    color: #fff;
+    padding: 8px 10px;
+    text-align: center;
+    white-space: nowrap;
+    font-weight: 500;
+}
+.legend-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid #ecf0f1;
+    text-align: center;
+}
+.legend-table tr:last-child td { border-bottom: none; }
+.legend-table input[type="text"] {
+    width: 100%;
+    padding: 4px 6px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 13px;
+    font-family: inherit;
+    text-align: center;
+}
+.legend-table input[type="text"]:focus {
+    outline: none;
+    border-color: #2980b9;
+    background: #fff8e1;
+}
+.legend-table input[type="number"] {
+    width: 60px;
+    padding: 4px 6px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 13px;
+    text-align: center;
+}
+.legend-row-off input[type="text"] {
+    background: #f8d7da;
+    color: #888;
+}
+.legend-template-tag {
+    display: inline-block;
+    background: #d1ecf1;
+    color: #0c5460;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+}
+.legend-template-tag.unmatched {
+    background: #fff3cd;
+    color: #856404;
+}
+.legend-actions {
+    padding: 8px 14px;
+    background: #f8f9fa;
+    text-align: right;
+    border-top: 1px solid #dee2e6;
+    font-size: 12px;
+    color: #6c757d;
+}
+.btn-mini {
+    padding: 4px 10px;
+    font-size: 12px;
+    background: #95a5a6;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.btn-mini:hover { opacity: 0.85; }
+.btn-mini-danger { background: #e74c3c; }
+.btn-mini-add { background: #27ae60; }
+
+/* 新規雛形メッセージ */
+.new-template-msg {
+    margin-top: 12px;
+    padding: 10px 14px;
+    background: #ede7f6;
+    border-left: 4px solid #8e44ad;
+    color: #4a148c;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+/* ============================================================ */
+/* モードセレクタ                                                  */
+/* ============================================================ */
+.mode-selector {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.mode-option {
+    flex: 1;
+    cursor: pointer;
+    position: relative;
+}
+.mode-option input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+.mode-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px 18px;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    background: #fff;
+    transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+.mode-option input[type="radio"]:checked + .mode-card {
+    border-color: #2980b9;
+    background: #ebf5fb;
+    box-shadow: 0 2px 6px rgba(41, 128, 185, 0.15);
+}
+.mode-option:hover .mode-card {
+    border-color: #95a5a6;
+}
+.mode-option input[type="radio"]:checked + .mode-card {
+    border-color: #2980b9;
+}
+.mode-title {
+    font-size: 15px;
+    font-weight: bold;
+    color: #2c3e50;
+}
+.mode-desc {
+    font-size: 12px;
+    color: #6c757d;
+}
+
+/* 必須/任意タグ */
+.required-tag, .optional-tag {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 10px;
+    font-weight: 500;
+    vertical-align: middle;
+}
+.required-tag {
+    background: #f8d7da;
+    color: #721c24;
+}
+.optional-tag {
+    background: #e2e3e5;
+    color: #495057;
+}
+
+/* CSV出力結果 */
+.csv-files-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.csv-file-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: #f0f8ff;
+    border: 1px solid #bee3f8;
+    border-radius: 6px;
+}
+.csv-file-info {
+    font-size: 14px;
+    color: #2c3e50;
+}
+.csv-file-meta {
+    font-size: 12px;
+    color: #6c757d;
+    margin-top: 2px;
+}
+.csv-file-download {
+    background: #2980b9;
+    color: #fff;
+    padding: 8px 16px;
+    text-decoration: none;
+    border-radius: 5px;
+    font-size: 13px;
+    white-space: nowrap;
+}
+.csv-file-download:hover { opacity: 0.85; }
+.csv-file-group-tag {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #e8eaf6;
+    color: #283593;
+    font-size: 11px;
+    font-weight: 600;
+    vertical-align: middle;
+}
+.csv-split-note {
+    padding: 10px 12px;
+    margin: 8px 0 10px 0;
+    background: #e3f2fd;
+    border-left: 4px solid #1976d2;
+    border-radius: 4px;
+    font-size: 13px;
+    color: #0d47a1;
+    line-height: 1.5;
+}
+
+/* 深夜跨ぎ統合トレース */
+.merges-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.merge-item {
+    padding: 8px 12px;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.merge-name {
+    font-weight: bold;
+    color: #2c3e50;
+    margin-bottom: 2px;
+}
+.merge-detail {
+    color: #455a64;
+    font-size: 12px;
+    line-height: 1.6;
+}
+.merge-cell-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 8px;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #6d4c00;
+}
+
+/* 従業員氏名エディタ（凡例モーダル内） */
+.legend-employees {
+    margin: 10px 0 16px 0;
+    padding: 10px 12px;
+    background: #f3f8ff;
+    border: 1px solid #bee3f8;
+    border-radius: 6px;
+}
+.legend-employees-title {
+    font-weight: bold;
+    font-size: 14px;
+    color: #1a5490;
+    margin-bottom: 8px;
+}
+.legend-employees-hint {
+    font-weight: normal;
+    font-size: 11px;
+    color: #5d6d7e;
+    margin-left: 6px;
+}
+.legend-employees-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+}
+.legend-employees-table thead th {
+    background: #2c5aa0;
+    color: #fff;
+    font-size: 12px;
+    padding: 6px 8px;
+    text-align: left;
+}
+.legend-employees-table tbody td {
+    padding: 4px 8px;
+    border-bottom: 1px solid #e3e8ee;
+}
+.legend-employees-table tbody tr:last-child td {
+    border-bottom: none;
+}
+.legend-employee-name-input {
+    width: 100%;
+    padding: 4px 8px;
+    border: 1px solid #ccd5e0;
+    border-radius: 4px;
+    font-size: 13px;
+}
+.legend-employee-name-input:focus {
+    outline: none;
+    border-color: #2c5aa0;
+    box-shadow: 0 0 0 2px rgba(44, 90, 160, 0.15);
+}
+.legend-employee-shift-count {
+    color: #5d6d7e;
+    font-size: 12px;
+}
+.legend-employees-empty td {
+    padding: 10px;
+    color: #856404;
+    background: #fff3cd;
+    font-size: 12px;
+}

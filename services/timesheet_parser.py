@@ -3,10 +3,16 @@ import base64
 import json
 import time
 import logging
+import os
 import re
 from datetime import datetime, date, time as dt_time
 import pandas as pd
 from config import Config
+from services.shift_legend_parser import (
+    parse_with_legend_extraction,
+    to_legend_dict_for_ui,
+)
+from services.shift_resolver import resolve_shifts
 
 logger = logging.getLogger(__name__)
 
@@ -204,8 +210,10 @@ def parse_timesheet(filepath, progress_callback=None):
     勤務表ファイル（Excel/PDF/画像）を解析して統一DataFrameを返す
 
     progress_callback: 進捗通知用コールバック (任意)
+
+    Note: 後方互換のため "direct" モード相当の挙動のみ。
+          記号式シフトの判別が必要な場合は parse_timesheet_smart() を使う。
     """
-    import os
     ext = os.path.splitext(filepath)[1].lower()
 
     if ext in (".xlsx", ".xls"):
@@ -235,3 +243,90 @@ def parse_timesheet(filepath, progress_callback=None):
         raise ValueError(f"未対応のファイル形式: {ext}")
 
     return _normalize_records(result)
+
+
+def _load_file_for_claude(filepath):
+    """ファイルから (content, file_type, media_type) を返す"""
+    ext = os.path.splitext(filepath)[1].lower()
+
+    if ext in (".xlsx", ".xls"):
+        return _excel_to_text(filepath), "text", None
+
+    if ext == ".pdf":
+        text, pdf_bytes = _pdf_to_text_or_bytes(filepath)
+        if text:
+            return text, "text", None
+        return pdf_bytes, "pdf", None
+
+    if ext in (".png", ".jpg", ".jpeg"):
+        media_type_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+        with open(filepath, "rb") as f:
+            return f.read(), "image", media_type_map[ext]
+
+    raise ValueError(f"未対応のファイル形式: {ext}")
+
+
+def parse_timesheet_smart(filepath, progress_callback=None):
+    """
+    勤務表ファイルを自動でモード判定して解析する
+
+    - direct モード: そのまま DataFrame を返す（既存 parse_timesheet と同じ）
+    - code   モード: 凡例＋シフト表（生）を返す → ユーザー確認後に shift_resolver で解決
+
+    Returns:
+        {
+          "mode": "direct" | "code",
+          "df": pd.DataFrame,        # direct モードのときのみ
+          "legend": [...],           # code モードのときのみ
+          "employees": [...],        # code モードのときのみ
+          "off_markers": [...],      # code モードのときのみ
+          "year": int|None,
+          "month": int|None,
+          "filename": str,
+        }
+    """
+    if progress_callback:
+        progress_callback(f"ファイルを解析中... ({os.path.basename(filepath)})")
+
+    file_content, file_type, media_type = _load_file_for_claude(filepath)
+    result = parse_with_legend_extraction(file_content, file_type, media_type)
+    mode = result.get("mode")
+    filename = os.path.basename(filepath)
+
+    if mode == "direct":
+        # 既存の direct モード形式に変換して DataFrame 化
+        df = _normalize_records(result.get("data") or [])
+        return {
+            "mode": "direct",
+            "df": df,
+            "filename": filename,
+        }
+
+    if mode == "code":
+        ui_data = to_legend_dict_for_ui(result)
+        return {
+            "mode": "code",
+            "legend": ui_data.get("legend", []),
+            "employees": ui_data.get("employees", []),
+            "off_markers": ui_data.get("off_markers", []),
+            "year": ui_data.get("year"),
+            "month": ui_data.get("month"),
+            "filename": filename,
+        }
+
+    raise RuntimeError(f"未対応の解析モード: {mode}")
+
+
+def resolve_code_mode_to_df(legend, employees, off_markers=None, source_label="勤務表"):
+    """凡例レビュー後の resolve（app.py から呼ばれる）
+
+    Args:
+        legend: list of dict（UI で編集された後の凡例）
+        employees: list of dict（{name, shifts: [{date, code}]}）
+        off_markers: 追加で休扱いとみなす記号セット
+        source_label: DataFrame の "データソース" カラム値
+
+    Returns:
+        pd.DataFrame（matcher.py に流せる形式）
+    """
+    return resolve_shifts(legend, employees, off_markers=off_markers, source_label=source_label)

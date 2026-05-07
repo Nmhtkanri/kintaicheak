@@ -1,6 +1,8 @@
 'use strict';
 
+// =============================================================================
 // ドラッグ&ドロップ + ファイル選択
+// =============================================================================
 function setupDropZone(dropZoneId, inputId, selectedId, multiple) {
     const dropZone = document.getElementById(dropZoneId);
     const input = document.getElementById(inputId);
@@ -25,7 +27,6 @@ function setupDropZone(dropZoneId, inputId, selectedId, multiple) {
         e.preventDefault();
         dropZone.classList.remove('drag-over');
         const files = e.dataTransfer.files;
-        // DataTransferでinputのfilesを置き換え
         const dt = new DataTransfer();
         for (const f of files) dt.items.add(f);
         input.files = dt.files;
@@ -46,8 +47,12 @@ function updateSelected(files, container) {
 
 setupDropZone('jinjer-drop-zone', 'jinjer-input', 'jinjer-selected', false);
 setupDropZone('timesheet-drop-zone', 'timesheet-input', 'timesheet-selected', true);
+setupDropZone('calendar-drop-zone', 'calendar-input', 'calendar-selected', true);
+setupDropZone('legend-drop-zone', 'legend-input', 'legend-selected', true);
 
-// フォーム送信
+// =============================================================================
+// グローバル状態
+// =============================================================================
 const form = document.getElementById('upload-form');
 const runBtn = document.getElementById('run-btn');
 const progressArea = document.getElementById('progress-area');
@@ -55,14 +60,88 @@ const progressBar = document.getElementById('progress-bar');
 const progressMessage = document.getElementById('progress-message');
 const errorArea = document.getElementById('error-area');
 const resultArea = document.getElementById('result-area');
+const csvExportArea = document.getElementById('csv-export-area');
 
 let progressStep = 0;
 
+// 凡例レビューに必要な状態
+let pendingSessionId = null;
+let pendingCodeSheets = [];
+let pendingMode = 'match';  // match | csv_export
+
+// =============================================================================
+// モード切替UI
+// =============================================================================
+function getCurrentMode() {
+    const checked = document.querySelector('input[name="mode"]:checked');
+    return checked ? checked.value : 'match';
+}
+
+function applyModeUI(mode) {
+    const jinjerSection = document.getElementById('jinjer-section');
+    const timesheetSection = document.getElementById('timesheet-section');
+    const calendarSection = document.getElementById('calendar-section');
+    const legendSection = document.getElementById('legend-section');
+    const jinjerRequiredTag = document.getElementById('jinjer-required-tag');
+    const jinjerOptionalTag = document.getElementById('jinjer-optional-tag');
+    const jinjerInput = document.getElementById('jinjer-input');
+    const timesheetInput = document.getElementById('timesheet-input');
+    const calendarInput = document.getElementById('calendar-input');
+    const legendInput = document.getElementById('legend-input');
+    const settingsSection = document.getElementById('settings-section');
+    const runBtn = document.getElementById('run-btn');
+
+    if (mode === 'csv_export') {
+        // 突合モード専用UIを非表示・無効化（FormDataから除外）
+        if (jinjerSection) jinjerSection.style.display = 'none';
+        if (timesheetSection) timesheetSection.style.display = 'none';
+        if (jinjerInput) jinjerInput.disabled = true;
+        if (timesheetInput) timesheetInput.disabled = true;
+
+        // CSV変換モード専用UIを表示・有効化
+        if (calendarSection) calendarSection.style.display = '';
+        if (legendSection) legendSection.style.display = '';
+        if (calendarInput) calendarInput.disabled = false;
+        if (legendInput) legendInput.disabled = false;
+
+        // 許容差分は不要
+        if (settingsSection) settingsSection.style.display = 'none';
+        if (runBtn) runBtn.textContent = 'CSV変換実行';
+    } else {
+        // 突合モード専用UIを表示・有効化
+        if (jinjerSection) jinjerSection.style.display = '';
+        if (timesheetSection) timesheetSection.style.display = '';
+        if (jinjerInput) jinjerInput.disabled = false;
+        if (timesheetInput) timesheetInput.disabled = false;
+        if (jinjerRequiredTag) jinjerRequiredTag.style.display = 'inline-block';
+        if (jinjerOptionalTag) jinjerOptionalTag.style.display = 'none';
+
+        // CSV変換モード専用UIを非表示・無効化
+        if (calendarSection) calendarSection.style.display = 'none';
+        if (legendSection) legendSection.style.display = 'none';
+        if (calendarInput) calendarInput.disabled = true;
+        if (legendInput) legendInput.disabled = true;
+
+        if (settingsSection) settingsSection.style.display = '';
+        if (runBtn) runBtn.textContent = 'チェック実行';
+    }
+}
+
+document.querySelectorAll('input[name="mode"]').forEach(radio => {
+    radio.addEventListener('change', () => applyModeUI(getCurrentMode()));
+});
+applyModeUI(getCurrentMode());
+
+// =============================================================================
+// フォーム送信
+// =============================================================================
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    pendingMode = getCurrentMode();
     startProcessing();
 
     const formData = new FormData(form);
+    if (!formData.has('mode')) formData.append('mode', pendingMode);
     try {
         const response = await fetch('/upload', {
             method: 'POST',
@@ -77,25 +156,32 @@ form.addEventListener('submit', async (e) => {
             return;
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        await consumeSSEResponse(response);
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const parts = buffer.split('\n\n');
-            buffer = parts.pop();
-            for (const part of parts) {
-                processSSEPart(part);
-            }
-        }
     } catch (err) {
         showError('通信エラーが発生しました: ' + err.message);
         stopProcessing();
     }
 });
+
+
+async function consumeSSEResponse(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        for (const part of parts) {
+            processSSEPart(part);
+        }
+    }
+}
+
 
 function processSSEPart(part) {
     const lines = part.split('\n');
@@ -110,9 +196,17 @@ function processSSEPart(part) {
     if (!eventType || !data) return;
 
     if (eventType === 'progress') {
-        progressStep = Math.min(progressStep + 15, 85);
+        progressStep = Math.min(progressStep + 12, 80);
         progressBar.style.width = progressStep + '%';
         progressMessage.textContent = data.message || '処理中...';
+    } else if (eventType === 'code_review_needed') {
+        // 凡例レビュー画面を出す
+        progressArea.style.display = 'none';
+        pendingSessionId = data.session_id;
+        pendingCodeSheets = data.code_sheets || [];
+        pendingMode = data.mode || pendingMode || 'match';
+        openLegendModal(pendingCodeSheets);
+        stopProcessing(false);
     } else if (eventType === 'done') {
         progressBar.style.width = '100%';
         progressMessage.textContent = '完了！';
@@ -121,12 +215,23 @@ function processSSEPart(part) {
             showResult(data);
         }, 400);
         stopProcessing(false);
+    } else if (eventType === 'csv_export_done') {
+        progressBar.style.width = '100%';
+        progressMessage.textContent = '完了！';
+        setTimeout(() => {
+            progressArea.style.display = 'none';
+            showCsvExportResult(data);
+        }, 400);
+        stopProcessing(false);
     } else if (eventType === 'error') {
         showError(data.message || 'エラーが発生しました');
         stopProcessing();
     }
 }
 
+// =============================================================================
+// 進捗・結果表示
+// =============================================================================
 function startProcessing() {
     progressStep = 5;
     progressBar.style.width = progressStep + '%';
@@ -134,13 +239,15 @@ function startProcessing() {
     progressArea.style.display = 'block';
     errorArea.style.display = 'none';
     resultArea.style.display = 'none';
+    if (csvExportArea) csvExportArea.style.display = 'none';
     runBtn.disabled = true;
     runBtn.textContent = '処理中...';
 }
 
 function stopProcessing(hideProgress = true) {
     runBtn.disabled = false;
-    runBtn.textContent = 'チェック実行';
+    // モードに応じたボタンラベルに戻す
+    runBtn.textContent = (getCurrentMode() === 'csv_export') ? 'CSV変換実行' : 'チェック実行';
     if (hideProgress) progressArea.style.display = 'none';
 }
 
@@ -151,7 +258,7 @@ function showError(msg) {
 }
 
 function showResult(data) {
-    const { summary, table, excel_filename, unsubmitted } = data;
+    const { summary, table, excel_filename, unsubmitted, new_template_filename, new_template_count } = data;
 
     document.getElementById('cnt-ok').textContent = summary.ok;
     document.getElementById('cnt-ng').textContent = summary.ng;
@@ -192,6 +299,21 @@ function showResult(data) {
         downloadLink.style.display = 'inline-block';
     }
 
+    // 新規雛形 CSV
+    const newTplLink = document.getElementById('new-template-link');
+    const newTplMsg = document.getElementById('new-template-msg');
+    if (new_template_filename) {
+        newTplLink.href = '/download/' + encodeURIComponent(new_template_filename);
+        newTplLink.style.display = 'inline-block';
+        newTplMsg.textContent =
+            `✨ jinjer の既存雛形に該当しない記号が ${new_template_count} 件ありました。` +
+            `新規雛形 CSV を生成したので、jinjer にそのままインポートできます。`;
+        newTplMsg.style.display = 'block';
+    } else {
+        newTplLink.style.display = 'none';
+        newTplMsg.style.display = 'none';
+    }
+
     resultArea.style.display = 'block';
     resultArea.scrollIntoView({ behavior: 'smooth' });
 }
@@ -225,4 +347,499 @@ function renderTable(rows) {
         });
         tbody.appendChild(tr);
     }
+}
+
+// =============================================================================
+// 凡例レビューモーダル
+// =============================================================================
+const legendModal = document.getElementById('legend-modal');
+const legendModalClose = document.getElementById('legend-modal-close');
+const legendCancelBtn = document.getElementById('legend-cancel-btn');
+const legendConfirmBtn = document.getElementById('legend-confirm-btn');
+const legendSheetsContainer = document.getElementById('legend-sheets-container');
+
+function openLegendModal(sheets) {
+    legendSheetsContainer.innerHTML = '';
+    sheets.forEach((sheet, sheetIdx) => {
+        legendSheetsContainer.appendChild(renderLegendSheet(sheet, sheetIdx));
+    });
+    legendModal.style.display = 'flex';
+}
+
+function closeLegendModal() {
+    legendModal.style.display = 'none';
+    pendingSessionId = null;
+    pendingCodeSheets = [];
+}
+
+legendModalClose.addEventListener('click', closeLegendModal);
+legendCancelBtn.addEventListener('click', closeLegendModal);
+legendModal.addEventListener('click', (e) => {
+    if (e.target === legendModal) closeLegendModal();
+});
+
+function renderLegendSheet(sheet, sheetIdx) {
+    const wrap = document.createElement('div');
+    wrap.className = 'legend-sheet';
+    wrap.dataset.sheetIdx = sheetIdx;
+
+    const header = document.createElement('div');
+    header.className = 'legend-sheet-header';
+    const empCount = (sheet.employees && sheet.employees.length) || 0;
+    header.innerHTML = `
+        <span>📄 ${escapeHtml(sheet.filename || '勤務表')}</span>
+        <span class="legend-sheet-header-meta">従業員 ${empCount}人</span>
+    `;
+    wrap.appendChild(header);
+
+    // 対象年月（CSV変換モードでは必須）
+    const ymRow = document.createElement('div');
+    ymRow.className = 'legend-ym-row';
+    ymRow.innerHTML = `
+        <label>対象年月:
+            <input type="number" data-ym="year" value="${sheet.year || ''}" placeholder="2026" min="2000" max="2099" style="width:80px">
+            年
+            <input type="number" data-ym="month" value="${sheet.month || ''}" placeholder="4" min="1" max="12" style="width:60px">
+            月
+        </label>
+        <span class="legend-ym-hint">※CSV変換モードでは必須</span>
+    `;
+    wrap.appendChild(ymRow);
+
+    // 従業員氏名（手入力で修正可）
+    wrap.appendChild(renderEmployeesEditor(sheet, sheetIdx));
+
+    // 雛形マッチ結果（あれば表示用に使う）
+    const tmMatched = (sheet.template_match && sheet.template_match.matched) || [];
+    const tmMatchedMap = {};
+    tmMatched.forEach(m => { tmMatchedMap[m.code] = m; });
+
+    const table = document.createElement('table');
+    table.className = 'legend-table';
+    table.innerHTML = `
+        <thead>
+            <tr>
+                <th>記号</th>
+                <th>種別</th>
+                <th>出勤</th>
+                <th>退勤</th>
+                <th>休憩(分)</th>
+                <th>休?</th>
+                <th>jinjer 雛形</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    `;
+    const tbody = table.querySelector('tbody');
+
+    const legend = sheet.legend || [];
+    legend.forEach((entry, rowIdx) => {
+        tbody.appendChild(renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap));
+    });
+
+    wrap.appendChild(table);
+
+    const actions = document.createElement('div');
+    actions.className = 'legend-actions';
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'btn-mini btn-mini-add';
+    addBtn.textContent = '＋ 記号を追加';
+    addBtn.addEventListener('click', () => {
+        const newEntry = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
+        const idx = tbody.children.length;
+        tbody.appendChild(renderLegendRow(newEntry, sheetIdx, idx, tmMatchedMap));
+        // sheet.legend にも反映するため、最後に取得時に DOM から読む
+    });
+    actions.appendChild(addBtn);
+    wrap.appendChild(actions);
+
+    return wrap;
+}
+
+function renderEmployeesEditor(sheet, sheetIdx) {
+    const wrap = document.createElement('div');
+    wrap.className = 'legend-employees';
+
+    const title = document.createElement('div');
+    title.className = 'legend-employees-title';
+    title.innerHTML = '👥 従業員氏名 <span class="legend-employees-hint">jinjer に登録されている氏名（漢字）と一致するように入力してください</span>';
+    wrap.appendChild(title);
+
+    const tbl = document.createElement('table');
+    tbl.className = 'legend-employees-table';
+    tbl.innerHTML = `
+        <thead>
+            <tr>
+                <th style="width:50%">氏名</th>
+                <th style="width:30%">シフト件数</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    `;
+    const tbody = tbl.querySelector('tbody');
+
+    const employees = sheet.employees || [];
+    employees.forEach((emp, empIdx) => {
+        tbody.appendChild(renderEmployeeRow(emp, empIdx));
+    });
+
+    if (employees.length === 0) {
+        const tr = document.createElement('tr');
+        tr.className = 'legend-employees-empty';
+        tr.innerHTML = `<td colspan="3">⚠️ 画像から従業員を抽出できませんでした。下の「+ 従業員を追加」から手動で追加してください（ただしシフトは画像から取得できないため、CSV変換は出来ません）。</td>`;
+        tbody.appendChild(tr);
+    }
+
+    wrap.appendChild(tbl);
+
+    return wrap;
+}
+
+function renderEmployeeRow(emp, empIdx) {
+    const tr = document.createElement('tr');
+    tr.dataset.empIdx = empIdx;
+
+    const nameTd = document.createElement('td');
+    const nameInp = document.createElement('input');
+    nameInp.type = 'text';
+    nameInp.placeholder = '例: 田村桃子';
+    const rawName = (emp && emp.name) ? String(emp.name) : '';
+    // Claude が "不明" を入れていた場合は空欄にして、ユーザーに必ず手入力させる
+    nameInp.value = (rawName === '不明') ? '' : rawName;
+    nameInp.dataset.field = 'employee_name';
+    nameInp.className = 'legend-employee-name-input';
+    nameTd.appendChild(nameInp);
+    tr.appendChild(nameTd);
+
+    const cntTd = document.createElement('td');
+    const shiftCount = (emp && emp.shifts) ? emp.shifts.length : 0;
+    cntTd.textContent = `${shiftCount} 日分`;
+    cntTd.className = 'legend-employee-shift-count';
+    tr.appendChild(cntTd);
+
+    const delTd = document.createElement('td');
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn-mini btn-mini-danger';
+    delBtn.textContent = '🗑';
+    delBtn.title = 'この従業員を除外';
+    delBtn.addEventListener('click', () => tr.remove());
+    delTd.appendChild(delBtn);
+    tr.appendChild(delTd);
+
+    return tr;
+}
+
+function renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap) {
+    const tr = document.createElement('tr');
+    tr.dataset.rowIdx = rowIdx;
+    if (entry.is_off) tr.classList.add('legend-row-off');
+
+    const codeTd = document.createElement('td');
+    codeTd.appendChild(makeInput(entry.code || '', 'code'));
+    tr.appendChild(codeTd);
+
+    const labelTd = document.createElement('td');
+    labelTd.appendChild(makeInput(entry.label || '', 'label'));
+    tr.appendChild(labelTd);
+
+    const startTd = document.createElement('td');
+    startTd.appendChild(makeInput(entry.start_time || '', 'start_time', '12:30'));
+    tr.appendChild(startTd);
+
+    const endTd = document.createElement('td');
+    endTd.appendChild(makeInput(entry.end_time || '', 'end_time', '21:00'));
+    tr.appendChild(endTd);
+
+    const breakTd = document.createElement('td');
+    const breakInput = document.createElement('input');
+    breakInput.type = 'number';
+    breakInput.min = '0';
+    breakInput.step = '5';
+    breakInput.value = entry.break_minutes || 0;
+    breakInput.dataset.field = 'break_minutes';
+    breakTd.appendChild(breakInput);
+    tr.appendChild(breakTd);
+
+    const offTd = document.createElement('td');
+    const offChk = document.createElement('input');
+    offChk.type = 'checkbox';
+    offChk.checked = !!entry.is_off;
+    offChk.dataset.field = 'is_off';
+    offChk.addEventListener('change', () => {
+        if (offChk.checked) tr.classList.add('legend-row-off');
+        else tr.classList.remove('legend-row-off');
+    });
+    offTd.appendChild(offChk);
+    tr.appendChild(offTd);
+
+    const tplTd = document.createElement('td');
+    const matched = tmMatchedMap[entry.code];
+    if (matched) {
+        const tag = document.createElement('span');
+        tag.className = 'legend-template-tag';
+        tag.textContent = `No${matched.template_no} ${matched.template_name}`;
+        tag.title = `既存雛形にマッチ: ${matched.template_name}`;
+        tplTd.appendChild(tag);
+    } else if (!entry.is_off && entry.start_time) {
+        const tag = document.createElement('span');
+        tag.className = 'legend-template-tag unmatched';
+        tag.textContent = '新規雛形候補';
+        tag.title = '既存雛形にマッチしない → 新規雛形 CSV に追加されます';
+        tplTd.appendChild(tag);
+    }
+    tr.appendChild(tplTd);
+
+    const delTd = document.createElement('td');
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn-mini btn-mini-danger';
+    delBtn.textContent = '🗑';
+    delBtn.title = 'この行を削除';
+    delBtn.addEventListener('click', () => tr.remove());
+    delTd.appendChild(delBtn);
+    tr.appendChild(delTd);
+
+    return tr;
+}
+
+function makeInput(value, field, placeholder = '') {
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = value;
+    inp.dataset.field = field;
+    if (placeholder) inp.placeholder = placeholder;
+    return inp;
+}
+
+function collectLegendFromUI() {
+    const sheets = [];
+    legendSheetsContainer.querySelectorAll('.legend-sheet').forEach(sheetEl => {
+        const sheetIdx = parseInt(sheetEl.dataset.sheetIdx, 10);
+        const original = pendingCodeSheets[sheetIdx];
+        if (!original) return;
+
+        const legend = [];
+        // .legend-table の tbody のみを対象にする（従業員テーブルと混ざらないように）
+        const legendTable = sheetEl.querySelector('.legend-table');
+        if (legendTable) {
+            legendTable.querySelectorAll('tbody tr').forEach(tr => {
+                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
+                tr.querySelectorAll('input').forEach(inp => {
+                    const f = inp.dataset.field;
+                    if (!f) return;
+                    if (f === 'is_off') obj[f] = inp.checked;
+                    else if (f === 'break_minutes') obj[f] = parseInt(inp.value, 10) || 0;
+                    else obj[f] = inp.value.trim();
+                });
+                if (obj.code) legend.push(obj);
+            });
+        }
+
+        // 従業員：UI で編集された氏名で原データの name を上書きする
+        const employees = [];
+        const empTable = sheetEl.querySelector('.legend-employees-table');
+        if (empTable) {
+            empTable.querySelectorAll('tbody tr').forEach(tr => {
+                if (tr.classList.contains('legend-employees-empty')) return;
+                const empIdx = parseInt(tr.dataset.empIdx, 10);
+                const nameInp = tr.querySelector('input[data-field="employee_name"]');
+                if (!nameInp) return;
+                const editedName = nameInp.value.trim();
+                const originalEmp = (original.employees || [])[empIdx];
+                if (!originalEmp) return;
+                employees.push({
+                    name: editedName || originalEmp.name || '不明',
+                    shifts: originalEmp.shifts || [],
+                });
+            });
+        }
+
+        // 対象年月を取得
+        const yearInp = sheetEl.querySelector('input[data-ym="year"]');
+        const monthInp = sheetEl.querySelector('input[data-ym="month"]');
+        const year = yearInp && yearInp.value ? parseInt(yearInp.value, 10) : original.year;
+        const month = monthInp && monthInp.value ? parseInt(monthInp.value, 10) : original.month;
+
+        sheets.push({
+            filename: original.filename,
+            legend: legend,
+            off_markers: original.off_markers || [],
+            employees: employees,
+            year: year,
+            month: month,
+        });
+    });
+    return sheets;
+}
+
+legendConfirmBtn.addEventListener('click', async () => {
+    const sheets = collectLegendFromUI();
+    if (sheets.length === 0) {
+        alert('凡例が空です');
+        return;
+    }
+
+    // CSV変換モードでは年月必須
+    if (pendingMode === 'csv_export') {
+        for (const s of sheets) {
+            if (!s.year || !s.month) {
+                alert(`「${s.filename}」の対象年月を入力してください`);
+                return;
+            }
+            if (!s.employees || s.employees.length === 0) {
+                alert(`「${s.filename}」に従業員がいません。氏名を入力してください。`);
+                return;
+            }
+            const blank = s.employees.filter(e => !e.name || e.name === '不明');
+            if (blank.length > 0) {
+                alert(`「${s.filename}」に氏名が未入力の従業員が ${blank.length} 名います。jinjer に登録されている氏名を入力してください。`);
+                return;
+            }
+        }
+    }
+
+    const endpoint = (pendingMode === 'csv_export') ? '/export_jinjer_csv' : '/resolve_and_match';
+
+    legendModal.style.display = 'none';
+    startProcessing();
+    progressMessage.textContent = (pendingMode === 'csv_export')
+        ? 'jinjer インポート用 CSV を生成中...'
+        : '凡例を解決して突合中...';
+
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream',
+            },
+            body: JSON.stringify({
+                session_id: pendingSessionId,
+                sheets: sheets,
+            }),
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            showError(data.errors ? data.errors.join('<br>') : 'エラーが発生しました');
+            stopProcessing();
+            return;
+        }
+
+        await consumeSSEResponse(response);
+
+    } catch (err) {
+        showError('通信エラーが発生しました: ' + err.message);
+        stopProcessing();
+    }
+});
+
+// =============================================================================
+// CSV変換モード結果表示
+// =============================================================================
+function showCsvExportResult(data) {
+    const { csv_files, missing_ids, merges, new_template_filename, new_template_count } = data;
+
+    const list = document.getElementById('csv-files-list');
+    list.innerHTML = '';
+    (csv_files || []).forEach(f => {
+        const item = document.createElement('div');
+        item.className = 'csv-file-item';
+        const groupTag = f.attendance_group_name
+            ? `<span class="csv-file-group-tag">🕒 ${escapeHtml(f.attendance_group_name)}</span>`
+            : '';
+        item.innerHTML = `
+            <div>
+                <div class="csv-file-info">
+                    📄 ${escapeHtml(f.filename)}
+                    ${groupTag}
+                </div>
+                <div class="csv-file-meta">
+                    対象: ${escapeHtml(f.source)} / ${f.year}年${f.month}月 / ${f.rows}人分
+                </div>
+            </div>
+            <a href="/download/${encodeURIComponent(f.filename)}" class="csv-file-download">
+                ⬇ ダウンロード
+            </a>
+        `;
+        list.appendChild(item);
+    });
+
+    // 複数ファイルあるときのアナウンス
+    const splitNote = document.getElementById('csv-split-note');
+    if (splitNote) {
+        if ((csv_files || []).length > 1) {
+            splitNote.textContent = `📦 ${csv_files.length} ファイル に自動分割しました（jinjer の月次スケジュール CSV は 1 ファイルに別グループの従業員を混在させると全行エラーになるため、打刻グループごとに分けて出力しています）。それぞれを対応する打刻グループの画面でアップロードしてください。`;
+            splitNote.style.display = 'block';
+        } else {
+            splitNote.style.display = 'none';
+        }
+    }
+
+    const warnArea = document.getElementById('missing-ids-warn');
+    const warnList = document.getElementById('missing-ids-list');
+    if (missing_ids && missing_ids.length > 0) {
+        warnList.textContent = missing_ids.join(' / ');
+        warnArea.style.display = 'block';
+    } else {
+        warnArea.style.display = 'none';
+    }
+
+    // 深夜跨ぎ統合のトレース表示
+    const mergesArea = document.getElementById('merges-area');
+    const mergesList = document.getElementById('merges-list');
+    if (mergesArea && mergesList) {
+        mergesList.innerHTML = '';
+        if (merges && merges.length > 0) {
+            merges.forEach(m => {
+                const row = document.createElement('div');
+                row.className = 'merge-item';
+                const ymPrefix = (m.year && m.month) ? `${m.year}/${m.month}` : '';
+                row.innerHTML = `
+                    <div class="merge-name">👤 ${escapeHtml(m.name)}</div>
+                    <div class="merge-detail">
+                        ${escapeHtml(ymPrefix)}/${m.day_n}（${escapeHtml(m.code1)}＝${escapeHtml(m.label1)}）
+                        ＋
+                        ${escapeHtml(ymPrefix)}/${m.day_n_plus_1}（${escapeHtml(m.code2)}＝${escapeHtml(m.label2)}）
+                        →
+                        <strong>${escapeHtml(m.merged_start)}-${escapeHtml(m.merged_end)}</strong>
+                        <span class="merge-cell-tag">${escapeHtml(m.cell_value)}</span>
+                    </div>
+                `;
+                mergesList.appendChild(row);
+            });
+            mergesArea.style.display = 'block';
+        } else {
+            mergesArea.style.display = 'none';
+        }
+    }
+
+    const tplMsg = document.getElementById('csv-new-template-msg');
+    if (new_template_filename) {
+        tplMsg.innerHTML =
+            `✨ jinjer の既存雛形に該当しない記号が ${new_template_count} 件ありました。<br>` +
+            `新規雛形CSVも生成済みです: ` +
+            `<a href="/download/${encodeURIComponent(new_template_filename)}" style="color:#4a148c; font-weight:bold; text-decoration:underline">` +
+            `📥 ${escapeHtml(new_template_filename)}</a>`;
+        tplMsg.style.display = 'block';
+    } else {
+        tplMsg.style.display = 'none';
+    }
+
+    csvExportArea.style.display = 'block';
+    csvExportArea.scrollIntoView({ behavior: 'smooth' });
+}
+
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }

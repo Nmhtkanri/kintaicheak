@@ -5,3 +5,4 @@ pdfplumber
 Pillow
 anthropic
 python-dotenv
+requests

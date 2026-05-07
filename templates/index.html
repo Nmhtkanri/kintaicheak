@@ -12,9 +12,31 @@
 
     <form id="upload-form" enctype="multipart/form-data">
 
+        <!-- モード選択 -->
+        <div class="mode-selector">
+            <label class="mode-option">
+                <input type="radio" name="mode" value="match" checked>
+                <span class="mode-card">
+                    <span class="mode-title">📊 突合モード</span>
+                    <span class="mode-desc">jinjer CSV と勤務表を突き合わせて差分検出</span>
+                </span>
+            </label>
+            <label class="mode-option">
+                <input type="radio" name="mode" value="csv_export">
+                <span class="mode-card">
+                    <span class="mode-title">📤 CSV変換モード</span>
+                    <span class="mode-desc">勤務表（記号式）→ jinjerインポート用CSVに変換</span>
+                </span>
+            </label>
+        </div>
+
         <!-- jinjer CSV -->
-        <div class="upload-section">
-            <div class="section-title">jinjer 勤怠CSV</div>
+        <div class="upload-section" id="jinjer-section">
+            <div class="section-title">
+                jinjer 勤怠CSV
+                <span class="required-tag" id="jinjer-required-tag">必須</span>
+                <span class="optional-tag" id="jinjer-optional-tag" style="display:none">任意</span>
+            </div>
             <div class="drop-zone" id="jinjer-drop-zone" data-input="jinjer_csv">
                 <div class="drop-zone-inner">
                     <div class="drop-icon">📂</div>
@@ -29,8 +51,8 @@
             </div>
         </div>
 
-        <!-- 勤務表 -->
-        <div class="upload-section">
+        <!-- 勤務表（突合モード用） -->
+        <div class="upload-section" id="timesheet-section">
             <div class="section-title">勤務表ファイル（複数選択可）</div>
             <div class="drop-zone" id="timesheet-drop-zone" data-input="timesheet_files">
                 <div class="drop-zone-inner">
@@ -47,8 +69,45 @@
             </div>
         </div>
 
-        <!-- 設定 -->
-        <div class="settings-section">
+        <!-- カレンダー画像（CSV変換モード用） -->
+        <div class="upload-section" id="calendar-section" style="display:none">
+            <div class="section-title">📅 カレンダー画像（シフト表）</div>
+            <div class="drop-zone" id="calendar-drop-zone" data-input="timesheet_files">
+                <div class="drop-zone-inner">
+                    <div class="drop-icon">📅</div>
+                    <p>シフト表（誰が何日にどの記号で勤務するか）の画像をここにドラッグ&ドロップ、または</p>
+                    <label class="btn btn-secondary">
+                        ファイルを選択
+                        <input type="file" name="timesheet_files" id="calendar-input"
+                               accept=".xlsx,.xls,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
+                    </label>
+                    <p class="hint">対応形式: .xlsx .xls .pdf .png .jpg .jpeg</p>
+                </div>
+                <div class="selected-files" id="calendar-selected"></div>
+            </div>
+        </div>
+
+        <!-- スケジュール条件画像（CSV変換モード用） -->
+        <div class="upload-section" id="legend-section" style="display:none">
+            <div class="section-title">🗒️ スケジュール条件画像（凡例）</div>
+            <div class="drop-zone" id="legend-drop-zone" data-input="timesheet_files">
+                <div class="drop-zone-inner">
+                    <div class="drop-icon">🗒️</div>
+                    <p>記号と勤務時間の対応表（B = 12:30-21:00 など）の画像をここにドラッグ&ドロップ、または</p>
+                    <label class="btn btn-secondary">
+                        ファイルを選択
+                        <input type="file" name="timesheet_files" id="legend-input"
+                               accept=".xlsx,.xls,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
+                    </label>
+                    <p class="hint">対応形式: .xlsx .xls .pdf .png .jpg .jpeg</p>
+                    <p class="hint">※カレンダー側の画像に凡例も写っている場合は、こちらは空欄で OK です</p>
+                </div>
+                <div class="selected-files" id="legend-selected"></div>
+            </div>
+        </div>
+
+        <!-- 設定（突合モード時のみ表示） -->
+        <div class="settings-section" id="settings-section">
             <span class="settings-label">許容差分:</span>
             <input type="number" name="threshold" id="threshold" value="10" min="0" max="120" class="threshold-input">
             <span class="settings-label">分</span>
@@ -133,8 +192,59 @@
             <a id="download-link" href="#" class="btn btn-download" style="display:none">
                 📥 結果Excelをダウンロード
             </a>
+            <a id="new-template-link" href="#" class="btn btn-download" style="display:none; margin-left:8px; background:#8e44ad;">
+                ✨ 新規雛形CSVをダウンロード
+            </a>
         </div>
+        <div id="new-template-msg" class="new-template-msg" style="display:none"></div>
     </div>
 
+    <!-- CSV変換モード結果エリア -->
+    <div id="csv-export-area" style="display:none">
+        <hr class="divider">
+        <div class="section-title">📤 jinjerカレンダー用CSVをエクスポート</div>
+        <div id="csv-split-note" class="csv-split-note" style="display:none"></div>
+        <div id="csv-files-list" class="csv-files-list"></div>
+
+        <div id="missing-ids-warn" class="alert alert-warning" style="display:none; margin-top: 12px;">
+            <strong>⚠️ 従業員IDが取得できなかった人がいます:</strong>
+            <span id="missing-ids-list"></span>
+            <p style="margin-top:6px; font-size:12px">CSVの該当行は ID が空欄になっています。jinjer 画面で手動補完してください。</p>
+        </div>
+
+        <div id="merges-area" style="display:none; margin-top: 12px;">
+            <div class="section-title" style="font-size:14px">🔗 深夜跨ぎシフトの自動統合</div>
+            <p class="hint" style="margin:4px 0 8px 0">以下の連続日シフトを1本に統合しました。翌日のセルは休扱い（所/法）になっています。</p>
+            <div id="merges-list" class="merges-list"></div>
+        </div>
+
+        <div id="csv-new-template-msg" class="new-template-msg" style="display:none"></div>
+    </div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- 凡例レビューモーダル（シフト記号モード時に表示）                 -->
+<!-- ============================================================ -->
+<div id="legend-modal" class="modal-overlay" style="display:none">
+    <div class="modal-content modal-wide">
+        <div class="modal-header">
+            <h3>📖 抽出された凡例の確認</h3>
+            <button type="button" class="modal-close" id="legend-modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+            <p class="modal-intro">
+                シフト記号で書かれた勤務表が検出されました。<br>
+                抽出された凡例を確認・修正してから「この凡例で実行」を押してください。
+            </p>
+            <div id="legend-sheets-container"></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="legend-cancel-btn">キャンセル</button>
+            <button type="button" class="btn btn-primary" id="legend-confirm-btn">
+                ✅ この凡例で実行
+            </button>
+        </div>
+    </div>
 </div>
 {% endblock %}
