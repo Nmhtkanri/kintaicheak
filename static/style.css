@@ -476,6 +476,10 @@ body {
     background: #f8d7da;
     color: #888;
 }
+.legend-table .legend-row-name-input {
+    text-align: left;
+    min-width: 110px;
+}
 .legend-template-tag {
     display: inline-block;
     background: #d1ecf1;

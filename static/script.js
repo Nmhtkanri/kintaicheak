@@ -419,6 +419,7 @@ function renderLegendSheet(sheet, sheetIdx) {
     table.innerHTML = `
         <thead>
             <tr>
+                <th>氏名</th>
                 <th>記号</th>
                 <th>種別</th>
                 <th>出勤</th>
@@ -442,12 +443,39 @@ function renderLegendSheet(sheet, sheetIdx) {
 
     const actions = document.createElement('div');
     actions.className = 'legend-actions';
+
+    const addEmpBtn = document.createElement('button');
+    addEmpBtn.type = 'button';
+    addEmpBtn.className = 'btn-mini btn-mini-add';
+    addEmpBtn.textContent = '＋ 従業員を追加';
+    addEmpBtn.style.marginRight = '8px';
+    addEmpBtn.addEventListener('click', () => {
+        const empTbody = wrap.querySelector('.legend-employees-table tbody');
+        if (!empTbody) return;
+        // 「画像から抽出できませんでした」の placeholder 行は除去する
+        const emptyRow = empTbody.querySelector('.legend-employees-empty');
+        if (emptyRow) emptyRow.remove();
+        if (!sheet.employees) sheet.employees = [];
+        const newEmp = { name: '', shifts: [] };
+        sheet.employees.push(newEmp);
+        const newIdx = sheet.employees.length - 1;
+        const row = renderEmployeeRow(newEmp, newIdx);
+        row.dataset.isNew = '1';
+        empTbody.appendChild(row);
+        const inp = row.querySelector('input[data-field="employee_name"]');
+        if (inp) inp.focus();
+        // ヘッダーの従業員人数表示を更新
+        const meta = wrap.querySelector('.legend-sheet-header-meta');
+        if (meta) meta.textContent = `従業員 ${sheet.employees.length}人`;
+    });
+    actions.appendChild(addEmpBtn);
+
     const addBtn = document.createElement('button');
     addBtn.type = 'button';
     addBtn.className = 'btn-mini btn-mini-add';
     addBtn.textContent = '＋ 記号を追加';
     addBtn.addEventListener('click', () => {
-        const newEntry = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
+        const newEntry = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false, name: '' };
         const idx = tbody.children.length;
         tbody.appendChild(renderLegendRow(newEntry, sheetIdx, idx, tmMatchedMap));
         // sheet.legend にも反映するため、最後に取得時に DOM から読む
@@ -538,6 +566,12 @@ function renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap) {
     tr.dataset.rowIdx = rowIdx;
     if (entry.is_off) tr.classList.add('legend-row-off');
 
+    const nameTd = document.createElement('td');
+    const nameInp = makeInput(entry.name || '', 'name', '例: 田村桃子');
+    nameInp.classList.add('legend-row-name-input');
+    nameTd.appendChild(nameInp);
+    tr.appendChild(nameTd);
+
     const codeTd = document.createElement('td');
     codeTd.appendChild(makeInput(entry.code || '', 'code'));
     tr.appendChild(codeTd);
@@ -627,7 +661,7 @@ function collectLegendFromUI() {
         const legendTable = sheetEl.querySelector('.legend-table');
         if (legendTable) {
             legendTable.querySelectorAll('tbody tr').forEach(tr => {
-                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
+                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false, name: '' };
                 tr.querySelectorAll('input').forEach(inp => {
                     const f = inp.dataset.field;
                     if (!f) return;
@@ -640,21 +674,31 @@ function collectLegendFromUI() {
         }
 
         // 従業員：UI で編集された氏名で原データの name を上書きする
+        // 「＋ 従業員を追加」で UI から手動追加された行は original.employees に存在しないので、
+        // その場合は新規として扱う（shifts は空）。
         const employees = [];
         const empTable = sheetEl.querySelector('.legend-employees-table');
         if (empTable) {
             empTable.querySelectorAll('tbody tr').forEach(tr => {
                 if (tr.classList.contains('legend-employees-empty')) return;
-                const empIdx = parseInt(tr.dataset.empIdx, 10);
                 const nameInp = tr.querySelector('input[data-field="employee_name"]');
                 if (!nameInp) return;
                 const editedName = nameInp.value.trim();
+                const empIdx = parseInt(tr.dataset.empIdx, 10);
                 const originalEmp = (original.employees || [])[empIdx];
-                if (!originalEmp) return;
-                employees.push({
-                    name: editedName || originalEmp.name || '不明',
-                    shifts: originalEmp.shifts || [],
-                });
+                if (originalEmp) {
+                    employees.push({
+                        name: editedName || originalEmp.name || '不明',
+                        shifts: originalEmp.shifts || [],
+                    });
+                } else {
+                    // UI で新規追加された従業員（画像から抽出できなかったケースなど）
+                    if (!editedName) return;
+                    employees.push({
+                        name: editedName,
+                        shifts: [],
+                    });
+                }
             });
         }
 
