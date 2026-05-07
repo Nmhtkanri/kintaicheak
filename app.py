@@ -707,7 +707,7 @@ def _build_done_payload(result_df, excel_filename, unsubmitted_names):
 def download(filename):
     """結果Excelファイルのダウンロード"""
     safe_name = os.path.basename(filename)
-    return send_from_directory(Config.OUTPUT_FOLDER, safe_name, as_attachment=True)
+    return send_from_directory(os.path.abspath(Config.OUTPUT_FOLDER), safe_name, as_attachment=True)
 
 
 @app.route("/api/status")
