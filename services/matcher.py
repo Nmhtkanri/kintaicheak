@@ -12,8 +12,28 @@ def normalize_name(name):
     name = unicodedata.normalize("NFKC", name)
     name = name.strip()
     name = name.replace("\u3000", " ")  # 全角スペース→半角スペース
+    name = re.sub(r'[,\u3001\uff0c]', '', name)  # カンマ類を除去
     name = re.sub(r'\s+', '', name)    # スペース全除去
     return name
+
+
+def normalize_name_keys(name):
+    """氏名の照合候補キーを返す（SAPの「姓, 名」と逆順登録を吸収）"""
+    if not name or pd.isna(name):
+        return [""]
+
+    raw = unicodedata.normalize("NFKC", str(name)).strip().replace("\u3000", " ")
+    keys = [normalize_name(raw)]
+
+    comma_parts = [p.strip() for p in re.split(r'[,\u3001\uff0c]', raw) if p.strip()]
+    if len(comma_parts) == 2:
+        keys.append(normalize_name("".join(reversed(comma_parts))))
+
+    space_parts = [p.strip() for p in re.split(r'\s+', raw) if p.strip()]
+    if len(space_parts) == 2:
+        keys.append(normalize_name("".join(reversed(space_parts))))
+
+    return list(dict.fromkeys(k for k in keys if k))
 
 
 def _to_minutes(t):
@@ -59,8 +79,16 @@ def judge(row, threshold_minutes=10):
     sheet_start = _clean(sheet_start)
     sheet_end = _clean(sheet_end)
 
+    has_jinjer_row = pd.notna(row.get("jinjer_氏名")) and str(row.get("jinjer_氏名")) not in ["", "nan", "None"]
+
     # 1. 片方にしかデータがない場合
+    if jinjer_start is None and jinjer_end is None and sheet_start is None and sheet_end is None:
+        if has_jinjer_row:
+            return "データ欠損", "jinjer実績なし・勤務表側に勤怠なし"
+        return "データ欠損", "jinjer側にデータなし"
     if jinjer_start is None and jinjer_end is None:
+        if has_jinjer_row:
+            return "データ欠損", "jinjer実績なし・勤務表側で勤怠あり"
         return "データ欠損", "jinjer側にデータなし"
     if sheet_start is None and sheet_end is None:
         return "データ欠損", "勤務表側にデータなし"
@@ -107,6 +135,16 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     timesheet_df = timesheet_df.copy()
     jinjer_df["氏名_normalized"] = jinjer_df["氏名"].apply(normalize_name)
     timesheet_df["氏名_normalized"] = timesheet_df["氏名"].apply(normalize_name)
+    jinjer_name_keys = set(jinjer_df["氏名_normalized"].unique())
+
+    def choose_sheet_key(name):
+        for key in normalize_name_keys(name):
+            if key in jinjer_name_keys:
+                return key
+        keys = normalize_name_keys(name)
+        return keys[0] if keys else ""
+
+    timesheet_df["氏名_normalized"] = timesheet_df["氏名"].apply(choose_sheet_key)
 
     # 勤務表に含まれる社員の正規化名セット
     sheet_names = set(timesheet_df["氏名_normalized"].unique())

@@ -146,6 +146,8 @@ def parse_jinjer_csv(filepath):
     col_date    = _find_column(df.columns, mapping["日付"])
     col_start   = _find_column(df.columns, mapping["出勤時刻"])
     col_end     = _find_column(df.columns, mapping["退勤時刻"])
+    col_scheduled_start = _find_column(df.columns, ["出勤予定時刻"])
+    col_scheduled_end = _find_column(df.columns, ["退勤予定時刻"])
     col_comment = _find_column(df.columns, mapping["コメント"])
     col_comment2 = _find_column(df.columns, mapping.get("コメント2", []))
 
@@ -168,10 +170,13 @@ def parse_jinjer_csv(filepath):
         c2 = row.get(col_comment2) if col_comment2 else None
         comment = _merge_comments(c1, c2)
 
-        # スキップ条件: 氏名なし / 日付なし / 出退勤なし（休日行など）
+        scheduled_start = _parse_time(row.get(col_scheduled_start)) if col_scheduled_start else None
+        scheduled_end = _parse_time(row.get(col_scheduled_end)) if col_scheduled_end else None
+
+        # スキップ条件: 氏名なし / 日付なし / 実績も予定もない（休日行など）
         if not name or name in ("nan", "None") or date_val is None:
             continue
-        if start is None and end is None:
+        if start is None and end is None and scheduled_start is None and scheduled_end is None:
             continue
 
         records.append({

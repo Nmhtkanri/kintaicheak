@@ -205,6 +205,128 @@ def _parse_time_str(value):
     return None
 
 
+def _parse_excel_time(value):
+    """Excelセルの時刻値を datetime.time に変換"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, dt_time):
+        return value
+    if isinstance(value, datetime):
+        return value.time().replace(second=0, microsecond=0)
+    if hasattr(value, "to_pydatetime"):
+        try:
+            return value.to_pydatetime().time().replace(second=0, microsecond=0)
+        except Exception:
+            pass
+    if hasattr(value, "total_seconds"):
+        total_minutes = int(value.total_seconds() // 60)
+        return dt_time((total_minutes // 60) % 24, total_minutes % 60)
+
+    value_str = str(value).strip()
+    if not value_str or value_str in ("nan", "None", "NaT"):
+        return None
+
+    match = re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?$", value_str)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        try:
+            return dt_time(hour % 24, minute)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _parse_excel_date(value):
+    """Excelセルの日付値を datetime.date に変換"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if hasattr(value, "to_pydatetime"):
+        try:
+            return value.to_pydatetime().date()
+        except Exception:
+            pass
+
+    value_str = str(value).strip()
+    if not value_str or value_str in ("nan", "None", "NaT"):
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_sap_timesheet_excel(filepath):
+    """SAP/Fieldglass の勤怠取得フォーマットを直接 DataFrame 化する"""
+    if os.path.splitext(filepath)[1].lower() not in (".xlsx", ".xls"):
+        return None
+
+    try:
+        xls = pd.ExcelFile(filepath)
+    except Exception:
+        return None
+
+    required = {"スタッフ", "出勤時刻", "終了時刻", "時間エントリ日"}
+    frames = []
+    for sheet_name in xls.sheet_names:
+        try:
+            df = pd.read_excel(filepath, sheet_name=sheet_name, dtype=object)
+        except Exception:
+            continue
+
+        df.columns = [str(c).strip() for c in df.columns]
+        if not required.issubset(set(df.columns)):
+            continue
+
+        rows = []
+        for _, row in df.iterrows():
+            name = row.get("スタッフ")
+            if name is None or str(name).strip() in ("", "nan", "None"):
+                continue
+
+            work_date = _parse_excel_date(row.get("時間エントリ日"))
+            start = _parse_excel_time(row.get("出勤時刻"))
+            end = _parse_excel_time(row.get("終了時刻"))
+            if work_date is None or (start is None and end is None):
+                continue
+
+            rows.append({
+                "氏名": str(name).strip(),
+                "日付": work_date,
+                "出勤時刻": start,
+                "退勤時刻": end,
+                "コメント": None,
+                "データソース": "勤務表",
+            })
+
+        if rows:
+            frames.append(pd.DataFrame(rows))
+
+    if not frames:
+        return None
+
+    result = pd.concat(frames, ignore_index=True)
+    return result[["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"]]
+
+
 def parse_timesheet(filepath, progress_callback=None):
     """
     勤務表ファイル（Excel/PDF/画像）を解析して統一DataFrameを返す
@@ -217,6 +339,11 @@ def parse_timesheet(filepath, progress_callback=None):
     ext = os.path.splitext(filepath)[1].lower()
 
     if ext in (".xlsx", ".xls"):
+        sap_df = _parse_sap_timesheet_excel(filepath)
+        if sap_df is not None:
+            if progress_callback:
+                progress_callback(f"SAP勤怠データを直接解析しました: {len(sap_df)}件")
+            return sap_df
         if progress_callback:
             progress_callback("Excelファイルをテキスト変換中...")
         text = _excel_to_text(filepath)
@@ -287,6 +414,14 @@ def parse_timesheet_smart(filepath, progress_callback=None):
     """
     if progress_callback:
         progress_callback(f"ファイルを解析中... ({os.path.basename(filepath)})")
+
+    sap_df = _parse_sap_timesheet_excel(filepath)
+    if sap_df is not None:
+        return {
+            "mode": "direct",
+            "df": sap_df,
+            "filename": os.path.basename(filepath),
+        }
 
     file_content, file_type, media_type = _load_file_for_claude(filepath)
     result = parse_with_legend_extraction(file_content, file_type, media_type)
