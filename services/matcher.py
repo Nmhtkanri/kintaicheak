@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 import pandas as pd
 
 
@@ -50,6 +50,76 @@ def time_diff_minutes(t1, t2):
     if m1 is None or m2 is None:
         return None
     return m1 - m2
+
+
+def _is_midnight(value):
+    return isinstance(value, time) and value.hour == 0 and value.minute == 0
+
+
+def _next_date(value):
+    if isinstance(value, datetime):
+        return value.date() + timedelta(days=1)
+    if isinstance(value, date):
+        return value + timedelta(days=1)
+    return None
+
+
+def _split_jinjer_overnight_rows(jinjer_df, timesheet_df):
+    """SAP側が日跨ぎ勤務を2日分に分けている場合、jinjer側も突合用に2分割する。"""
+    if jinjer_df.empty or timesheet_df.empty:
+        return jinjer_df
+
+    sheet_keys = set()
+    for _, row in timesheet_df.iterrows():
+        key = row.get("氏名_normalized")
+        work_date = row.get("日付")
+        if not key or pd.isna(work_date):
+            continue
+        if _is_midnight(row.get("勤務表_退勤時刻")):
+            sheet_keys.add((key, work_date, "first"))
+        if _is_midnight(row.get("勤務表_出勤時刻")):
+            sheet_keys.add((key, work_date, "second"))
+
+    rows = []
+    for _, row in jinjer_df.iterrows():
+        start = row.get("jinjer_出勤時刻")
+        end = row.get("jinjer_退勤時刻")
+        work_date = row.get("日付")
+        next_work_date = _next_date(work_date)
+        is_overnight = (
+            isinstance(start, time)
+            and isinstance(end, time)
+            and _to_minutes(start) > _to_minutes(end)
+            and next_work_date is not None
+        )
+        should_split = is_overnight and (
+            (row.get("氏名_normalized"), work_date, "first") in sheet_keys
+            and (row.get("氏名_normalized"), next_work_date, "second") in sheet_keys
+        )
+
+        if not should_split:
+            rows.append(row.to_dict())
+            continue
+
+        first = row.to_dict()
+        first["jinjer_退勤時刻"] = time(0, 0)
+        rows.append(first)
+
+        second = row.to_dict()
+        second["日付"] = next_work_date
+        second["jinjer_出勤時刻"] = time(0, 0)
+        rows.append(second)
+
+    return pd.DataFrame(rows, columns=jinjer_df.columns)
+
+
+def _work_segment_key(start, end):
+    """同じ日付内の夜勤前半/後半が混ざらないようにする内部キー。"""
+    if _is_midnight(start) and not _is_midnight(end):
+        return "after_midnight"
+    if _is_midnight(end) and not _is_midnight(start):
+        return "before_midnight"
+    return "normal"
 
 
 def judge(row, threshold_minutes=10):
@@ -175,11 +245,21 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         "コメント": "勤務表_コメント",
     })
 
-    # outer join（氏名_normalized + 日付）— 対象は勤務表社員のみ
+    jinjer_renamed = _split_jinjer_overnight_rows(jinjer_renamed, sheet_renamed)
+    jinjer_renamed["突合区分"] = jinjer_renamed.apply(
+        lambda r: _work_segment_key(r.get("jinjer_出勤時刻"), r.get("jinjer_退勤時刻")),
+        axis=1,
+    )
+    sheet_renamed["突合区分"] = sheet_renamed.apply(
+        lambda r: _work_segment_key(r.get("勤務表_出勤時刻"), r.get("勤務表_退勤時刻")),
+        axis=1,
+    )
+
+    # outer join（氏名_normalized + 日付 + 突合区分）— 対象は勤務表社員のみ
     merged = pd.merge(
         jinjer_renamed,
         sheet_renamed,
-        on=["氏名_normalized", "日付"],
+        on=["氏名_normalized", "日付", "突合区分"],
         how="outer",
         suffixes=("", "_sheet")
     )

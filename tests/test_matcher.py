@@ -86,6 +86,26 @@ def test_normalize_name():
     assert normalize_name("ＡＢＣ") == "ABC"
 
 
+def test_overnight_jinjer_row_matches_split_sap_rows():
+    """jinjerの夜勤1行を、SAPの日跨ぎ2行と突合する"""
+    jinjer = make_df([
+        ("及川 航平", date(2026, 4, 3), time(16, 45), time(9, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("及川, 航平", date(2026, 4, 3), time(16, 45), time(0, 0)),
+        ("及川, 航平", date(2026, 4, 4), time(0, 0), time(9, 30)),
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert unsubmitted == []
+    assert len(result) == 2
+    assert result["判定"].tolist() == ["OK", "OK"]
+    assert result.iloc[0]["jinjer_退勤時刻"] == time(0, 0)
+    assert result.iloc[1]["jinjer_出勤時刻"] == time(0, 0)
+    assert result.iloc[1]["jinjer_退勤時刻"] == time(9, 30)
+
+
 if __name__ == "__main__":
     test_ok()
     test_ng()

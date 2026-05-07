@@ -1,5 +1,6 @@
 import anthropic
 import base64
+import csv
 import json
 import time
 import logging
@@ -274,9 +275,75 @@ def _parse_excel_date(value):
     return None
 
 
-def _parse_sap_timesheet_excel(filepath):
+def _read_text_auto_encoding(filepath):
+    """テキストファイルを文字コード自動判定で読み込む"""
+    last_error = None
+    for encoding in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            with open(filepath, "r", encoding=encoding, newline="") as f:
+                return f.read()
+        except UnicodeDecodeError as e:
+            last_error = e
+    raise ValueError(f"テキストの文字コードを判別できませんでした: {last_error}")
+
+
+def _read_csv_auto_encoding(filepath):
+    """CSVを文字コード自動判定で読み込む"""
+    last_error = None
+    for encoding in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            return pd.read_csv(filepath, encoding=encoding, dtype=object)
+        except UnicodeDecodeError as e:
+            last_error = e
+    raise ValueError(f"CSVの文字コードを判別できませんでした: {last_error}")
+
+
+def _sap_timesheet_df_from_table(df):
+    """SAP/Fieldglass の勤怠取得フォーマット表を統一 DataFrame 化する"""
+    required = {"スタッフ", "出勤時刻", "終了時刻", "時間エントリ日"}
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if not required.issubset(set(df.columns)):
+        return None
+
+    rows = []
+    for _, row in df.iterrows():
+        name = row.get("スタッフ")
+        if name is None or str(name).strip() in ("", "nan", "None"):
+            continue
+
+        work_date = _parse_excel_date(row.get("時間エントリ日"))
+        start = _parse_excel_time(row.get("出勤時刻"))
+        end = _parse_excel_time(row.get("終了時刻"))
+        if work_date is None or (start is None and end is None):
+            continue
+
+        rows.append({
+            "氏名": str(name).strip(),
+            "日付": work_date,
+            "出勤時刻": start,
+            "退勤時刻": end,
+            "コメント": None,
+            "データソース": "勤務表",
+        })
+
+    if not rows:
+        return None
+
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+
+
+def _parse_sap_timesheet_file(filepath):
     """SAP/Fieldglass の勤怠取得フォーマットを直接 DataFrame 化する"""
-    if os.path.splitext(filepath)[1].lower() not in (".xlsx", ".xls"):
+    ext = os.path.splitext(filepath)[1].lower()
+
+    if ext == ".csv":
+        try:
+            return _sap_timesheet_df_from_table(_read_csv_auto_encoding(filepath))
+        except Exception:
+            return None
+
+    if ext not in (".xlsx", ".xls"):
         return None
 
     try:
@@ -284,7 +351,6 @@ def _parse_sap_timesheet_excel(filepath):
     except Exception:
         return None
 
-    required = {"スタッフ", "出勤時刻", "終了時刻", "時間エントリ日"}
     frames = []
     for sheet_name in xls.sheet_names:
         try:
@@ -292,39 +358,73 @@ def _parse_sap_timesheet_excel(filepath):
         except Exception:
             continue
 
-        df.columns = [str(c).strip() for c in df.columns]
-        if not required.issubset(set(df.columns)):
-            continue
-
-        rows = []
-        for _, row in df.iterrows():
-            name = row.get("スタッフ")
-            if name is None or str(name).strip() in ("", "nan", "None"):
-                continue
-
-            work_date = _parse_excel_date(row.get("時間エントリ日"))
-            start = _parse_excel_time(row.get("出勤時刻"))
-            end = _parse_excel_time(row.get("終了時刻"))
-            if work_date is None or (start is None and end is None):
-                continue
-
-            rows.append({
-                "氏名": str(name).strip(),
-                "日付": work_date,
-                "出勤時刻": start,
-                "退勤時刻": end,
-                "コメント": None,
-                "データソース": "勤務表",
-            })
-
-        if rows:
-            frames.append(pd.DataFrame(rows))
+        parsed = _sap_timesheet_df_from_table(df)
+        if parsed is not None:
+            frames.append(parsed)
 
     if not frames:
         return None
 
     result = pd.concat(frames, ignore_index=True)
     return result[["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"]]
+
+
+def _parse_estaffing_timesheet_text(filepath):
+    """e-staffing の勤怠処理ツール用テキストを直接 DataFrame 化する"""
+    if os.path.splitext(filepath)[1].lower() != ".txt":
+        return None
+
+    try:
+        text = _read_text_auto_encoding(filepath)
+    except Exception:
+        return None
+
+    rows = []
+    current_name = None
+    for fields in csv.reader(text.splitlines(), delimiter="\t"):
+        if not fields:
+            continue
+
+        row_type = (fields[0] or "").strip()
+        if row_type == "H":
+            current_name = fields[5].strip() if len(fields) > 5 else None
+            continue
+
+        if row_type != "D" or not current_name:
+            continue
+
+        work_date = _parse_excel_date(fields[1] if len(fields) > 1 else None)
+        start = _parse_excel_time(fields[3] if len(fields) > 3 else None)
+        end = _parse_excel_time(fields[4] if len(fields) > 4 else None)
+        if work_date is None or (start is None and end is None):
+            continue
+
+        comment = None
+        if len(fields) > 7 and str(fields[7]).strip():
+            comment = str(fields[7]).strip()
+
+        rows.append({
+            "氏名": current_name,
+            "日付": work_date,
+            "出勤時刻": start,
+            "退勤時刻": end,
+            "コメント": comment,
+            "データソース": "勤務表",
+        })
+
+    if not rows:
+        return None
+
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+
+
+def _parse_known_timesheet_file(filepath):
+    """既知フォーマットをAI解析せずに直接読む"""
+    for parser in (_parse_sap_timesheet_file, _parse_estaffing_timesheet_text):
+        df = parser(filepath)
+        if df is not None:
+            return df
+    return None
 
 
 def parse_timesheet(filepath, progress_callback=None):
@@ -337,16 +437,22 @@ def parse_timesheet(filepath, progress_callback=None):
           記号式シフトの判別が必要な場合は parse_timesheet_smart() を使う。
     """
     ext = os.path.splitext(filepath)[1].lower()
+    direct_df = _parse_known_timesheet_file(filepath)
+    if direct_df is not None:
+        if progress_callback:
+            progress_callback(f"勤怠データを直接解析しました: {len(direct_df)}件")
+        return direct_df
 
     if ext in (".xlsx", ".xls"):
-        sap_df = _parse_sap_timesheet_excel(filepath)
-        if sap_df is not None:
-            if progress_callback:
-                progress_callback(f"SAP勤怠データを直接解析しました: {len(sap_df)}件")
-            return sap_df
         if progress_callback:
             progress_callback("Excelファイルをテキスト変換中...")
         text = _excel_to_text(filepath)
+        result = _parse_with_claude(text, "text")
+
+    elif ext in (".csv", ".txt"):
+        if progress_callback:
+            progress_callback("テキストファイルを解析中...")
+        text = _read_text_auto_encoding(filepath)
         result = _parse_with_claude(text, "text")
 
     elif ext == ".pdf":
@@ -378,6 +484,9 @@ def _load_file_for_claude(filepath):
 
     if ext in (".xlsx", ".xls"):
         return _excel_to_text(filepath), "text", None
+
+    if ext in (".csv", ".txt"):
+        return _read_text_auto_encoding(filepath), "text", None
 
     if ext == ".pdf":
         text, pdf_bytes = _pdf_to_text_or_bytes(filepath)
@@ -415,11 +524,11 @@ def parse_timesheet_smart(filepath, progress_callback=None):
     if progress_callback:
         progress_callback(f"ファイルを解析中... ({os.path.basename(filepath)})")
 
-    sap_df = _parse_sap_timesheet_excel(filepath)
-    if sap_df is not None:
+    direct_df = _parse_known_timesheet_file(filepath)
+    if direct_df is not None:
         return {
             "mode": "direct",
-            "df": sap_df,
+            "df": direct_df,
             "filename": os.path.basename(filepath),
         }
 
