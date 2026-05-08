@@ -7,6 +7,7 @@ import time
 import logging
 import os
 import re
+import tempfile
 from datetime import datetime, date, time as dt_time
 import pandas as pd
 from config import Config
@@ -49,15 +50,30 @@ SYSTEM_PROMPT = """あなたは勤務表データを解析する専門家です�
 def _excel_to_text(filepath):
     """ExcelファイルをCSV風テキストに変換"""
     import openpyxl
-    wb = openpyxl.load_workbook(filepath, data_only=True)
-    lines = []
-    for sheet in wb.worksheets:
-        lines.append(f"=== シート: {sheet.title} ===")
-        for row in sheet.iter_rows(values_only=True):
-            row_vals = [str(v) if v is not None else "" for v in row]
-            if any(v.strip() for v in row_vals):
-                lines.append(",".join(row_vals))
-    return "\n".join(lines)
+    workbook_path = filepath
+    converted_path = None
+    if os.path.splitext(filepath)[1].lower() == ".xlsb":
+        converted_path = _convert_xlsb_to_xlsx(filepath)
+        if converted_path is None:
+            raise ValueError("xlsbをxlsxに変換できませんでした")
+        workbook_path = converted_path
+
+    try:
+        wb = openpyxl.load_workbook(workbook_path, data_only=True)
+        lines = []
+        for sheet in wb.worksheets:
+            lines.append(f"=== シート: {sheet.title} ===")
+            for row in sheet.iter_rows(values_only=True):
+                row_vals = [str(v) if v is not None else "" for v in row]
+                if any(v.strip() for v in row_vals):
+                    lines.append(",".join(row_vals))
+        return "\n".join(lines)
+    finally:
+        if converted_path:
+            try:
+                os.remove(converted_path)
+            except OSError:
+                pass
 
 
 def _pdf_to_text_or_bytes(filepath):
@@ -316,6 +332,131 @@ def _read_csv_auto_encoding(filepath):
         except UnicodeDecodeError as e:
             last_error = e
     raise ValueError(f"CSVの文字コードを判別できませんでした: {last_error}")
+
+
+def _convert_xlsb_to_xlsx(filepath):
+    """Excel COMでxlsbを一時xlsxへ変換する。失敗時はNoneを返す。"""
+    if os.path.splitext(filepath)[1].lower() != ".xlsb":
+        return None
+
+    fd, converted_path = tempfile.mkstemp(prefix="kintai_xlsb_", suffix=".xlsx")
+    os.close(fd)
+
+    excel = None
+    workbook = None
+    try:
+        import pythoncom
+        import win32com.client as win32
+
+        pythoncom.CoInitialize()
+        excel = win32.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        workbook = excel.Workbooks.Open(os.path.abspath(filepath), ReadOnly=True)
+        workbook.SaveAs(os.path.abspath(converted_path), FileFormat=51)
+        return converted_path
+    except Exception:
+        logger.exception("xlsbからxlsxへの一時変換に失敗しました: %s", filepath)
+        try:
+            os.remove(converted_path)
+        except OSError:
+            pass
+        return None
+    finally:
+        if workbook is not None:
+            try:
+                workbook.Close(False)
+            except Exception:
+                pass
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
+def _extract_itone_name_from_filename(filepath):
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    match = re.search(r"(.+?)さん", stem)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"・([^・()]+)\)_\d{6}$", stem)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _parse_itone_dispatch_timesheet_file(filepath):
+    """IToneの派遣労働者勤務報告書を直接DataFrame化する。"""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in (".xlsx", ".xlsb"):
+        return None
+
+    workbook_path = filepath
+    converted_path = None
+    if ext == ".xlsb":
+        converted_path = _convert_xlsb_to_xlsx(filepath)
+        if converted_path is None:
+            return None
+        workbook_path = converted_path
+
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(workbook_path, data_only=True)
+        if "派遣労働者勤務報告書" not in wb.sheetnames:
+            return None
+
+        ws = wb["派遣労働者勤務報告書"]
+        if str(ws["B12"].value or "").strip() != "日付":
+            return None
+
+        employee_name = ws["U6"].value or _extract_itone_name_from_filename(filepath)
+        if not employee_name:
+            return None
+        employee_name = str(employee_name).strip()
+
+        rows = []
+        for row_idx in range(13, ws.max_row + 1):
+            work_date = _parse_excel_date(ws.cell(row_idx, 2).value)  # B
+            if work_date is None:
+                continue
+
+            start = _parse_excel_time(ws.cell(row_idx, 24).value)  # X
+            end = _parse_excel_time(ws.cell(row_idx, 29).value)  # AC
+            if start is None and end is None:
+                continue
+
+            comment = ws.cell(row_idx, 12).value or ws.cell(row_idx, 8).value  # L / H
+            if comment is not None:
+                comment = str(comment).strip() or None
+
+            rows.append({
+                "氏名": employee_name,
+                "日付": work_date,
+                "出勤時刻": start,
+                "退勤時刻": end,
+                "コメント": comment,
+                "データソース": "勤務表",
+            })
+
+        if not rows:
+            return None
+
+        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    except Exception:
+        logger.exception("ITone派遣労働者勤務報告書の解析に失敗しました: %s", filepath)
+        return None
+    finally:
+        if converted_path:
+            try:
+                os.remove(converted_path)
+            except OSError:
+                pass
 
 
 def _sap_timesheet_df_from_table(df):
@@ -659,6 +800,7 @@ def _parse_fieldglass_pdf_timesheet(filepath):
 def _parse_known_timesheet_file(filepath):
     """既知フォーマットをAI解析せずに直接読む"""
     for parser in (
+        _parse_itone_dispatch_timesheet_file,
         _parse_sap_timesheet_file,
         _parse_estaffing_timesheet_csv,
         _parse_estaffing_timesheet_text,
@@ -686,7 +828,7 @@ def parse_timesheet(filepath, progress_callback=None):
             progress_callback(f"勤怠データを直接解析しました: {len(direct_df)}件")
         return direct_df
 
-    if ext in (".xlsx", ".xls"):
+    if ext in (".xlsx", ".xls", ".xlsb"):
         if progress_callback:
             progress_callback("Excelファイルをテキスト変換中...")
         text = _excel_to_text(filepath)
@@ -727,7 +869,7 @@ def _load_file_for_claude(filepath):
     """ファイルから (content, file_type, media_type) を返す"""
     ext = os.path.splitext(filepath)[1].lower()
 
-    if ext in (".xlsx", ".xls"):
+    if ext in (".xlsx", ".xls", ".xlsb"):
         return _excel_to_text(filepath), "text", None
 
     if ext in (".csv", ".txt"):

@@ -61,9 +61,9 @@
                     <label class="btn btn-secondary">
                         ファイルを選択
                         <input type="file" name="timesheet_files" id="timesheet-input"
-                               accept=".xlsx,.xls,.csv,.txt,.pdf,.png,.jpg,.jpeg" multiple style="display:none">
+                               accept=".xlsx,.xls,.xlsb,.csv,.txt,.pdf,.png,.jpg,.jpeg" multiple style="display:none">
                     </label>
-                    <p class="hint">対応形式: .xlsx .xls .csv .txt .pdf .png .jpg .jpeg</p>
+                    <p class="hint">対応形式: .xlsx .xls .xlsb .csv .txt .pdf .png .jpg .jpeg</p>
                 </div>
                 <div class="selected-files" id="timesheet-selected"></div>
             </div>
@@ -97,9 +97,9 @@
                     <label class="btn btn-secondary">
                         ファイルを選択
                         <input type="file" name="timesheet_files" id="calendar-input"
-                               accept=".xlsx,.xls,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
+                               accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
                     </label>
-                    <p class="hint">対応形式: .xlsx .xls .pdf .png .jpg .jpeg</p>
+                    <p class="hint">対応形式: .xlsx .xls .xlsb .pdf .png .jpg .jpeg</p>
                 </div>
                 <div class="selected-files" id="calendar-selected"></div>
             </div>
@@ -115,9 +115,9 @@
                     <label class="btn btn-secondary">
                         ファイルを選択
                         <input type="file" name="timesheet_files" id="legend-input"
-                               accept=".xlsx,.xls,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
+                               accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
                     </label>
-                    <p class="hint">対応形式: .xlsx .xls .pdf .png .jpg .jpeg</p>
+                    <p class="hint">対応形式: .xlsx .xls .xlsb .pdf .png .jpg .jpeg</p>
                     <p class="hint">※カレンダー側の画像に凡例も写っている場合は、こちらは空欄で OK です</p>
                 </div>
                 <div class="selected-files" id="legend-selected"></div>
@@ -170,6 +170,8 @@
                 <div class="card-value" id="cnt-missing">0</div>
             </div>
         </div>
+
+        <div id="result-warning-area" class="alert alert-warning" style="display:none; margin-top: 12px;"></div>
 
         <div id="all-ok-msg" class="all-ok-msg" style="display:none">
             🎉 全件OKです！差異は見つかりませんでした。

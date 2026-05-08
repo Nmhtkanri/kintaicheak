@@ -71,5 +71,5 @@ class Config:
     # 対応ファイル形式
     ALLOWED_EXTENSIONS = {
         "jinjer": {"csv"},
-        "timesheet": {"xlsx", "xls", "csv", "txt", "pdf", "png", "jpg", "jpeg"},
+        "timesheet": {"xlsx", "xls", "xlsb", "csv", "txt", "pdf", "png", "jpg", "jpeg"},
     }

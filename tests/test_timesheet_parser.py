@@ -3,12 +3,41 @@ import sys
 from datetime import date, time
 
 import pandas as pd
+from openpyxl import Workbook
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import services.timesheet_parser as timesheet_parser
 from services.timesheet_parser import _load_file_for_claude, parse_timesheet_smart
+
+
+def test_parse_itone_dispatch_timesheet_excel_direct(tmp_path):
+    path = tmp_path / "中澤寿代さん(ITone)派遣労働者勤務報告書_202604.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "派遣労働者勤務報告書"
+    ws["B12"] = "日付"
+    ws["U6"] = "中澤　寿代"
+    ws["B13"] = "2026/4/1"
+    ws["X13"] = "09:45"
+    ws["AC13"] = "19:33"
+    ws["L13"] = "JANET更改業務：時間外会議"
+    ws["B14"] = "2026/4/2"
+    ws["X14"] = "09:45"
+    ws["AC14"] = "18:21"
+    wb.save(path)
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert len(df) == 2
+    assert df["氏名"].tolist() == ["中澤　寿代", "中澤　寿代"]
+    assert df.iloc[0]["日付"] == date(2026, 4, 1)
+    assert df.iloc[0]["出勤時刻"] == time(9, 45)
+    assert df.iloc[0]["退勤時刻"] == time(19, 33)
+    assert df.iloc[0]["コメント"] == "JANET更改業務：時間外会議"
 
 
 def test_parse_sap_timesheet_excel_direct(tmp_path):

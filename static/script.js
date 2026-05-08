@@ -284,7 +284,7 @@ function showError(msg) {
 }
 
 function showResult(data) {
-    const { summary, table, excel_filename, unsubmitted, new_template_filename, new_template_count } = data;
+    const { summary, table, excel_filename, unsubmitted, warnings, new_template_filename, new_template_count } = data;
 
     document.getElementById('cnt-ok').textContent = summary.ok;
     document.getElementById('cnt-ng').textContent = summary.ng;
@@ -293,14 +293,26 @@ function showResult(data) {
 
     const allOkMsg = document.getElementById('all-ok-msg');
     const ngTableArea = document.getElementById('ng-table-area');
+    const warningArea = document.getElementById('result-warning-area');
 
-    if (summary.ng === 0 && summary.caution === 0) {
+    if (warnings && warnings.length > 0) {
+        warningArea.innerHTML = warnings.map(msg => `<div>${escapeHtml(msg)}</div>`).join('');
+        warningArea.style.display = 'block';
+    } else {
+        warningArea.innerHTML = '';
+        warningArea.style.display = 'none';
+    }
+
+    if (summary.ng === 0 && summary.caution === 0 && summary.missing === 0) {
         allOkMsg.style.display = 'block';
         ngTableArea.style.display = 'none';
-    } else {
+    } else if (summary.ng > 0 || summary.caution > 0) {
         allOkMsg.style.display = 'none';
         ngTableArea.style.display = 'block';
         renderTable(table);
+    } else {
+        allOkMsg.style.display = 'none';
+        ngTableArea.style.display = 'none';
     }
 
     // 未提出者リスト表示

@@ -153,7 +153,7 @@ def upload():
     else:
         for f in timesheet_files:
             if f.filename and not allowed_file(f.filename, "timesheet"):
-                errors.append(f"{f.filename} は未対応の形式です（対応: xlsx, xls, pdf, png, jpg, jpeg）")
+                errors.append(f"{f.filename} は未対応の形式です（対応: xlsx, xls, xlsb, pdf, png, jpg, jpeg）")
 
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
@@ -334,6 +334,7 @@ def upload():
             # direct モードのみ（match モード時のみ到達）→ 既存フロー通りに突合まで
             yield _sse_event("progress", {"message": "突合処理中..."})
             timesheet_df = pd.concat(direct_dfs, ignore_index=True)
+            warnings = _build_match_warnings(jinjer_df, timesheet_df)
             result_df, unsubmitted_names = match(jinjer_df, timesheet_df, threshold)
 
             yield _sse_event("progress", {"message": "Excelファイルを生成中..."})
@@ -341,7 +342,7 @@ def upload():
             excel_filename = os.path.basename(excel_path)
 
             yield _sse_event("done", _build_done_payload(
-                result_df, excel_filename, unsubmitted_names
+                result_df, excel_filename, unsubmitted_names, warnings=warnings
             ))
 
         except Exception as e:
@@ -411,6 +412,7 @@ def resolve_and_match():
 
             yield _sse_event("progress", {"message": "突合処理中..."})
             timesheet_df = pd.concat(resolved_dfs, ignore_index=True)
+            warnings = _build_match_warnings(jinjer_df, timesheet_df)
             result_df, unsubmitted_names = match(jinjer_df, timesheet_df, threshold)
 
             yield _sse_event("progress", {"message": "Excelファイルを生成中..."})
@@ -445,7 +447,7 @@ def resolve_and_match():
                         new_template_filename = os.path.basename(gen["path"])
                         new_template_count = gen["count"]
 
-            done = _build_done_payload(result_df, excel_filename, unsubmitted_names)
+            done = _build_done_payload(result_df, excel_filename, unsubmitted_names, warnings=warnings)
             done["new_template_filename"] = new_template_filename
             done["new_template_count"] = new_template_count
             yield _sse_event("done", done)
@@ -676,7 +678,41 @@ def export_jinjer_csv():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _build_done_payload(result_df, excel_filename, unsubmitted_names):
+def _date_range_text(df):
+    if df is None or df.empty or "日付" not in df.columns:
+        return None
+    dates = sorted({d for d in df["日付"].dropna().tolist() if pd.notna(d)})
+    if not dates:
+        return None
+    return f"{format_date(dates[0])}〜{format_date(dates[-1])}"
+
+
+def _build_match_warnings(jinjer_df, timesheet_df):
+    warnings = []
+    if (
+        jinjer_df is None
+        or timesheet_df is None
+        or jinjer_df.empty
+        or timesheet_df.empty
+        or "日付" not in jinjer_df.columns
+        or "日付" not in timesheet_df.columns
+    ):
+        return warnings
+
+    jinjer_dates = {d for d in jinjer_df["日付"].dropna().tolist() if pd.notna(d)}
+    timesheet_dates = {d for d in timesheet_df["日付"].dropna().tolist() if pd.notna(d)}
+    if jinjer_dates and timesheet_dates and not (jinjer_dates & timesheet_dates):
+        jinjer_range = _date_range_text(jinjer_df) or "不明"
+        timesheet_range = _date_range_text(timesheet_df) or "不明"
+        warnings.append(
+            "jinjer CSVと勤務表の日付範囲が一致していません。"
+            f"jinjer CSV: {jinjer_range}、勤務表: {timesheet_range}。"
+            "同じ対象月のファイルを選択してください。"
+        )
+    return warnings
+
+
+def _build_done_payload(result_df, excel_filename, unsubmitted_names, warnings=None):
     counts = result_df["判定"].value_counts().to_dict()
     summary = {
         "total": len(result_df),
@@ -707,6 +743,7 @@ def _build_done_payload(result_df, excel_filename, unsubmitted_names):
         "table": table_data,
         "excel_filename": excel_filename,
         "unsubmitted": unsubmitted_names,
+        "warnings": warnings or [],
     }
 
 
