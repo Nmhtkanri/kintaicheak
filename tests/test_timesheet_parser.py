@@ -138,6 +138,36 @@ def test_parse_estaffing_timesheet_text_direct(tmp_path):
     assert df.iloc[1]["退勤時刻"] == time(9, 30)
 
 
+def test_parse_fieldglass_pdf_direct(monkeypatch, tmp_path):
+    path = tmp_path / "ts_uploadid_timesheet_ERCSTS01161606奈良.pdf"
+    pdf_text = "\n".join([
+        "Time Sheet",
+        "ID ERCSTS01161606 Worker Nara, Takahiro(ERCSWK00144174)",
+        "Period 2026-04-01 to 2026-04-30 Job Posting Support Engineer|JP|Job Stage",
+        "Time in/time out",
+        "Day 3-30 Mon 3-31 Tue 4-01 Wed 4-02 Thu 4-03 Fri 4-04 Sat 4-05 Sun Total",
+        "Time In 09:00 09:00 09:00 00:00 00:00",
+        "Meal Break 1 12:00 - 13:00 12:00 - 13:00 12:00 - 13:00",
+        "Time Out 20:30 18:00 21:30 00:00 00:00",
+        "Total 10h 30m 8h 0m 11h 30m 0h 0m 0h 0m 30h 0m",
+    ])
+    monkeypatch.setattr(
+        timesheet_parser,
+        "_pdf_to_text_or_bytes",
+        lambda filepath: (pdf_text, None),
+    )
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert df["氏名"].tolist() == ["奈良", "奈良", "奈良"]
+    assert df["日付"].tolist() == [date(2026, 4, 1), date(2026, 4, 2), date(2026, 4, 3)]
+    assert df.iloc[0]["出勤時刻"] == time(9, 0)
+    assert df.iloc[0]["退勤時刻"] == time(20, 30)
+    assert df.iloc[2]["退勤時刻"] == time(21, 30)
+
+
 def test_image_only_pdf_is_sent_as_image_for_ai_fallback(tmp_path):
     path = tmp_path / "scanned_timesheet.pdf"
     image = Image.new("RGB", (480, 640), "white")

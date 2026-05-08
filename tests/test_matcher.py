@@ -117,6 +117,24 @@ def test_staff_code_sheet_name_does_not_match_multiple_jinjer_employees():
     assert result.iloc[0]["判定"] == "データ欠損"
 
 
+def test_unique_surname_sheet_name_matches_jinjer_employee():
+    """PDFファイル名が姓だけでも、jinjer側で一意ならその社員に寄せる"""
+    jinjer = make_df([
+        ("奈良 隆宏", date(2026, 4, 1), time(9, 0), time(20, 30)),
+        ("太田 琢也", date(2026, 4, 1), time(9, 0), time(21, 0)),
+    ], "jinjer")
+    sheet = make_df([
+        ("奈良", date(2026, 4, 1), time(9, 0), time(20, 30)),
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert "奈良 隆宏" not in unsubmitted
+    assert "太田 琢也" in unsubmitted
+    assert result.iloc[0]["氏名"] == "奈良 隆宏"
+    assert result.iloc[0]["判定"] == "OK"
+
+
 def test_normalize_name():
     assert normalize_name("山田　太郎") == "山田太郎"
     assert normalize_name(" 田中 次郎 ") == "田中次郎"

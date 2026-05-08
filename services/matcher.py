@@ -214,15 +214,40 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     jinjer_df["氏名_normalized"] = jinjer_df["氏名"].apply(normalize_name)
     timesheet_df["氏名_normalized"] = timesheet_df["氏名"].apply(normalize_name)
     jinjer_name_keys = set(jinjer_df["氏名_normalized"].unique())
+    jinjer_key_to_name = {
+        key: name
+        for key, name in (
+            (row.get("氏名_normalized"), row.get("氏名"))
+            for _, row in jinjer_df.iterrows()
+        )
+        if key and pd.notna(name) and str(name).strip()
+    }
+
+    def choose_unique_partial_key(key):
+        if not key or len(key) < 2 or key in jinjer_name_keys:
+            return None
+        candidates = [
+            jinjer_key
+            for jinjer_key in jinjer_name_keys
+            if jinjer_key and (jinjer_key.startswith(key) or key.startswith(jinjer_key))
+        ]
+        return candidates[0] if len(candidates) == 1 else None
 
     def choose_sheet_key(name):
         for key in normalize_name_keys(name):
             if key in jinjer_name_keys:
                 return key
+            partial_key = choose_unique_partial_key(key)
+            if partial_key:
+                return partial_key
         keys = normalize_name_keys(name)
         return keys[0] if keys else ""
 
     timesheet_df["氏名_normalized"] = timesheet_df["氏名"].apply(choose_sheet_key)
+    timesheet_df["氏名"] = timesheet_df.apply(
+        lambda r: jinjer_key_to_name.get(r.get("氏名_normalized"), r.get("氏名")),
+        axis=1,
+    )
 
     # OCR/画像解析で勤務表上部のスタッフコードだけが氏名として拾われる場合がある。
     # 単一人物同士で曖昧さがないときだけ、勤務表側コードをjinjer側の氏名に寄せる。

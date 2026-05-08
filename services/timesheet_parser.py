@@ -489,12 +489,180 @@ def _parse_estaffing_timesheet_csv(filepath):
         return None
 
 
+def _extract_fieldglass_name_from_filename(filepath):
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    match = re.search(r"timesheet_[A-Za-z]+[0-9]+(.+)$", stem, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    tail = match.group(1)
+    tail = tail.strip(" _,.-")
+    if not tail:
+        return None
+
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", tail):
+        return tail.replace("さん", "").strip()
+
+    tail = tail.replace("_", " ").replace(",", " ").strip()
+    tail = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", tail)
+    tail = re.sub(r"\s+", " ", tail).strip()
+    return tail.upper() if tail else None
+
+
+def _parse_fieldglass_worker_name(text):
+    match = re.search(r"\bWorker\s+([^(\n]+)\(", text)
+    if not match:
+        return None
+
+    raw = match.group(1).strip()
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) == 2:
+        raw = f"{parts[1]} {parts[0]}"
+    if re.fullmatch(r"[A-Za-z][A-Za-z\s.'-]*", raw):
+        return raw.upper()
+    return raw
+
+
+def _fieldglass_date_for_month_day(month, day, period_start, period_end):
+    for year in range(period_start.year - 1, period_end.year + 2):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        if period_start <= candidate <= period_end:
+            return candidate
+    return None
+
+
+def _fieldglass_dates_from_day_line(line, period_start, period_end):
+    dates = []
+    for month, day, _weekday in re.findall(r"(\d{1,2})-(\d{2})\s+([A-Za-z]{3})", line):
+        dates.append(_fieldglass_date_for_month_day(int(month), int(day), period_start, period_end))
+    return dates
+
+
+def _fieldglass_pad_left(values, dates):
+    if len(values) >= len(dates):
+        return values[:len(dates)]
+    leading_outside_period = 0
+    for d in dates:
+        if d is None:
+            leading_outside_period += 1
+        else:
+            break
+    pad_count = min(len(dates) - len(values), leading_outside_period)
+    return (["-"] * pad_count + values)[:len(dates)]
+
+
+def _fieldglass_time_values(line, prefix, dates):
+    body = line[len(prefix):].strip()
+    values = re.findall(r"\d{1,2}:\d{2}|-", body)
+    return _fieldglass_pad_left(values, dates)
+
+
+def _fieldglass_duration_values(line, dates):
+    body = line[len("Total"):].strip()
+    values = [
+        "-" if value == "-" else value
+        for value in re.findall(r"-|\d+h\s+\d+m", body)
+    ]
+    in_period_count = sum(1 for d in dates if d is not None)
+    if len(values) in (len(dates) + 1, in_period_count + 1):
+        values = values[:-1]
+    return _fieldglass_pad_left(values, dates)
+
+
+def _is_zero_fieldglass_duration(value):
+    if not value or value == "-":
+        return True
+    match = re.fullmatch(r"(\d+)h\s+(\d+)m", value.strip())
+    return bool(match and int(match.group(1)) == 0 and int(match.group(2)) == 0)
+
+
+def _parse_fieldglass_pdf_timesheet(filepath):
+    """SAP Fieldglass の Time Sheet PDF を直接 DataFrame 化する"""
+    if os.path.splitext(filepath)[1].lower() != ".pdf":
+        return None
+
+    try:
+        text, pdf_bytes = _pdf_to_text_or_bytes(filepath)
+    except Exception:
+        return None
+    if not text or "Time Sheet" not in text or "Time in/time out" not in text:
+        return None
+
+    period_match = re.search(r"\bPeriod\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})", text)
+    if not period_match:
+        return None
+    period_start = datetime.strptime(period_match.group(1), "%Y-%m-%d").date()
+    period_end = datetime.strptime(period_match.group(2), "%Y-%m-%d").date()
+
+    name = _extract_fieldglass_name_from_filename(filepath) or _parse_fieldglass_worker_name(text)
+    if not name:
+        return None
+
+    rows = []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if line != "Time in/time out":
+            continue
+
+        day_line = None
+        time_in_line = None
+        time_out_line = None
+        total_line = None
+        for candidate in lines[idx + 1: idx + 12]:
+            if candidate.startswith("Day "):
+                day_line = candidate
+            elif candidate.startswith("Time In "):
+                time_in_line = candidate
+            elif candidate.startswith("Time Out "):
+                time_out_line = candidate
+            elif candidate.startswith("Total "):
+                total_line = candidate
+                break
+
+        if not day_line or not time_in_line or not time_out_line:
+            continue
+
+        dates = _fieldglass_dates_from_day_line(day_line, period_start, period_end)
+        start_values = _fieldglass_time_values(time_in_line, "Time In", dates)
+        end_values = _fieldglass_time_values(time_out_line, "Time Out", dates)
+        total_values = _fieldglass_duration_values(total_line, dates) if total_line else [""] * len(dates)
+
+        for work_date, start_value, end_value, total_value in zip(dates, start_values, end_values, total_values):
+            if work_date is None:
+                continue
+
+            start = _parse_time_str(start_value)
+            end = _parse_time_str(end_value)
+            if start is None and end is None:
+                continue
+            if _is_zero_fieldglass_duration(total_value):
+                continue
+
+            rows.append({
+                "氏名": name,
+                "日付": work_date,
+                "出勤時刻": start,
+                "退勤時刻": end,
+                "コメント": None,
+                "データソース": "勤務表",
+            })
+
+    if not rows:
+        return None
+
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+
+
 def _parse_known_timesheet_file(filepath):
     """既知フォーマットをAI解析せずに直接読む"""
     for parser in (
         _parse_sap_timesheet_file,
         _parse_estaffing_timesheet_csv,
         _parse_estaffing_timesheet_text,
+        _parse_fieldglass_pdf_timesheet,
     ):
         df = parser(filepath)
         if df is not None:
