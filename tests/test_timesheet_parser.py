@@ -71,6 +71,47 @@ def test_parse_sap_timesheet_csv_direct(tmp_path):
     assert df.iloc[1]["退勤時刻"] == time(9, 30)
 
 
+def test_parse_estaffing_timesheet_csv_direct(tmp_path):
+    path = tmp_path / "estaffing.csv"
+    pd.DataFrame([
+        {
+            "e-staffing契約No": "C100887997-040",
+            "スタッフ氏名": "寺山 枝美",
+            "就業年月日": "2026/4/1",
+            "日々勤怠状況": "承認済",
+            "区分": "通常",
+            "開始時刻": "9:00",
+            "終了時刻": "24:00:00",
+            "休憩時間": "1:30",
+            "備考コメント": "",
+        },
+        {
+            "e-staffing契約No": "C100887997-040",
+            "スタッフ氏名": "寺山 枝美",
+            "就業年月日": "2026/4/2",
+            "日々勤怠状況": "承認済",
+            "区分": "通常",
+            "開始時刻": "9:00",
+            "終了時刻": "22:30",
+            "休憩時間": "2:00",
+            "備考コメント": "テレワーク",
+        },
+    ]).to_csv(path, index=False, encoding="cp932")
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert len(df) == 2
+    assert df.iloc[0]["氏名"] == "寺山 枝美"
+    assert df.iloc[0]["日付"] == date(2026, 4, 1)
+    assert df.iloc[0]["出勤時刻"] == time(9, 0)
+    assert df.iloc[0]["退勤時刻"] == time(0, 0)
+    assert pd.isna(df.iloc[0]["コメント"])
+    assert df.iloc[1]["退勤時刻"] == time(22, 30)
+    assert df.iloc[1]["コメント"] == "テレワーク"
+
+
 def test_parse_estaffing_timesheet_text_direct(tmp_path):
     path = tmp_path / "estaffing.txt"
     lines = [

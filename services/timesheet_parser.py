@@ -418,9 +418,64 @@ def _parse_estaffing_timesheet_text(filepath):
     return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
 
 
+def _estaffing_csv_df_from_table(df):
+    """e-staffing の請求勤怠 CSV を統一 DataFrame 化する"""
+    required = {"スタッフ氏名", "就業年月日", "開始時刻", "終了時刻"}
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if not required.issubset(set(df.columns)):
+        return None
+
+    rows = []
+    for _, row in df.iterrows():
+        name = row.get("スタッフ氏名")
+        if name is None or str(name).strip() in ("", "nan", "None"):
+            continue
+
+        work_date = _parse_excel_date(row.get("就業年月日"))
+        start = _parse_excel_time(row.get("開始時刻"))
+        end = _parse_excel_time(row.get("終了時刻"))
+        if work_date is None or (start is None and end is None):
+            continue
+
+        comment = None
+        raw_comment = row.get("備考コメント")
+        if raw_comment is not None and str(raw_comment).strip() not in ("", "nan", "None"):
+            comment = str(raw_comment).strip()
+
+        rows.append({
+            "氏名": str(name).strip(),
+            "日付": work_date,
+            "出勤時刻": start,
+            "退勤時刻": end,
+            "コメント": comment,
+            "データソース": "勤務表",
+        })
+
+    if not rows:
+        return None
+
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+
+
+def _parse_estaffing_timesheet_csv(filepath):
+    """e-staffing の請求勤怠 CSV を直接 DataFrame 化する"""
+    if os.path.splitext(filepath)[1].lower() != ".csv":
+        return None
+
+    try:
+        return _estaffing_csv_df_from_table(_read_csv_auto_encoding(filepath))
+    except Exception:
+        return None
+
+
 def _parse_known_timesheet_file(filepath):
     """既知フォーマットをAI解析せずに直接読む"""
-    for parser in (_parse_sap_timesheet_file, _parse_estaffing_timesheet_text):
+    for parser in (
+        _parse_sap_timesheet_file,
+        _parse_estaffing_timesheet_csv,
+        _parse_estaffing_timesheet_text,
+    ):
         df = parser(filepath)
         if df is not None:
             return df
