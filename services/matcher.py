@@ -36,6 +36,14 @@ def normalize_name_keys(name):
     return list(dict.fromkeys(k for k in keys if k))
 
 
+def _is_probable_staff_code(name):
+    """画像解析が氏名の代わりに拾いやすいスタッフコードかを判定する。"""
+    if not name or pd.isna(name):
+        return False
+    raw = unicodedata.normalize("NFKC", str(name)).strip()
+    return bool(re.fullmatch(r"[A-Z0-9_-]{2,12}", raw))
+
+
 def _to_minutes(t):
     """datetime.timeを分に変換"""
     if t is None or (not isinstance(t, time)):
@@ -215,6 +223,23 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         return keys[0] if keys else ""
 
     timesheet_df["氏名_normalized"] = timesheet_df["氏名"].apply(choose_sheet_key)
+
+    # OCR/画像解析で勤務表上部のスタッフコードだけが氏名として拾われる場合がある。
+    # 単一人物同士で曖昧さがないときだけ、勤務表側コードをjinjer側の氏名に寄せる。
+    jinjer_unique_keys = [k for k in dict.fromkeys(jinjer_df["氏名_normalized"].tolist()) if k]
+    jinjer_unique_names = [n for n in dict.fromkeys(jinjer_df["氏名"].tolist()) if pd.notna(n) and str(n).strip()]
+    sheet_unique_names = [n for n in dict.fromkeys(timesheet_df["氏名"].tolist()) if pd.notna(n) and str(n).strip()]
+    sheet_unique_keys = [k for k in dict.fromkeys(timesheet_df["氏名_normalized"].tolist()) if k]
+    if (
+        len(jinjer_unique_keys) == 1
+        and len(jinjer_unique_names) == 1
+        and len(sheet_unique_names) == 1
+        and len(sheet_unique_keys) == 1
+        and sheet_unique_keys[0] not in jinjer_name_keys
+        and _is_probable_staff_code(sheet_unique_names[0])
+    ):
+        timesheet_df["氏名_normalized"] = jinjer_unique_keys[0]
+        timesheet_df["氏名"] = jinjer_unique_names[0]
 
     # 勤務表に含まれる社員の正規化名セット
     sheet_names = set(timesheet_df["氏名_normalized"].unique())

@@ -3,10 +3,12 @@ import sys
 from datetime import date, time
 
 import pandas as pd
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.timesheet_parser import parse_timesheet_smart
+import services.timesheet_parser as timesheet_parser
+from services.timesheet_parser import _load_file_for_claude, parse_timesheet_smart
 
 
 def test_parse_sap_timesheet_excel_direct(tmp_path):
@@ -134,3 +136,51 @@ def test_parse_estaffing_timesheet_text_direct(tmp_path):
     assert df.iloc[0]["コメント"] == "*[テレワーク、場所：自宅]"
     assert df.iloc[1]["出勤時刻"] == time(16, 45)
     assert df.iloc[1]["退勤時刻"] == time(9, 30)
+
+
+def test_image_only_pdf_is_sent_as_image_for_ai_fallback(tmp_path):
+    path = tmp_path / "scanned_timesheet.pdf"
+    image = Image.new("RGB", (480, 640), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((40, 40), "タイムシート", fill="black")
+    draw.text((40, 90), "氏名 小林 拓己", fill="black")
+    image.save(path, "PDF")
+
+    content, file_type, media_type = _load_file_for_claude(str(path))
+
+    assert file_type == "image"
+    assert media_type == "image/png"
+    assert content.startswith(b"\x89PNG")
+
+
+def test_parse_timesheet_smart_falls_back_when_legend_parser_returns_empty(monkeypatch, tmp_path):
+    path = tmp_path / "timesheet.png"
+    Image.new("RGB", (320, 240), "white").save(path)
+
+    monkeypatch.setattr(
+        timesheet_parser,
+        "parse_with_legend_extraction",
+        lambda file_content, file_type, media_type=None: {"mode": "direct", "data": []},
+    )
+    monkeypatch.setattr(
+        timesheet_parser,
+        "_parse_with_claude",
+        lambda file_content, file_type, media_type=None: {
+            "employee_name": "小林 拓己",
+            "records": [
+                {
+                    "date": "2026-04-01",
+                    "start_time": "09:00",
+                    "end_time": "17:30",
+                    "comment": None,
+                }
+            ],
+        },
+    )
+
+    result = parse_timesheet_smart(str(path))
+
+    assert result["mode"] == "direct"
+    assert len(result["df"]) == 1
+    assert result["df"].iloc[0]["氏名"] == "小林 拓己"
+    assert result["df"].iloc[0]["出勤時刻"] == time(9, 0)

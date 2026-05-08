@@ -80,6 +80,43 @@ def test_unsubmitted():
     assert result.iloc[0]["判定"] == "OK"
 
 
+def test_single_staff_code_sheet_name_matches_single_jinjer_employee():
+    """画像解析で氏名がスタッフコードだけになった1人分の勤務表をjinjer氏名に寄せる"""
+    jinjer = make_df([
+        ("田村 栄和", date(2026, 4, 1), time(7, 0), time(17, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("TAM", date(2026, 4, 1), time(7, 0), time(17, 30)),
+        ("TAM", date(2026, 4, 2), time(8, 0), time(17, 30)),
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert unsubmitted == []
+    assert len(result) == 2
+    assert result["氏名"].tolist() == ["田村 栄和", "田村 栄和"]
+    assert result.iloc[0]["判定"] == "OK"
+    assert result.iloc[0]["jinjer_出勤時刻"] == time(7, 0)
+    assert result.iloc[1]["判定"] == "データ欠損"
+
+
+def test_staff_code_sheet_name_does_not_match_multiple_jinjer_employees():
+    """複数人CSVではスタッフコードを勝手に1人へ結びつけない"""
+    jinjer = make_df([
+        ("田村 栄和", date(2026, 4, 1), time(7, 0), time(17, 30)),
+        ("山田 太郎", date(2026, 4, 1), time(9, 0), time(18, 0)),
+    ], "jinjer")
+    sheet = make_df([
+        ("TAM", date(2026, 4, 1), time(7, 0), time(17, 30)),
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert set(unsubmitted) == {"田村 栄和", "山田 太郎"}
+    assert result.iloc[0]["氏名"] == "TAM"
+    assert result.iloc[0]["判定"] == "データ欠損"
+
+
 def test_normalize_name():
     assert normalize_name("山田　太郎") == "山田太郎"
     assert normalize_name(" 田中 次郎 ") == "田中次郎"

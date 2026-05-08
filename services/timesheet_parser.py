@@ -1,6 +1,7 @@
 import anthropic
 import base64
 import csv
+import io
 import json
 import time
 import logging
@@ -74,6 +75,25 @@ def _pdf_to_text_or_bytes(filepath):
         with open(filepath, "rb") as f:
             return None, f.read()
     return full_text, None
+
+
+def _pdf_first_page_to_png_bytes(filepath):
+    """文字を持たないPDFを画像解析に回すため、1ページ目をPNG化する。"""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(filepath)
+        if len(pdf) == 0:
+            return None
+        page = pdf[0]
+        bitmap = page.render(scale=4.0)
+        image = bitmap.to_pil().convert("RGB")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning("PDFの画像化に失敗しました: %s", e)
+        return None
 
 
 def _parse_with_claude(file_content, file_type, media_type=None):
@@ -516,6 +536,8 @@ def parse_timesheet(filepath, progress_callback=None):
         text, pdf_bytes = _pdf_to_text_or_bytes(filepath)
         if text:
             result = _parse_with_claude(text, "text")
+        elif image_bytes := _pdf_first_page_to_png_bytes(filepath):
+            result = _parse_with_claude(image_bytes, "image", media_type="image/png")
         else:
             result = _parse_with_claude(pdf_bytes, "pdf")
 
@@ -547,6 +569,8 @@ def _load_file_for_claude(filepath):
         text, pdf_bytes = _pdf_to_text_or_bytes(filepath)
         if text:
             return text, "text", None
+        if image_bytes := _pdf_first_page_to_png_bytes(filepath):
+            return image_bytes, "image", "image/png"
         return pdf_bytes, "pdf", None
 
     if ext in (".png", ".jpg", ".jpeg"):
@@ -588,13 +612,33 @@ def parse_timesheet_smart(filepath, progress_callback=None):
         }
 
     file_content, file_type, media_type = _load_file_for_claude(filepath)
-    result = parse_with_legend_extraction(file_content, file_type, media_type)
+    fallback_df = None
+    try:
+        result = parse_with_legend_extraction(file_content, file_type, media_type)
+    except Exception:
+        logger.exception("凡例対応の勤務表解析に失敗しました。時刻直書き専用解析へフォールバックします。")
+        result = {"mode": "direct", "data": []}
+        try:
+            fallback_df = _normalize_records(_parse_with_claude(file_content, file_type, media_type))
+        except Exception:
+            logger.exception("時刻直書き専用解析へのフォールバックにも失敗しました。")
+            raise
+
     mode = result.get("mode")
     filename = os.path.basename(filepath)
 
     if mode == "direct":
         # 既存の direct モード形式に変換して DataFrame 化
         df = _normalize_records(result.get("data") or [])
+        if df.empty and fallback_df is None:
+            try:
+                fallback_df = _normalize_records(_parse_with_claude(file_content, file_type, media_type))
+            except Exception:
+                logger.exception("空データのため時刻直書き専用解析へフォールバックしましたが失敗しました。")
+        if df.empty and fallback_df is not None and not fallback_df.empty:
+            df = fallback_df
+        if df.empty:
+            raise ValueError("AI解析は完了しましたが、出退勤時刻のある勤務行を抽出できませんでした")
         return {
             "mode": "direct",
             "df": df,

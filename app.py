@@ -241,6 +241,7 @@ def upload():
                     saved_timesheet_paths = new_paths
                     total = len(saved_timesheet_paths)
 
+            parse_failures = []
             for idx, (ts_path, ts_filename) in enumerate(saved_timesheet_paths, start=1):
                 yield _sse_event("progress", {
                     "message": f"勤務表を解析中... ({idx}/{total}: {ts_filename})"
@@ -249,6 +250,7 @@ def upload():
                     parsed = parse_timesheet_smart(ts_path)
                 except Exception as e:
                     logger.error(f"勤務表解析エラー ({ts_filename}): {e}")
+                    parse_failures.append(f"{ts_filename}: {str(e)}")
                     yield _sse_event("progress", {
                         "message": f"スキップ ({idx}/{total}): {ts_filename} - {str(e)}"
                     })
@@ -265,6 +267,7 @@ def upload():
                             "message": f"解析完了 ({idx}/{total}): {ts_filename} → 時刻直書き {len(df)}件"
                         })
                     else:
+                        parse_failures.append(f"{ts_filename}: 解析結果が0件でした")
                         yield _sse_event("progress", {
                             "message": f"データなし ({idx}/{total}): {ts_filename}"
                         })
@@ -281,6 +284,7 @@ def upload():
                         "message": f"解析完了 ({idx}/{total}): {ts_filename} → 記号式（凡例 {len(parsed.get('legend', []))}個 / 従業員 {len(parsed.get('employees', []))}人）"
                     })
                 else:
+                    parse_failures.append(f"{ts_filename}: 不明な解析モード {parsed_mode}")
                     yield _sse_event("progress", {
                         "message": f"スキップ ({idx}/{total}): {ts_filename} - 不明なモード"
                     })
@@ -288,7 +292,10 @@ def upload():
                 _safe_remove(ts_path)
 
             if not direct_dfs and not code_sheets:
-                yield _sse_event("error", {"message": "勤務表の解析に成功したファイルがありませんでした"})
+                detail = " / ".join(parse_failures) if parse_failures else "詳細理由を取得できませんでした"
+                yield _sse_event("error", {
+                    "message": f"勤務表の解析に成功したファイルがありませんでした。詳細: {detail}"
+                })
                 return
 
             # CSV変換モードでは記号式（code）のみが対象

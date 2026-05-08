@@ -26,9 +26,26 @@ function setupDropZone(dropZoneId, inputId, selectedId, multiple) {
     dropZone.addEventListener('drop', (e) => {
         e.preventDefault();
         dropZone.classList.remove('drag-over');
-        const files = e.dataTransfer.files;
+        const files = Array.from(e.dataTransfer.files || []);
         const dt = new DataTransfer();
-        for (const f of files) dt.items.add(f);
+        const allowMultiple = multiple && input.multiple;
+        const seen = new Set();
+
+        const addFile = (file) => {
+            if (!file) return;
+            const key = `${file.name}\n${file.size}\n${file.lastModified}\n${file.type}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            dt.items.add(file);
+        };
+
+        if (allowMultiple) {
+            Array.from(input.files || []).forEach(addFile);
+            files.forEach(addFile);
+        } else {
+            addFile(files[0]);
+        }
+
         input.files = dt.files;
         updateSelected(input.files, selectedArea);
     });
