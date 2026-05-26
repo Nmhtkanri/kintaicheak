@@ -99,6 +99,46 @@ def _normalize_time_str(s: str) -> str:
     return s
 
 
+def _clock_minutes(value: str) -> int | None:
+    """'H:MM' / 'HH:MM' を 24h 超表記のまま分へ変換する。"""
+    if not value:
+        return None
+    parts = str(value).strip().split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return None
+    if hour < 0 or minute < 0 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _minutes_to_time_str(minutes: int) -> str:
+    return f"{minutes // 60}:{minutes % 60:02d}"
+
+
+def canonicalize_overnight_times(start_time, end_time) -> tuple[str, str]:
+    """画像読み取りの深夜退勤を jinjer の 24h 超表記へ寄せる。"""
+    start = _normalize_time_str(_time_to_str(start_time))
+    end = _normalize_time_str(_time_to_str(end_time))
+    start_minutes = _clock_minutes(start)
+    end_minutes = _clock_minutes(end)
+    if start_minutes is None or end_minutes is None:
+        return start, end
+
+    while end_minutes < start_minutes:
+        end_minutes += 24 * 60
+    return _minutes_to_time_str(start_minutes), _minutes_to_time_str(end_minutes)
+
+
+def suggest_template_id(code: str) -> str:
+    """新規雛形 CSV と月次 CSV で共有する ID 候補を返す。"""
+    return re.sub(r"[^A-Za-z0-9]", "", str(code or "").strip()) or "X"
+
+
 def load_jinjer_templates(csv_path: str) -> list[dict]:
     """jinjer スケジュール雛形 CSV を読み込む
 
@@ -148,8 +188,7 @@ def find_matching_template(
     Returns:
         マッチした雛形 dict、無ければ None
     """
-    target_start = _normalize_time_str(_time_to_str(start_time))
-    target_end = _normalize_time_str(_time_to_str(end_time))
+    target_start, target_end = canonicalize_overnight_times(start_time, end_time)
     if not target_start or not target_end:
         return None
 
@@ -194,13 +233,14 @@ def match_legend_to_templates(
         if not start or not end:
             continue
 
+        start_norm, end_norm = canonicalize_overnight_times(start, end)
         tpl = find_matching_template(start, end, entry.get("break_minutes", 0), templates)
         if tpl:
             matched.append({
                 "code": code,
                 "label": entry.get("label") or code,
-                "start_time": _normalize_time_str(_time_to_str(start)),
-                "end_time": _normalize_time_str(_time_to_str(end)),
+                "start_time": start_norm,
+                "end_time": end_norm,
                 "template_no": tpl.get("No"),
                 "template_name": _tpl_get(tpl, "＊スケジュール雛形名"),
                 "template_id": _tpl_get(tpl, "＊スケジュール雛形ID"),
@@ -209,8 +249,8 @@ def match_legend_to_templates(
             unmatched.append({
                 "code": code,
                 "label": entry.get("label") or code,
-                "start_time": _normalize_time_str(_time_to_str(start)),
-                "end_time": _normalize_time_str(_time_to_str(end)),
+                "start_time": start_norm,
+                "end_time": end_norm,
                 "break_minutes": entry.get("break_minutes", 0),
             })
 
@@ -287,12 +327,14 @@ def generate_new_templates_csv(
     for entry in unmatched:
         code = str(entry.get("code") or "").strip()
         label = entry.get("label") or code
-        start = entry.get("start_time") or ""
-        end = entry.get("end_time") or ""
+        start, end = canonicalize_overnight_times(
+            entry.get("start_time") or "",
+            entry.get("end_time") or "",
+        )
         break_minutes = int(entry.get("break_minutes") or 0)
 
         # ID 重複回避: code をベースに連番を振る
-        base_id = re.sub(r"[^A-Za-z0-9]", "", code) or "X"
+        base_id = suggest_template_id(code)
         candidate = base_id
         suffix = 1
         while candidate in used_ids:

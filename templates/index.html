@@ -87,40 +87,22 @@
             </div>
         </div>
 
-        <!-- カレンダー画像（CSV変換モード用） -->
-        <div class="upload-section" id="calendar-section" style="display:none">
-            <div class="section-title">📅 カレンダー画像（シフト表）</div>
-            <div class="drop-zone" id="calendar-drop-zone" data-input="timesheet_files">
+        <!-- シフト表・凡例ファイル（CSV変換モード用） -->
+        <div class="upload-section" id="shift-files-section" style="display:none">
+            <div class="section-title">📅 シフト表・凡例画像</div>
+            <div class="drop-zone" id="shift-files-drop-zone" data-input="timesheet_files">
                 <div class="drop-zone-inner">
                     <div class="drop-icon">📅</div>
-                    <p>シフト表（誰が何日にどの記号で勤務するか）の画像をここにドラッグ&ドロップ、または</p>
+                    <p>シフト表・凡例画像をまとめてここにドラッグ&ドロップ、または</p>
                     <label class="btn btn-secondary">
                         ファイルを選択
-                        <input type="file" name="timesheet_files" id="calendar-input"
+                        <input type="file" name="timesheet_files" id="shift-files-input"
                                accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
                     </label>
                     <p class="hint">対応形式: .xlsx .xls .xlsb .pdf .png .jpg .jpeg</p>
+                    <p class="hint">※凡例が別画像なら、シフト表と一緒に追加してください</p>
                 </div>
-                <div class="selected-files" id="calendar-selected"></div>
-            </div>
-        </div>
-
-        <!-- スケジュール条件画像（CSV変換モード用） -->
-        <div class="upload-section" id="legend-section" style="display:none">
-            <div class="section-title">🗒️ スケジュール条件画像（凡例）</div>
-            <div class="drop-zone" id="legend-drop-zone" data-input="timesheet_files">
-                <div class="drop-zone-inner">
-                    <div class="drop-icon">🗒️</div>
-                    <p>記号と勤務時間の対応表（B = 12:30-21:00 など）の画像をここにドラッグ&ドロップ、または</p>
-                    <label class="btn btn-secondary">
-                        ファイルを選択
-                        <input type="file" name="timesheet_files" id="legend-input"
-                               accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
-                    </label>
-                    <p class="hint">対応形式: .xlsx .xls .xlsb .pdf .png .jpg .jpeg</p>
-                    <p class="hint">※カレンダー側の画像に凡例も写っている場合は、こちらは空欄で OK です</p>
-                </div>
-                <div class="selected-files" id="legend-selected"></div>
+                <div class="selected-files" id="shift-files-selected"></div>
             </div>
         </div>
 
@@ -241,7 +223,240 @@
         <div id="csv-new-template-msg" class="new-template-msg" style="display:none"></div>
     </div>
 
+    <!-- ============================================================ -->
+    <!-- 月次集約モード — quick_compare / quick_export                  -->
+    <!-- ============================================================ -->
+    <hr class="divider" style="margin-top:2rem">
+    <div class="section-title">📑 月次集約モード（5月本番MVP）</div>
+    <p class="hint" style="margin-bottom: 12px">
+        既に各社員ぶんの突合が完了している前提で、複数の突合結果xlsx を 1 冊に集約 → 人間が承認 → jinjer アップロード用CSV を生成します。
+    </p>
+
+    <div class="upload-section">
+        <div class="section-title">① 差異一覧の生成 (quick_compare)</div>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label>
+                突合結果xlsx フォルダ:
+                <input type="text" id="qc-kintai-dir" placeholder="例: Y:\給与明細\R8年\5月\突合結果"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label>
+                jinjer 汎用データCSV フォルダ:
+                <input type="text" id="qc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px">
+                対象月:
+                <input type="text" id="qc-month" placeholder="2026-05"
+                       style="width:140px; padding:6px 10px">
+            </label>
+            <label>
+                出力ファイル名(任意):
+                <input type="text" id="qc-output-filename" placeholder="差異一覧_2026-05.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <div style="margin-top:6px">
+                <button type="button" class="btn btn-primary" id="qc-run-btn">
+                    📊 差異一覧を生成
+                </button>
+                <span id="qc-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="qc-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card card-ng"><div class="card-label">DANGER</div><div class="card-value" id="qc-cnt-danger">0</div></div>
+                <div class="summary-card card-caution"><div class="card-label">WARN</div><div class="card-value" id="qc-cnt-warn">0</div></div>
+                <div class="summary-card card-ok"><div class="card-label">INFO</div><div class="card-value" id="qc-cnt-info">0</div></div>
+                <div class="summary-card"><div class="card-label">総差異</div><div class="card-value" id="qc-cnt-total">0</div></div>
+            </div>
+            <a id="qc-download-link" href="#" class="btn btn-download" style="display:none">
+                📥 差異一覧xlsxをダウンロード
+            </a>
+            <pre id="qc-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+        </div>
+        <div id="qc-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <div class="upload-section">
+        <div class="section-title">② アップロード用CSVの生成 (quick_export)</div>
+        <p class="hint" style="padding:0 14px">
+            ①で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。
+        </p>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label>
+                人間判断を埋めた差異一覧xlsx:
+                <input type="file" id="qe-diff-file" accept=".xlsx" style="margin-top:4px">
+            </label>
+            <label>
+                jinjer 汎用データCSV フォルダ(①と同じものを指定):
+                <input type="text" id="qe-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label>
+                出力ファイル名(任意):
+                <input type="text" id="qe-output-filename" placeholder="jinjer_upload_2026-05.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <div style="margin-top:6px; display:flex; gap:8px; align-items:center">
+                <button type="button" class="btn btn-secondary" id="qe-dryrun-btn">
+                    🔍 dry-run（内訳確認のみ）
+                </button>
+                <button type="button" class="btn btn-primary" id="qe-execute-btn">
+                    📤 本実行（CSV出力）
+                </button>
+                <span id="qe-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="qe-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div id="qe-mode-label" style="font-weight:bold; margin-bottom:8px"></div>
+            <table style="border-collapse:collapse; font-size:13px">
+                <tr><td style="padding:2px 8px">承認 / 却下 / 保留 / 未判断:</td><td><span id="qe-judges"></span></td></tr>
+                <tr><td style="padding:2px 8px">出勤1 上書き:</td><td><span id="qe-overwrite-in">0</span></td></tr>
+                <tr><td style="padding:2px 8px">退勤1 上書き:</td><td><span id="qe-overwrite-out">0</span></td></tr>
+                <tr><td style="padding:2px 8px">休憩・総労働時間スキップ:</td><td><span id="qe-skipped">0</span></td></tr>
+                <tr><td style="padding:2px 8px">jinjer 行 未マッチ:</td><td><span id="qe-notmatched">0</span></td></tr>
+                <tr><td style="padding:2px 8px">うち実績確定済を上書き(参考):</td><td><span id="qe-finalized">0</span></td></tr>
+                <tr><td style="padding:2px 8px">出力CSV行数:</td><td><span id="qe-total-rows">0</span></td></tr>
+            </table>
+            <a id="qe-download-link" href="#" class="btn btn-download" style="display:none; margin-top:10px">
+                📥 アップロード用CSVをダウンロード
+            </a>
+            <div id="qe-warnings-area" style="display:none; margin-top:10px">
+                <div style="font-weight:bold; margin-bottom:4px">⚠️ 警告 (<span id="qe-warn-count">0</span> 件)</div>
+                <ul id="qe-warnings-list" style="margin:0; padding-left:20px; font-size:12px; max-height:160px; overflow:auto"></ul>
+            </div>
+        </div>
+        <div id="qe-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
 </div>
+
+<script>
+// ============================================================
+// 月次集約モード JS
+// ============================================================
+(function(){
+    const qcRunBtn = document.getElementById('qc-run-btn');
+    const qeDryRunBtn = document.getElementById('qe-dryrun-btn');
+    const qeExecuteBtn = document.getElementById('qe-execute-btn');
+
+    function showError(elemId, errors){
+        const el = document.getElementById(elemId);
+        el.innerHTML = (errors || []).map(e => '<div>' + e + '</div>').join('');
+        el.style.display = 'block';
+    }
+    function hideError(elemId){
+        document.getElementById(elemId).style.display = 'none';
+    }
+
+    // ----- quick_compare -----
+    qcRunBtn.addEventListener('click', async () => {
+        hideError('qc-error-area');
+        document.getElementById('qc-result-area').style.display = 'none';
+        document.getElementById('qc-status').textContent = '処理中...';
+        qcRunBtn.disabled = true;
+
+        const fd = new FormData();
+        fd.append('kintai_dir', document.getElementById('qc-kintai-dir').value);
+        fd.append('jinjer_dir', document.getElementById('qc-jinjer-dir').value);
+        fd.append('month', document.getElementById('qc-month').value);
+        fd.append('output_filename', document.getElementById('qc-output-filename').value);
+
+        try {
+            const res = await fetch('/quick_compare', {method:'POST', body: fd});
+            const data = await res.json();
+            if (!data.success){
+                showError('qc-error-area', data.errors || ['処理に失敗しました']);
+                document.getElementById('qc-status').textContent = '';
+                return;
+            }
+            document.getElementById('qc-cnt-danger').textContent = data.stats.danger_count;
+            document.getElementById('qc-cnt-warn').textContent = data.stats.warn_count;
+            document.getElementById('qc-cnt-info').textContent = data.stats.info_count;
+            document.getElementById('qc-cnt-total').textContent = data.stats.diff_count;
+            const dl = document.getElementById('qc-download-link');
+            dl.href = data.download_url;
+            dl.style.display = 'inline-block';
+            const consoleEl = document.getElementById('qc-console');
+            consoleEl.textContent = (data.console || []).join('\n');
+            consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+            document.getElementById('qc-result-area').style.display = 'block';
+            document.getElementById('qc-status').textContent = '完了';
+        } catch (e) {
+            showError('qc-error-area', ['通信エラー: ' + e.message]);
+            document.getElementById('qc-status').textContent = '';
+        } finally {
+            qcRunBtn.disabled = false;
+        }
+    });
+
+    // ----- quick_export -----
+    async function runQuickExport(execute){
+        hideError('qe-error-area');
+        document.getElementById('qe-result-area').style.display = 'none';
+        document.getElementById('qe-status').textContent = '処理中...';
+        qeDryRunBtn.disabled = true;
+        qeExecuteBtn.disabled = true;
+
+        const diffInput = document.getElementById('qe-diff-file');
+        if (!diffInput.files || diffInput.files.length === 0){
+            showError('qe-error-area', ['差異一覧xlsx を選択してください']);
+            document.getElementById('qe-status').textContent = '';
+            qeDryRunBtn.disabled = false;
+            qeExecuteBtn.disabled = false;
+            return;
+        }
+
+        const fd = new FormData();
+        fd.append('diff_file', diffInput.files[0]);
+        fd.append('jinjer_dir', document.getElementById('qe-jinjer-dir').value);
+        fd.append('output_filename', document.getElementById('qe-output-filename').value);
+        fd.append('execute', execute ? '1' : '0');
+
+        try {
+            const res = await fetch('/quick_export', {method:'POST', body: fd});
+            const data = await res.json();
+            if (!data.success){
+                showError('qe-error-area', data.errors || ['処理に失敗しました']);
+                document.getElementById('qe-status').textContent = '';
+                return;
+            }
+            const s = data.stats;
+            document.getElementById('qe-mode-label').textContent =
+                data.dry_run ? '[dry-run] CSV は書き出されていません。本実行は「本実行」ボタン。' : '[本実行] CSV を書き出しました。';
+            document.getElementById('qe-judges').textContent =
+                `${s.approved} / ${s.rejected} / ${s.held} / ${s.pending}`;
+            document.getElementById('qe-overwrite-in').textContent = s.overwritten_punch_in;
+            document.getElementById('qe-overwrite-out').textContent = s.overwritten_punch_out;
+            document.getElementById('qe-skipped').textContent = (s.skipped_break + s.skipped_total) + ' (休憩:' + s.skipped_break + ', 総労働:' + s.skipped_total + ')';
+            document.getElementById('qe-notmatched').textContent = s.not_matched;
+            document.getElementById('qe-finalized').textContent = s.overwritten_finalized;
+            document.getElementById('qe-total-rows').textContent = s.total_jinjer_rows;
+            const dl = document.getElementById('qe-download-link');
+            if (data.download_url){
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+            } else {
+                dl.style.display = 'none';
+            }
+            const warnList = document.getElementById('qe-warnings-list');
+            warnList.innerHTML = (data.warnings || []).map(w => '<li>' + w + '</li>').join('');
+            document.getElementById('qe-warn-count').textContent = (data.warnings || []).length;
+            document.getElementById('qe-warnings-area').style.display = (data.warnings || []).length ? 'block' : 'none';
+            document.getElementById('qe-result-area').style.display = 'block';
+            document.getElementById('qe-status').textContent = '完了';
+        } catch (e) {
+            showError('qe-error-area', ['通信エラー: ' + e.message]);
+            document.getElementById('qe-status').textContent = '';
+        } finally {
+            qeDryRunBtn.disabled = false;
+            qeExecuteBtn.disabled = false;
+        }
+    }
+    qeDryRunBtn.addEventListener('click', () => runQuickExport(false));
+    qeExecuteBtn.addEventListener('click', () => runQuickExport(true));
+})();
+</script>
 
 <!-- ============================================================ -->
 <!-- 凡例レビューモーダル（シフト記号モード時に表示）                 -->

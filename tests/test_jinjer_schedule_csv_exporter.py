@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.jinjer_schedule_csv_exporter import (
     _is_ake_code,
     _off_value_for_weekday,
+    _resolve_merged_cell_value,
     _resolve_cell_value,
     _sanitize_filename_part,
     build_legend_to_template_name,
@@ -200,8 +201,8 @@ def test_export_csv_basic_round_trip(tmp_path):
     emp_row = all_rows[2]
     assert emp_row[0] == "小嶋桃子"
     assert emp_row[1] == "1234"
-    # 4/1 (水) → "B勤" (フォールバック label)
-    assert emp_row[2] == "B勤"
+    # 4/1 (水) → 新規雛形 CSV と共有する ID 候補
+    assert emp_row[2] == "B"
     # 4/4 (土) → 公 → "所"
     assert emp_row[5] == "所"
     # 4/5 (日) → 公 → "法"
@@ -271,10 +272,26 @@ def test_export_csv_blank_day_for_active_employee(tmp_path):
 
 
 def test_build_legend_to_template_name_no_csv():
-    """雛形CSVが無い場合、凡例ラベルがフォールバック"""
+    """雛形CSVが無い場合も jinjer 用の ID 候補へフォールバック"""
     legend = _legend_for_test()
     code_to_name = build_legend_to_template_name(legend, "")
-    assert code_to_name == {"B": "B勤"}
+    assert code_to_name == {"B": "B"}
+
+
+def test_resolve_merged_unmatched_cell_uses_template_id_candidate():
+    cell_value, unmatched = _resolve_merged_cell_value(
+        {
+            "merged_code": "4+a",
+            "merged_label": "4番勤務+a勤務",
+            "merged_start": "16:30",
+            "merged_end": "33:00",
+            "merged_break": 0,
+        },
+        templates=[],
+    )
+
+    assert cell_value == "4a"
+    assert unmatched["code"] == "4+a"
 
 
 # =============================================================================

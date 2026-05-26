@@ -1,0 +1,710 @@
+"""quick_compare.py — 5月本番 MVP 差異一覧生成スクリプト
+
+入力:
+  --kintai-dir : 既存 kintai-checker が出力した突合結果xlsx 群のフォルダ
+  --jinjer-dir : jinjer 管理画面からダウンロードした「汎用データ（まるめ適用後）」CSV 群のフォルダ
+  --output     : 出力する差異一覧xlsx のパス
+
+出力:
+  差異一覧_<YYYY-MM>.xlsx
+    - サマリ
+    - 差異一覧（人間判断プルダウン・警告レベル付き）
+    - 取込ログ
+
+設計書: docs/PLAN_5月本番_3営業日MVP.md  /  docs/DESIGN_月次マスター_P0_P3.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, date
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+
+
+# ===== jinjer CSV の列マップ（1-indexed、ヘッダー名で照合する想定だが定数として控えておく） =====
+JINJER_HEADERS = {
+    "name": "名前",
+    "emp_id": "*従業員ID",
+    "date": "*年月日",
+    "punch_in_1": "出勤1",
+    "punch_out_1": "退勤1",
+    "break_1_start": "休憩1",
+    "break_1_end": "復帰1",
+    "finalized": "実績確定状況",
+    "total_work": "総労働時間",
+    "actual_work": "実労働時間",
+    "break_total": "休憩時間",
+}
+
+# ===== 警告レベル =====
+LEVEL_DANGER = "DANGER"
+LEVEL_WARN = "WARN"
+LEVEL_INFO = "INFO"
+
+# ===== 警告閾値（後で調整可能） =====
+PUNCH_DIFF_WARN_MIN = 120  # 出勤/退勤差分が 120分以上で WARN
+LONG_WORK_HOURS = 10       # 総労働時間 10h 超で WARN
+SHORT_BREAK_AT_LONG_WORK = 6  # 勤務 6h 超で休憩 0:00 なら DANGER（労基法的に必要）
+OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
+
+# ===== 出力xlsx 列定義 =====
+DIFF_COLUMNS = [
+    "行ID", "従業員ID", "氏名", "対象日付",
+    "差異種別", "勤務表値", "jinjer値", "差分(分)",
+    "警告レベル", "警告理由",
+    "自動修正提案値",
+    "人間判断", "判断メモ",
+    "実績確定状況",  # 参考表示のみ。警告レベル判定には使わない
+    "元突合結果ファイル",
+]
+
+DIFF_KIND_PUNCH_IN = "出勤"
+DIFF_KIND_PUNCH_OUT = "退勤"
+DIFF_KIND_BREAK = "休憩"
+DIFF_KIND_TOTAL = "総労働時間"
+
+# 既存 kintai-checker の services パスを通す（氏名正規化を借りる場合用）
+KINTAI_CHECKER_ROOT = Path(__file__).resolve().parent
+if str(KINTAI_CHECKER_ROOT) not in sys.path:
+    sys.path.insert(0, str(KINTAI_CHECKER_ROOT))
+
+
+# ----------------------------------------------------------------------
+# データクラス
+# ----------------------------------------------------------------------
+
+@dataclass
+class DiffRow:
+    row_id: int
+    emp_id: str
+    name: str
+    target_date: str  # YYYY-MM-DD
+    kind: str
+    kintai_value: str
+    jinjer_value: str
+    diff_minutes: str  # 文字列で持つ（空欄表現のため）
+    warn_level: str
+    warn_reason: str
+    auto_fix_value: str
+    finalized: str  # 実績確定状況（参考情報。"TRUE"/"FALSE"/空）
+    source_file: str
+
+
+@dataclass
+class LogEntry:
+    severity: str  # INFO/WARN/ERROR
+    message: str
+    source: str = ""
+
+
+# ----------------------------------------------------------------------
+# 時刻ユーティリティ
+# ----------------------------------------------------------------------
+
+_TIME_RE = re.compile(r"^(\d{1,3}):(\d{2})(?::\d{2})?$")
+
+
+def parse_hhmm(value: Any) -> int | None:
+    """'H:MM' / 'HH:MM' / 'HH:MM:SS' を分に変換。空欄や不正値は None。
+    24時超表記（25:30 等）はそのまま分換算する（時刻 ≠ 時間長 の用途で使い分け）。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return None
+    m = _TIME_RE.match(s)
+    if not m:
+        return None
+    h = int(m.group(1))
+    mm = int(m.group(2))
+    return h * 60 + mm
+
+
+def format_minutes_as_hhmm(minutes: int | None) -> str:
+    if minutes is None:
+        return ""
+    h, m = divmod(int(minutes), 60)
+    return f"{h}:{m:02d}"
+
+
+def normalize_date_iso(value: Any) -> str | None:
+    """日付値を 'YYYY-MM-DD' に正規化。jinjer の 'YYYY/M/D' にも対応。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "nat"):
+        return None
+    # ISO
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        pass
+    # YYYY/M/D
+    try:
+        return datetime.strptime(s, "%Y/%m/%d").date().isoformat()
+    except ValueError:
+        pass
+    # YYYY/MM/DD
+    for fmt in ("%Y/%m/%d", "%Y.%m.%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+# ----------------------------------------------------------------------
+# 入力読み込み
+# ----------------------------------------------------------------------
+
+KINTAI_RESULT_SHEET_CANDIDATES = ["突合結果", "突合"]
+
+
+def load_kintai_results(kintai_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
+    """突合結果xlsx を全部読んで縦結合する。氏名・日付・出退勤差分を列に持つ。"""
+    if not kintai_dir.exists():
+        logs.append(LogEntry("ERROR", f"突合結果フォルダが見つかりません: {kintai_dir}"))
+        return pd.DataFrame()
+
+    frames = []
+    for xlsx in sorted(kintai_dir.glob("*.xlsx")):
+        # 一時ファイル除外
+        if xlsx.name.startswith("~$"):
+            continue
+        try:
+            xl = pd.ExcelFile(xlsx)
+        except Exception as e:
+            logs.append(LogEntry("ERROR", f"xlsx を開けません: {xlsx.name}: {e}"))
+            continue
+        sheet = None
+        for cand in KINTAI_RESULT_SHEET_CANDIDATES:
+            if cand in xl.sheet_names:
+                sheet = cand
+                break
+        if sheet is None:
+            sheet = xl.sheet_names[0]
+            logs.append(LogEntry("WARN", f"突合結果シートが見つからないため先頭シート '{sheet}' を使用: {xlsx.name}"))
+        try:
+            df = pd.read_excel(xlsx, sheet_name=sheet, dtype=object)
+        except Exception as e:
+            logs.append(LogEntry("ERROR", f"シート読み込み失敗 {xlsx.name}:{sheet}: {e}"))
+            continue
+        df["_source_file"] = xlsx.name
+        frames.append(df)
+        logs.append(LogEntry("INFO", f"突合結果読込: {xlsx.name} ({len(df)} 行)"))
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_jinjer_csvs(jinjer_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
+    """jinjer CSV 群を CP932 で読んで縦結合する。"""
+    if not jinjer_dir.exists():
+        logs.append(LogEntry("ERROR", f"jinjer CSV フォルダが見つかりません: {jinjer_dir}"))
+        return pd.DataFrame()
+
+    frames = []
+    patterns = ["*.csv", "*.xlsx"]
+    for pattern in patterns:
+        for path in sorted(jinjer_dir.glob(pattern)):
+            if path.name.startswith("~$"):
+                continue
+            try:
+                if path.suffix.lower() == ".csv":
+                    df = pd.read_csv(path, encoding="cp932", dtype=object)
+                else:
+                    df = pd.read_excel(path, dtype=object)
+            except Exception as e:
+                logs.append(LogEntry("ERROR", f"jinjer データ読込失敗 {path.name}: {e}"))
+                continue
+            df["_jinjer_source"] = path.name
+            frames.append(df)
+            logs.append(LogEntry("INFO", f"jinjer 読込: {path.name} ({len(df)} 行)"))
+
+    if not frames:
+        return pd.DataFrame()
+    # 必須列確認
+    combined = pd.concat(frames, ignore_index=True)
+    required = [JINJER_HEADERS["emp_id"], JINJER_HEADERS["date"]]
+    for col in required:
+        if col not in combined.columns:
+            logs.append(LogEntry("ERROR", f"jinjer CSV に必須列 '{col}' がありません"))
+            return pd.DataFrame()
+    return combined
+
+
+# ----------------------------------------------------------------------
+# 突合
+# ----------------------------------------------------------------------
+
+def build_jinjer_index(jinjer_df: pd.DataFrame) -> dict[tuple[str, str], dict]:
+    """(従業員ID, 日付ISO) -> jinjer 行 dict"""
+    index: dict[tuple[str, str], dict] = {}
+    emp_col = JINJER_HEADERS["emp_id"]
+    date_col = JINJER_HEADERS["date"]
+    for _, row in jinjer_df.iterrows():
+        emp_id = str(row.get(emp_col) or "").strip()
+        date_iso = normalize_date_iso(row.get(date_col))
+        if not emp_id or not date_iso:
+            continue
+        index[(emp_id, date_iso)] = row.to_dict()
+    return index
+
+
+def build_name_to_emp_map(jinjer_df: pd.DataFrame) -> dict[str, str]:
+    """氏名 → 従業員ID マップ。jinjer CSV の「名前」列から作る。
+    姓名のスペース有無バリエーションも登録。同姓同名は最初の1人を採用（後で警告）。
+    """
+    name_col = JINJER_HEADERS["name"]
+    emp_col = JINJER_HEADERS["emp_id"]
+    result: dict[str, str] = {}
+    if name_col not in jinjer_df.columns:
+        return result
+    seen_ids = set()
+    for _, row in jinjer_df.iterrows():
+        emp_id = str(row.get(emp_col) or "").strip()
+        name = str(row.get(name_col) or "").strip()
+        if not emp_id or not name or emp_id in seen_ids:
+            continue
+        seen_ids.add(emp_id)
+        # 表記バリエーション
+        variants = {
+            name,
+            name.replace(" ", ""),
+            name.replace("　", ""),
+            name.replace(" ", "").replace("　", ""),
+        }
+        for v in variants:
+            if v and v not in result:
+                result[v] = emp_id
+    return result
+
+
+def resolve_emp_id(name: Any, name_map: dict[str, str]) -> str | None:
+    if not name:
+        return None
+    s = str(name).strip()
+    if not s:
+        return None
+    for key in [s, s.replace(" ", ""), s.replace("　", ""), s.replace(" ", "").replace("　", "")]:
+        if key in name_map:
+            return name_map[key]
+    return None
+
+
+def to_int_diff(value: Any) -> int | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+def compute_diffs(
+    kintai_df: pd.DataFrame,
+    jinjer_index: dict[tuple[str, str], dict],
+    name_map: dict[str, str],
+    logs: list[LogEntry],
+) -> list[DiffRow]:
+    """突合結果xlsx の各行に対し、4種の差異を生成して返す。"""
+    rows: list[DiffRow] = []
+    next_id = 1
+
+    seen_emp_date: set[tuple[str, str]] = set()
+
+    for _, krow in kintai_df.iterrows():
+        name = str(krow.get("氏名") or "").strip()
+        date_iso = normalize_date_iso(krow.get("日付"))
+        if not name or not date_iso:
+            continue
+
+        emp_id = resolve_emp_id(name, name_map)
+        if not emp_id:
+            logs.append(LogEntry("WARN", f"氏名 → 従業員ID 解決失敗: {name} ({krow.get('_source_file', '')})"))
+            continue
+
+        source_file = str(krow.get("_source_file") or "")
+        jrow = jinjer_index.get((emp_id, date_iso))
+        seen_emp_date.add((emp_id, date_iso))
+
+        # 実績確定状況（参考表示のみ、警告レベル判定には使わない）
+        finalized = ""
+        if jrow is not None:
+            finalized = str(jrow.get(JINJER_HEADERS["finalized"]) or "").strip()
+
+        # ----- 出勤差異 -----
+        k_in = str(krow.get("勤務表_出勤") or "").strip()
+        j_in = str(krow.get("jinjer_出勤") or "").strip()
+        diff_in = to_int_diff(krow.get("出勤差分(分)"))
+        if diff_in is not None and diff_in != 0:
+            level, reason = classify_punch_diff(diff_in, "in")
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_PUNCH_IN,
+                kintai_value=k_in, jinjer_value=j_in, diff_minutes=str(diff_in),
+                warn_level=level, warn_reason=reason,
+                auto_fix_value=k_in,
+                finalized=finalized,
+                source_file=source_file,
+            ))
+            next_id += 1
+
+        # ----- 退勤差異 -----
+        k_out = str(krow.get("勤務表_退勤") or "").strip()
+        j_out = str(krow.get("jinjer_退勤") or "").strip()
+        diff_out = to_int_diff(krow.get("退勤差分(分)"))
+        if diff_out is not None and diff_out != 0:
+            level, reason = classify_punch_diff(diff_out, "out")
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_PUNCH_OUT,
+                kintai_value=k_out, jinjer_value=j_out, diff_minutes=str(diff_out),
+                warn_level=level, warn_reason=reason,
+                auto_fix_value=k_out,
+                finalized=finalized,
+                source_file=source_file,
+            ))
+            next_id += 1
+
+        # ----- 休憩警告 / 総労働時間警告 (jinjer 側のみで判定) -----
+        if jrow is not None:
+            break_warn = classify_break(jrow)
+            if break_warn:
+                level, reason, j_break = break_warn
+                rows.append(DiffRow(
+                    row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                    kind=DIFF_KIND_BREAK,
+                    kintai_value="-", jinjer_value=j_break, diff_minutes="",
+                    warn_level=level, warn_reason=reason,
+                    auto_fix_value="",  # 休憩は自動反映しない
+                    finalized=finalized,
+                    source_file=source_file,
+                ))
+                next_id += 1
+
+            total_warn = classify_total_work(jrow)
+            if total_warn:
+                level, reason, j_total = total_warn
+                rows.append(DiffRow(
+                    row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                    kind=DIFF_KIND_TOTAL,
+                    kintai_value="-", jinjer_value=j_total, diff_minutes="",
+                    warn_level=level, warn_reason=reason,
+                    auto_fix_value="",  # 総労働時間は自動反映しない
+                    finalized=finalized,
+                    source_file=source_file,
+                ))
+                next_id += 1
+
+    return rows
+
+
+def classify_punch_diff(diff_minutes: int, side: str) -> tuple[str, str]:
+    """出勤/退勤の差分行の警告レベル判定。
+    side: 'in' or 'out'
+
+    注意: 実績確定状況（jinjer 側で本人が打刻申請を確定した状態）は警告レベル判定に
+    使わない。実績確定済は「本人が確定済み」という意味であって「勤怠が正しい」という
+    意味ではないため、それを理由に上書きをブロックしたり DANGER 表示すべきではない。
+    実績確定状況は差異一覧シートに参考列として表示するだけ。
+    """
+    reasons: list[str] = []
+    level = LEVEL_INFO
+
+    abs_diff = abs(diff_minutes)
+    if abs_diff >= PUNCH_DIFF_WARN_MIN:
+        level = LEVEL_WARN
+        reasons.append(f"{side}差分 {abs_diff}分 (>={PUNCH_DIFF_WARN_MIN})")
+
+    if not reasons:
+        reasons.append("通常差異")
+    return level, " / ".join(reasons)
+
+
+def classify_break(jrow: dict) -> tuple[str, str, str] | None:
+    """jinjer 側の休憩時間に問題があるか判定。
+    戻り値: (level, reason, jinjer_break_str) or None（警告不要）
+    """
+    j_break_str = str(jrow.get(JINJER_HEADERS["break_total"]) or "").strip()
+    j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
+    j_break_min = parse_hhmm(j_break_str)
+    j_total_min = parse_hhmm(j_total_str)
+
+    reasons: list[str] = []
+    level = LEVEL_INFO
+
+    # ① 勤務 6h 超で休憩 0 → 労基法違反疑い (DANGER)
+    if j_break_min == 0 and j_total_min is not None and j_total_min >= SHORT_BREAK_AT_LONG_WORK * 60:
+        level = LEVEL_DANGER
+        reasons.append(f"休憩 0:00 だが総労働 {format_minutes_as_hhmm(j_total_min)} (労基法違反疑い)")
+
+    # ② 休憩 2h 超 → WARN
+    if j_break_min is not None and j_break_min > OVER_BREAK_HOURS * 60:
+        if level == LEVEL_INFO:
+            level = LEVEL_WARN
+        reasons.append(f"休憩 {format_minutes_as_hhmm(j_break_min)} 過剰の疑い")
+
+    if not reasons:
+        return None
+    return level, " / ".join(reasons), j_break_str
+
+
+def classify_total_work(jrow: dict) -> tuple[str, str, str] | None:
+    """jinjer 側の総労働時間に問題があるか判定。
+    戻り値: (level, reason, jinjer_total_str) or None
+    """
+    j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
+    j_punch_in = str(jrow.get(JINJER_HEADERS["punch_in_1"]) or "").strip()
+    j_total_min = parse_hhmm(j_total_str)
+
+    reasons: list[str] = []
+    level = LEVEL_INFO
+
+    if j_total_min is None:
+        return None
+
+    # ① 長時間労働
+    if j_total_min > LONG_WORK_HOURS * 60:
+        level = LEVEL_WARN
+        reasons.append(f"総労働 {format_minutes_as_hhmm(j_total_min)} (>{LONG_WORK_HOURS}h)")
+
+    # ② 出勤打刻あり / 総労働 0:00 → 計算不能警告
+    if j_total_min == 0 and j_punch_in:
+        level = LEVEL_DANGER
+        reasons.append("出勤打刻あり/総労働 0:00 (集計不整合)")
+
+    if not reasons:
+        return None
+    return level, " / ".join(reasons), j_total_str
+
+
+# ----------------------------------------------------------------------
+# Excel 出力
+# ----------------------------------------------------------------------
+
+HEADER_FILL = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+LEVEL_FILL = {
+    LEVEL_DANGER: PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+    LEVEL_WARN: PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+    LEVEL_INFO: PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+}
+
+
+def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry], month_label: str) -> None:
+    wb = Workbook()
+    # サマリ
+    ws_sum = wb.active
+    ws_sum.title = "サマリ"
+    summary_data = [
+        ("対象月", month_label),
+        ("総差異件数", len(diff_rows)),
+        ("出勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_IN)),
+        ("退勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_OUT)),
+        ("休憩警告件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_BREAK)),
+        ("総労働時間警告件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_TOTAL)),
+        ("DANGER 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_DANGER)),
+        ("WARN 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_WARN)),
+        ("INFO 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_INFO)),
+        ("人間判断: 未判断", len(diff_rows)),
+        ("人間判断: 承認", 0),
+        ("人間判断: 却下", 0),
+        ("人間判断: 保留", 0),
+        ("生成日時", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    ]
+    for r_idx, (label, value) in enumerate(summary_data, start=1):
+        c1 = ws_sum.cell(row=r_idx, column=1, value=label)
+        c1.font = Font(bold=True)
+        ws_sum.cell(row=r_idx, column=2, value=value)
+    ws_sum.column_dimensions["A"].width = 22
+    ws_sum.column_dimensions["B"].width = 28
+
+    # 差異一覧
+    ws = wb.create_sheet("差異一覧")
+    for col_idx, header in enumerate(DIFF_COLUMNS, start=1):
+        c = ws.cell(row=1, column=col_idx, value=header)
+        c.fill = HEADER_FILL
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(DIFF_COLUMNS))}1"
+    ws.freeze_panes = "A2"
+
+    # データ行
+    for r_idx, drow in enumerate(diff_rows, start=2):
+        values = [
+            drow.row_id, drow.emp_id, drow.name, drow.target_date,
+            drow.kind, drow.kintai_value, drow.jinjer_value, drow.diff_minutes,
+            drow.warn_level, drow.warn_reason,
+            drow.auto_fix_value,
+            "",  # 人間判断（プルダウン）
+            "",  # 判断メモ
+            drow.finalized,  # 実績確定状況（参考表示）
+            drow.source_file,
+        ]
+        for c_idx, val in enumerate(values, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=val)
+            cell.alignment = Alignment(vertical="center")
+        # 警告レベル列に色塗り
+        fill = LEVEL_FILL.get(drow.warn_level)
+        if fill:
+            ws.cell(row=r_idx, column=DIFF_COLUMNS.index("警告レベル") + 1).fill = fill
+
+    # データ検証プルダウン: 人間判断
+    judge_col_letter = get_column_letter(DIFF_COLUMNS.index("人間判断") + 1)
+    if diff_rows:
+        dv = DataValidation(
+            type="list",
+            formula1='"承認,却下,保留"',
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle="不正な値",
+            error="承認 / 却下 / 保留 のいずれかを選択してください",
+        )
+        ws.add_data_validation(dv)
+        dv.add(f"{judge_col_letter}2:{judge_col_letter}{1 + len(diff_rows)}")
+
+    # 列幅
+    widths = [6, 12, 16, 12, 10, 10, 10, 8, 10, 40, 10, 10, 28, 12, 32]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    # 取込ログ
+    ws_log = wb.create_sheet("取込ログ")
+    ws_log.cell(row=1, column=1, value="severity").font = Font(bold=True)
+    ws_log.cell(row=1, column=2, value="message").font = Font(bold=True)
+    ws_log.cell(row=1, column=3, value="source").font = Font(bold=True)
+    for r_idx, entry in enumerate(logs, start=2):
+        ws_log.cell(row=r_idx, column=1, value=entry.severity)
+        ws_log.cell(row=r_idx, column=2, value=entry.message)
+        ws_log.cell(row=r_idx, column=3, value=entry.source)
+    ws_log.column_dimensions["A"].width = 10
+    ws_log.column_dimensions["B"].width = 80
+    ws_log.column_dimensions["C"].width = 32
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_path)
+
+
+# ----------------------------------------------------------------------
+# 共通実行関数（CLI / Flask 共用）
+# ----------------------------------------------------------------------
+
+@dataclass
+class CompareResult:
+    ok: bool
+    output_path: Path
+    diff_count: int = 0
+    danger_count: int = 0
+    warn_count: int = 0
+    info_count: int = 0
+    kintai_rows_read: int = 0
+    jinjer_rows_read: int = 0
+    name_map_size: int = 0
+    error: str = ""
+    logs: list[LogEntry] = field(default_factory=list)
+
+
+def run_quick_compare(
+    kintai_dir: Path,
+    jinjer_dir: Path,
+    output_path: Path,
+    month_label: str,
+    log_func=print,
+) -> CompareResult:
+    """突合結果xlsx + jinjer CSV → 差異一覧xlsx を生成する。CLI と Web UI から共用。"""
+    logs: list[LogEntry] = []
+    result = CompareResult(ok=False, output_path=output_path, logs=logs)
+
+    log_func(f"[start] 突合結果フォルダ: {kintai_dir}")
+    log_func(f"[start] jinjer CSV フォルダ: {jinjer_dir}")
+    log_func(f"[start] 出力先: {output_path}")
+
+    kintai_df = load_kintai_results(kintai_dir, logs)
+    if kintai_df.empty:
+        msg = "突合結果xlsx が読めませんでした"
+        log_func(f"[error] {msg}")
+        result.error = msg
+        write_excel(output_path, [], logs, month_label)
+        return result
+
+    jinjer_df = load_jinjer_csvs(jinjer_dir, logs)
+    if jinjer_df.empty:
+        msg = "jinjer CSV が読めませんでした"
+        log_func(f"[error] {msg}")
+        result.error = msg
+        write_excel(output_path, [], logs, month_label)
+        return result
+
+    result.kintai_rows_read = len(kintai_df)
+    result.jinjer_rows_read = len(jinjer_df)
+    log_func(f"[info] 突合結果 {len(kintai_df)} 行 / jinjer {len(jinjer_df)} 行 読み込み完了")
+
+    name_map = build_name_to_emp_map(jinjer_df)
+    jinjer_index = build_jinjer_index(jinjer_df)
+    result.name_map_size = len(name_map)
+    log_func(f"[info] 氏名→ID マップ {len(name_map)} 件 / jinjer index {len(jinjer_index)} 件")
+
+    diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs)
+    result.diff_count = len(diff_rows)
+    log_func(f"[info] 差異・警告 合計 {len(diff_rows)} 件")
+
+    by_level = {LEVEL_DANGER: 0, LEVEL_WARN: 0, LEVEL_INFO: 0}
+    for r in diff_rows:
+        by_level[r.warn_level] = by_level.get(r.warn_level, 0) + 1
+    result.danger_count = by_level[LEVEL_DANGER]
+    result.warn_count = by_level[LEVEL_WARN]
+    result.info_count = by_level[LEVEL_INFO]
+    log_func(f"[info] DANGER={result.danger_count} / WARN={result.warn_count} / INFO={result.info_count}")
+
+    write_excel(output_path, diff_rows, logs, month_label)
+    log_func(f"[done] 出力完了: {output_path}")
+    result.ok = True
+    return result
+
+
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="5月本番 MVP 差異一覧生成")
+    p.add_argument("--month", required=True, help="対象月 YYYY-MM (例: 2026-05)")
+    p.add_argument("--kintai-dir", required=True, help="突合結果xlsx 格納フォルダ")
+    p.add_argument("--jinjer-dir", required=True, help="jinjer 汎用データCSV 格納フォルダ")
+    p.add_argument("--output", required=True, help="出力 xlsx パス")
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    result = run_quick_compare(
+        kintai_dir=Path(args.kintai_dir),
+        jinjer_dir=Path(args.jinjer_dir),
+        output_path=Path(args.output),
+        month_label=args.month,
+    )
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

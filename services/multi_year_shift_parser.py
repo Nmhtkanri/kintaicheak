@@ -24,6 +24,7 @@ from __future__ import annotations
 import calendar
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Iterable
@@ -38,6 +39,8 @@ _WD_KANJI = ["月", "火", "水", "木", "金", "土", "日"]
 
 # Excel epoch (1900 leap-year bug 込み)
 _EXCEL_EPOCH = date(1899, 12, 30)
+
+_FULLWIDTH_DIGIT_TRANS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 # =============================================================================
@@ -95,6 +98,33 @@ def _clean_str(v) -> str:
     if v is None:
         return ""
     return str(v).strip()
+
+
+def _normalize_digits(s: str) -> str:
+    return str(s).translate(_FULLWIDTH_DIGIT_TRANS)
+
+
+def _time_to_minutes(hhmm: str) -> int | None:
+    try:
+        h, m = map(int, hhmm.split(":"))
+    except (AttributeError, ValueError):
+        return None
+    return h * 60 + m
+
+
+def _format_time_match(hour: str, minute: str) -> str:
+    return f"{int(_normalize_digits(hour)):02d}:{int(_normalize_digits(minute)):02d}"
+
+
+def _default_break_minutes(start: str, end: str) -> int:
+    """勤務時間から休憩を推定する。月次表は休憩列を持たないため、6時間超を60分扱いにする。"""
+    s = _time_to_minutes(start)
+    e = _time_to_minutes(end)
+    if s is None or e is None:
+        return 0
+    if e <= s:
+        e += 24 * 60
+    return 60 if (e - s) > 6 * 60 else 0
 
 
 # =============================================================================
@@ -514,6 +544,245 @@ def is_multi_year_shift_xlsx(filepath: str) -> bool:
 
 
 # =============================================================================
+# 2b. 月次横並び シフト表 xlsx パーサ
+# =============================================================================
+
+def _find_monthly_date_row(rows: list[tuple]) -> int:
+    """月次表の「氏名 ... 日付列」行を探す。"""
+    best_idx = -1
+    best_count = 0
+    for i, row in enumerate(rows[:20]):
+        if not row:
+            continue
+        has_name_header = any(_clean_str(v) == "氏名" for v in row[:5])
+        date_count = sum(1 for v in row if _to_date(v) is not None)
+        if has_name_header and date_count > best_count:
+            best_idx = i
+            best_count = date_count
+    if best_idx < 0 or best_count < 15:
+        raise ValueError("月次シフト表の日付行が見つかりません")
+    return best_idx
+
+
+def _monthly_date_columns(date_row: tuple) -> dict[int, date]:
+    cols: dict[int, date] = {}
+    for col_1based, value in enumerate(date_row, start=1):
+        d = _to_date(value)
+        if d is not None:
+            cols[col_1based] = d
+    if not cols:
+        raise ValueError("月次シフト表の日付列が見つかりません")
+    return cols
+
+
+def _pick_month_from_date_columns(
+    date_cols: dict[int, date],
+    target_year: int | None,
+    target_month: int | None,
+) -> tuple[int, int]:
+    """対象月を決める。指定年月が表に無い場合は、表内で最も多い年月を採用する。"""
+    if target_year and target_month:
+        if any(d.year == target_year and d.month == target_month for d in date_cols.values()):
+            return target_year, target_month
+        logger.warning(
+            "指定年月 %s年%s月 が月次シフト表の日付列に無いため、表内の年月を採用します",
+            target_year,
+            target_month,
+        )
+
+    counts: dict[tuple[int, int], int] = {}
+    for d in date_cols.values():
+        counts[(d.year, d.month)] = counts.get((d.year, d.month), 0) + 1
+    if not counts:
+        raise ValueError("月次シフト表の対象年月を判定できません")
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _looks_like_monthly_employee_row(row: tuple, date_cols: dict[int, date]) -> bool:
+    name = _clean_str(row[0] if row else "")
+    if not name or "勤" in name or "シフト" in name or "ｼﾌﾄ" in name or name in ("氏名", "日付"):
+        return False
+    serial_like_count = 0
+    code_count = 0
+    for col_1based in date_cols:
+        value = row[col_1based - 1] if col_1based - 1 < len(row) else None
+        if isinstance(value, (int, float)) and value > 1000:
+            serial_like_count += 1
+            if serial_like_count >= 5:
+                return False
+        if _clean_str(value):
+            code_count += 1
+            if code_count >= 5:
+                return True
+    return False
+
+
+_SHIFT_TIME_RE = re.compile(
+    r"([0-9０-９]{1,2})[:：]([0-9０-９]{2})\s*[～~-]\s*(?:翌)?\s*([0-9０-９]{1,2})[:：]([0-9０-９]{2})"
+)
+
+
+def _parse_monthly_shift_legend_row(text: str) -> dict | None:
+    normalized = _normalize_digits(_clean_str(text))
+    if not normalized:
+        return None
+
+    code_match = re.match(r"^([0-9]+)\s*勤", normalized)
+    if not code_match:
+        return None
+    code = code_match.group(1)
+
+    time_match = _SHIFT_TIME_RE.search(text)
+    if not time_match:
+        return None
+    start = _format_time_match(time_match.group(1), time_match.group(2))
+    end = _format_time_match(time_match.group(3), time_match.group(4))
+
+    label = normalized
+    time_start = time_match.start()
+    if time_start > 0:
+        label = _normalize_digits(text[:time_start]).strip(" 　")
+    return {
+        "code": code,
+        "label": label or code,
+        "start_time": start,
+        "end_time": end,
+        "break_minutes": _default_break_minutes(start, end),
+        "is_off": False,
+    }
+
+
+def _parse_monthly_embedded_legend(
+    rows: list[tuple],
+    *,
+    summary_start_col: int | None = None,
+) -> tuple[list[dict], list[str]]:
+    """月次表内の勤務コード説明と休暇系コードを凡例化する。"""
+    legend: list[dict] = []
+    seen: set[str] = set()
+
+    for row in rows:
+        if not row:
+            continue
+        parsed = _parse_monthly_shift_legend_row(_clean_str(row[0]))
+        if parsed and parsed["code"] not in seen:
+            seen.add(parsed["code"])
+            legend.append(parsed)
+
+    off_entries = {
+        "休": "休",
+        "明": "明け休",
+    }
+    start_idx = max((summary_start_col or 1) - 1, 0)
+    for row in rows:
+        values = [_clean_str(v) for v in row[start_idx:]]
+        for i in range(0, max(len(values) - 1, 0)):
+            code = values[i]
+            label = values[i + 1]
+            if not code:
+                continue
+            if code in seen or code in ("氏名", "勤務時間", "出"):
+                continue
+            if label and any(p in label for p in ("休", "有給", "在宅")):
+                off_entries[code] = label
+
+    for code, label in off_entries.items():
+        if code in seen:
+            continue
+        seen.add(code)
+        legend.append({
+            "code": code,
+            "label": label,
+            "start_time": "",
+            "end_time": "",
+            "break_minutes": 0,
+            "is_off": True,
+        })
+
+    return legend, list(off_entries.keys())
+
+
+def parse_monthly_shift_xlsx(
+    filepath: str,
+    target_year: int | None = None,
+    target_month: int | None = None,
+) -> dict:
+    """1か月分の横並びシフト表 xlsx を解析する。"""
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError("空のシートです")
+
+    date_row_idx = _find_monthly_date_row(rows)
+    date_cols_all = _monthly_date_columns(rows[date_row_idx])
+    year, month = _pick_month_from_date_columns(date_cols_all, target_year, target_month)
+    target_cols = {
+        col: d
+        for col, d in date_cols_all.items()
+        if d.year == year and d.month == month
+    }
+    if not target_cols:
+        raise ValueError(f"{year}年{month}月の日付列が見つかりません")
+
+    employee_rows = [
+        row for row in rows[date_row_idx + 1:]
+        if _looks_like_monthly_employee_row(row, target_cols)
+    ]
+    if not employee_rows:
+        raise ValueError("月次シフト表の従業員行が見つかりません")
+
+    employees: list[dict] = []
+    for row in employee_rows:
+        name = _clean_str(row[0])
+        shifts = []
+        for col_1based, d in sorted(target_cols.items(), key=lambda x: x[1]):
+            cell = row[col_1based - 1] if col_1based - 1 < len(row) else None
+            code = _normalize_digits(_clean_str(cell))
+            shifts.append({"date": d.isoformat(), "code": code})
+        employees.append({"name": name, "shifts": shifts})
+
+    legend, off_markers = _parse_monthly_embedded_legend(
+        rows,
+        summary_start_col=max(date_cols_all) + 1,
+    )
+    return {
+        "year": year,
+        "month": month,
+        "filename": os.path.basename(filepath),
+        "legend": legend,
+        "employees": employees,
+        "off_markers": off_markers,
+        "section_info": {
+            "section_index": 1,
+            "start_col": min(target_cols),
+            "end_col": max(target_cols),
+            "weekday_match_ratio": 1.0,
+            "weekday_matched": len(target_cols),
+            "weekday_total": len(target_cols),
+            "total_sections": 1,
+        },
+    }
+
+
+def is_monthly_shift_xlsx(filepath: str) -> bool:
+    """1か月分の横並びシフト表に該当するか判定する。"""
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(min_row=1, max_row=20, values_only=True))
+    except Exception:
+        return False
+
+    try:
+        date_row_idx = _find_monthly_date_row(rows)
+        date_cols = _monthly_date_columns(rows[date_row_idx])
+    except ValueError:
+        return False
+    return len(date_cols) >= 15
+
+
+# =============================================================================
 # 3. 高レベルエントリ: 複数ファイルから「凡例 + 従業員シフト」を組み立てる
 # =============================================================================
 
@@ -543,18 +812,21 @@ def parse_structured_files(
 
     legend_paths: list[str] = []
     shift_paths: list[str] = []
+    monthly_shift_paths: list[str] = []
     for p in paths:
         if not p.lower().endswith((".xlsx", ".xls")):
             continue
         try:
             if is_multi_year_shift_xlsx(p):
                 shift_paths.append(p)
+            elif is_monthly_shift_xlsx(p):
+                monthly_shift_paths.append(p)
             elif is_legend_xlsx(p):
                 legend_paths.append(p)
         except Exception as e:
             logger.warning("xlsx sniff 失敗 %s: %s", p, e)
 
-    if not shift_paths:
+    if not shift_paths and not monthly_shift_paths:
         return None
 
     # 凡例をマージ（複数渡された場合は重複コードを除外しつつ全件統合）
@@ -573,6 +845,25 @@ def parse_structured_files(
     # シフト表ごとにシートを作る
     sheets: list[dict] = []
     consumed: list[str] = []
+
+    for mp in monthly_shift_paths:
+        try:
+            result = parse_monthly_shift_xlsx(mp, target_year, target_month)
+        except Exception as e:
+            logger.warning("月次シフト表 %s の構造化解析に失敗: %s", mp, e)
+            continue
+        sheets.append({
+            "mode": "code",
+            "filename": result["filename"],
+            "legend": result["legend"],
+            "employees": result["employees"],
+            "off_markers": result["off_markers"],
+            "year": result["year"],
+            "month": result["month"],
+            "section_info": result.get("section_info"),
+        })
+        consumed.append(mp)
+
     for sp in shift_paths:
         try:
             result = parse_multi_year_shift_xlsx(sp, target_year, target_month)

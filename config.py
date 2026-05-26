@@ -2,6 +2,12 @@ import glob
 import os
 
 
+DEFAULT_JINJER_TEMPLATE_DIRS = (
+    r"Z:\jinjer移行\カレンダー",
+    r"\\Nmht\NMHumaTach\jinjer移行\カレンダー",
+)
+
+
 def _resolve_jinjer_template_csv_path() -> str:
     """jinjer 雛形 CSV の最新版を自動検出する
 
@@ -16,14 +22,15 @@ def _resolve_jinjer_template_csv_path() -> str:
     if env_path and os.path.exists(env_path):
         return env_path
 
-    # デフォルトの雛形フォルダ
-    default_dir = r"Z:\jinjer移行\カレンダー"
-    if os.path.isdir(default_dir):
-        candidates = glob.glob(os.path.join(default_dir, "スケジュール雛形一覧_*.csv"))
-        if candidates:
-            # ファイル名にYYYY-MM-DDが入っているので辞書順ソートで最新が末尾
-            candidates.sort()
-            return candidates[-1]
+    candidates = []
+    for default_dir in DEFAULT_JINJER_TEMPLATE_DIRS:
+        if os.path.isdir(default_dir):
+            candidates.extend(
+                glob.glob(os.path.join(default_dir, "スケジュール雛形一覧_*.csv"))
+            )
+    if candidates:
+        # Z: が見えない実行環境では同じ共有先の UNC パスを使う。
+        return max(candidates, key=lambda path: os.path.basename(path))
 
     return env_path  # 見つからなくてもそのまま返す（警告は load 側で出る）
 

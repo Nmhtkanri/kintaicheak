@@ -12,8 +12,8 @@ CSV フォーマット:
   - "明" を含むコード             → "0" （明け休）
   - 凡例で is_off=True のコード   → 土曜=所、日曜=法、平日=所（A案）
   - 凡例の休扱い記号 / 空欄         → 同上（A案）
-  - 凡例にあって時刻定義あり        → jinjer 雛形の「勤怠スケジュール名称」
-  - 雛形にマッチしない            → 凡例の label（人が後で修正）
+  - 凡例にあって時刻定義あり        → jinjer 雛形ID
+  - 雛形にマッチしない            → 新規雛形 CSV と同じ ID 候補
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from typing import Iterable
 from services.jinjer_template_matcher import (
     load_jinjer_templates,
     find_matching_template,
+    suggest_template_id,
     _tpl_get,
 )
 from services.shift_resolver import normalize_legend, DEFAULT_OFF_MARKERS
@@ -156,8 +157,8 @@ def _resolve_merged_cell_value(
             tpl_id = _tpl_get(tpl, "＊スケジュール雛形ID")
             if tpl_id:
                 return (tpl_id, None)
-            # ID 列が空なら名前にフォールバック（運用上ほぼ起きない）
-            return (_tpl_get(tpl, "＊スケジュール雛形名") or label, None)
+            # ID 列が空でも月次 CSV には名前でなく ID 候補を書く。
+            return (suggest_template_id(code), None)
 
     unmatched_entry = {
         "code": code,
@@ -166,7 +167,7 @@ def _resolve_merged_cell_value(
         "end_time": end_raw or "",
         "break_minutes": break_minutes,
     }
-    return (label, unmatched_entry)
+    return (suggest_template_id(code), unmatched_entry)
 
 
 def _is_ake_code(code: str, label: str = "") -> bool:
@@ -196,8 +197,9 @@ def build_legend_to_template_name(
 
     jinjer のスケジュール CSV インポートは **雛形ID** を期待する（雛形名ではない）。
     雛形にマッチした場合は ＊スケジュール雛形ID（例: "K1", "1"）を返す。
-    マッチしない場合のみ凡例ラベルにフォールバック（後段で「新規雛形候補」として
-    別途警告される）。
+    マッチしない場合は新規雛形 CSV と同じ ID 候補にフォールバックする。
+    月次スケジュール CSV は jinjer の雛形IDを要求するため、凡例ラベルを
+    そのまま入れるとアップロード時に弾かれる。
 
     Args:
         legend: shift_legend_parser から得られた凡例リスト
@@ -240,10 +242,10 @@ def build_legend_to_template_name(
                 if tpl_id:
                     code_to_name[code] = tpl_id
                     continue
-                # ID 列が空なら名前にフォールバック
-                code_to_name[code] = _tpl_get(tpl, "＊スケジュール雛形名") or label
+                # ID 列が空でも月次 CSV には名前でなく ID 候補を書く。
+                code_to_name[code] = suggest_template_id(code)
                 continue
-        code_to_name[code] = label  # フォールバック: 凡例ラベル
+        code_to_name[code] = suggest_template_id(code)
 
     return code_to_name
 

@@ -476,10 +476,6 @@ body {
     background: #f8d7da;
     color: #888;
 }
-.legend-table .legend-row-name-input {
-    text-align: left;
-    min-width: 110px;
-}
 .legend-template-tag {
     display: inline-block;
     background: #d1ecf1;
@@ -722,6 +718,10 @@ body {
 }
 .legend-employees-table tbody tr:last-child td {
     border-bottom: none;
+}
+.legend-employees-actions {
+    margin-top: 8px;
+    text-align: right;
 }
 .legend-employee-name-input {
     width: 100%;

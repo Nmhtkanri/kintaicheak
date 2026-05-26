@@ -64,8 +64,7 @@ function updateSelected(files, container) {
 
 setupDropZone('jinjer-drop-zone', 'jinjer-input', 'jinjer-selected', false);
 setupDropZone('timesheet-drop-zone', 'timesheet-input', 'timesheet-selected', true);
-setupDropZone('calendar-drop-zone', 'calendar-input', 'calendar-selected', true);
-setupDropZone('legend-drop-zone', 'legend-input', 'legend-selected', true);
+setupDropZone('shift-files-drop-zone', 'shift-files-input', 'shift-files-selected', true);
 
 // =============================================================================
 // グローバル状態
@@ -97,15 +96,13 @@ function getCurrentMode() {
 function applyModeUI(mode) {
     const jinjerSection = document.getElementById('jinjer-section');
     const timesheetSection = document.getElementById('timesheet-section');
-    const calendarSection = document.getElementById('calendar-section');
-    const legendSection = document.getElementById('legend-section');
+    const shiftFilesSection = document.getElementById('shift-files-section');
     const targetYmSection = document.getElementById('target-ym-section');
     const jinjerRequiredTag = document.getElementById('jinjer-required-tag');
     const jinjerOptionalTag = document.getElementById('jinjer-optional-tag');
     const jinjerInput = document.getElementById('jinjer-input');
     const timesheetInput = document.getElementById('timesheet-input');
-    const calendarInput = document.getElementById('calendar-input');
-    const legendInput = document.getElementById('legend-input');
+    const shiftFilesInput = document.getElementById('shift-files-input');
     const targetYearInput = document.getElementById('target-year');
     const targetMonthInput = document.getElementById('target-month');
     const settingsSection = document.getElementById('settings-section');
@@ -120,10 +117,8 @@ function applyModeUI(mode) {
 
         // CSV変換モード専用UIを表示・有効化
         if (targetYmSection) targetYmSection.style.display = '';
-        if (calendarSection) calendarSection.style.display = '';
-        if (legendSection) legendSection.style.display = '';
-        if (calendarInput) calendarInput.disabled = false;
-        if (legendInput) legendInput.disabled = false;
+        if (shiftFilesSection) shiftFilesSection.style.display = '';
+        if (shiftFilesInput) shiftFilesInput.disabled = false;
         if (targetYearInput) targetYearInput.disabled = false;
         if (targetMonthInput) targetMonthInput.disabled = false;
 
@@ -141,10 +136,8 @@ function applyModeUI(mode) {
 
         // CSV変換モード専用UIを非表示・無効化
         if (targetYmSection) targetYmSection.style.display = 'none';
-        if (calendarSection) calendarSection.style.display = 'none';
-        if (legendSection) legendSection.style.display = 'none';
-        if (calendarInput) calendarInput.disabled = true;
-        if (legendInput) legendInput.disabled = true;
+        if (shiftFilesSection) shiftFilesSection.style.display = 'none';
+        if (shiftFilesInput) shiftFilesInput.disabled = true;
         if (targetYearInput) targetYearInput.disabled = true;
         if (targetMonthInput) targetMonthInput.disabled = true;
 
@@ -420,6 +413,7 @@ function renderLegendSheet(sheet, sheetIdx) {
     const wrap = document.createElement('div');
     wrap.className = 'legend-sheet';
     wrap.dataset.sheetIdx = sheetIdx;
+    sheet.__sheetIdx = sheetIdx;
 
     const header = document.createElement('div');
     header.className = 'legend-sheet-header';
@@ -457,7 +451,6 @@ function renderLegendSheet(sheet, sheetIdx) {
     table.innerHTML = `
         <thead>
             <tr>
-                <th>氏名</th>
                 <th>記号</th>
                 <th>種別</th>
                 <th>出勤</th>
@@ -482,38 +475,12 @@ function renderLegendSheet(sheet, sheetIdx) {
     const actions = document.createElement('div');
     actions.className = 'legend-actions';
 
-    const addEmpBtn = document.createElement('button');
-    addEmpBtn.type = 'button';
-    addEmpBtn.className = 'btn-mini btn-mini-add';
-    addEmpBtn.textContent = '＋ 従業員を追加';
-    addEmpBtn.style.marginRight = '8px';
-    addEmpBtn.addEventListener('click', () => {
-        const empTbody = wrap.querySelector('.legend-employees-table tbody');
-        if (!empTbody) return;
-        // 「画像から抽出できませんでした」の placeholder 行は除去する
-        const emptyRow = empTbody.querySelector('.legend-employees-empty');
-        if (emptyRow) emptyRow.remove();
-        if (!sheet.employees) sheet.employees = [];
-        const newEmp = { name: '', shifts: [] };
-        sheet.employees.push(newEmp);
-        const newIdx = sheet.employees.length - 1;
-        const row = renderEmployeeRow(newEmp, newIdx);
-        row.dataset.isNew = '1';
-        empTbody.appendChild(row);
-        const inp = row.querySelector('input[data-field="employee_name"]');
-        if (inp) inp.focus();
-        // ヘッダーの従業員人数表示を更新
-        const meta = wrap.querySelector('.legend-sheet-header-meta');
-        if (meta) meta.textContent = `従業員 ${sheet.employees.length}人`;
-    });
-    actions.appendChild(addEmpBtn);
-
     const addBtn = document.createElement('button');
     addBtn.type = 'button';
     addBtn.className = 'btn-mini btn-mini-add';
     addBtn.textContent = '＋ 記号を追加';
     addBtn.addEventListener('click', () => {
-        const newEntry = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false, name: '' };
+        const newEntry = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
         const idx = tbody.children.length;
         tbody.appendChild(renderLegendRow(newEntry, sheetIdx, idx, tmMatchedMap));
         // sheet.legend にも反映するため、最後に取得時に DOM から読む
@@ -561,7 +528,46 @@ function renderEmployeesEditor(sheet, sheetIdx) {
 
     wrap.appendChild(tbl);
 
+    const actions = document.createElement('div');
+    actions.className = 'legend-employees-actions';
+
+    const addEmpBtn = document.createElement('button');
+    addEmpBtn.type = 'button';
+    addEmpBtn.className = 'btn-mini btn-mini-add';
+    addEmpBtn.textContent = '＋ 従業員を追加';
+    addEmpBtn.addEventListener('click', () => addEmployeeToSheet(sheet));
+    actions.appendChild(addEmpBtn);
+    wrap.appendChild(actions);
+
     return wrap;
+}
+
+function addEmployeeToSheet(sheet) {
+    const sheetEl = legendSheetsContainer.querySelector(`.legend-sheet[data-sheet-idx="${sheet.__sheetIdx}"]`);
+    if (!sheetEl) return;
+
+    const empTbody = sheetEl.querySelector('.legend-employees-table tbody');
+    if (!empTbody) return;
+
+    // 「画像から抽出できませんでした」の placeholder 行は除去する
+    const emptyRow = empTbody.querySelector('.legend-employees-empty');
+    if (emptyRow) emptyRow.remove();
+
+    if (!sheet.employees) sheet.employees = [];
+    const newEmp = { name: '', shifts: [] };
+    sheet.employees.push(newEmp);
+
+    const newIdx = sheet.employees.length - 1;
+    const row = renderEmployeeRow(newEmp, newIdx);
+    row.dataset.isNew = '1';
+    empTbody.appendChild(row);
+
+    const inp = row.querySelector('input[data-field="employee_name"]');
+    if (inp) inp.focus();
+
+    // ヘッダーの従業員人数表示を更新
+    const meta = sheetEl.querySelector('.legend-sheet-header-meta');
+    if (meta) meta.textContent = `従業員 ${sheet.employees.length}人`;
 }
 
 function renderEmployeeRow(emp, empIdx) {
@@ -603,12 +609,6 @@ function renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap) {
     const tr = document.createElement('tr');
     tr.dataset.rowIdx = rowIdx;
     if (entry.is_off) tr.classList.add('legend-row-off');
-
-    const nameTd = document.createElement('td');
-    const nameInp = makeInput(entry.name || '', 'name', '例: 田村桃子');
-    nameInp.classList.add('legend-row-name-input');
-    nameTd.appendChild(nameInp);
-    tr.appendChild(nameTd);
 
     const codeTd = document.createElement('td');
     codeTd.appendChild(makeInput(entry.code || '', 'code'));
@@ -699,7 +699,7 @@ function collectLegendFromUI() {
         const legendTable = sheetEl.querySelector('.legend-table');
         if (legendTable) {
             legendTable.querySelectorAll('tbody tr').forEach(tr => {
-                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false, name: '' };
+                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
                 tr.querySelectorAll('input').forEach(inp => {
                     const f = inp.dataset.field;
                     if (!f) return;
@@ -904,7 +904,7 @@ function showCsvExportResult(data) {
     if (new_template_filename) {
         tplMsg.innerHTML =
             `✨ jinjer の既存雛形に該当しない記号が ${new_template_count} 件ありました。<br>` +
-            `新規雛形CSVも生成済みです: ` +
+            `先に新規雛形CSVを jinjer に登録してから、月次スケジュールCSVをアップロードしてください: ` +
             `<a href="/download/${encodeURIComponent(new_template_filename)}" style="color:#4a148c; font-weight:bold; text-decoration:underline">` +
             `📥 ${escapeHtml(new_template_filename)}</a>`;
         tplMsg.style.display = 'block';

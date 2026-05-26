@@ -6,5 +6,10 @@ dist/
 outputs/
 uploads/
 .pytest_cache/
+pytest-cache-files-*/
 tests/__pycache__/
 *.pyc
+
+# 業務データ（個人情報を含む可能性）
+汎用データテンプレート/
+shift_sessions/

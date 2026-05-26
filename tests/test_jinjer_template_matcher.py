@@ -15,6 +15,7 @@ from services.jinjer_template_matcher import (
     generate_new_templates_csv,
     TEMPLATE_CSV_HEADERS,
     _normalize_time_str,
+    canonicalize_overnight_times,
 )
 
 
@@ -87,6 +88,19 @@ def test_find_match_none(mini_template_csv):
     assert tpl is None
 
 
+def test_find_match_rolls_overnight_end_into_jinjer_time():
+    templates = [{
+        "＊スケジュール雛形名": "深夜",
+        "＊スケジュール雛形ID": "NMHT03",
+        "＊出勤時間(0:00~47:59)": "24:00:00",
+        "＊退勤時間(0:00~47:59)": "33:00:00",
+    }]
+
+    tpl = find_matching_template("24:00", "09:00", 0, templates)
+
+    assert tpl is templates[0]
+
+
 # =============================================================================
 # match_legend_to_templates
 # =============================================================================
@@ -149,6 +163,26 @@ def test_generate_empty_unmatched(mini_template_csv, tmp_path):
     assert result["path"] is None
 
 
+def test_generate_new_template_rolls_overnight_end_forward(mini_template_csv, tmp_path):
+    output = tmp_path / "overnight.csv"
+    generate_new_templates_csv(
+        [{
+            "code": "5",
+            "label": "深夜",
+            "start_time": "23:55",
+            "end_time": "09:00",
+            "break_minutes": 0,
+        }],
+        mini_template_csv,
+        str(output),
+    )
+
+    with open(output, encoding="cp932") as f:
+        row = next(csv.DictReader(f))
+
+    assert row["＊退勤時間(0:00~47:59)"] == "33:00:00"
+
+
 # =============================================================================
 # _normalize_time_str
 # =============================================================================
@@ -158,3 +192,7 @@ def test_normalize_time_variants():
     assert _normalize_time_str("09:00") == "9:00"
     assert _normalize_time_str("17:30:00") == "17:30"
     assert _normalize_time_str("") == ""
+
+
+def test_canonicalize_overnight_times_keeps_non_overnight_time():
+    assert canonicalize_overnight_times("16:30", "24:00") == ("16:30", "24:00")

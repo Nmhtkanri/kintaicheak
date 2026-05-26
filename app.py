@@ -32,6 +32,11 @@ from services.jinjer_schedule_csv_exporter import (
 )
 from services.multi_year_shift_parser import parse_structured_files
 
+# 月次集約 MVP（quick_compare / quick_export）
+from pathlib import Path as _Path
+from quick_compare import run_quick_compare
+from quick_export import run_quick_export
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,48 @@ def _load_session(session_id: str) -> dict | None:
 def _drop_session(session_id: str):
     path = os.path.join(Config.SHIFT_SESSION_FOLDER, f"{session_id}.pkl")
     _safe_remove(path)
+
+
+def _apply_single_supplemental_legend(code_sheets: list[dict]) -> list[dict]:
+    """別画像の凡例を、凡例なしのコード表へ安全に補う。"""
+    legend_sources = [sheet for sheet in code_sheets if sheet.get("legend")]
+    legendless_employee_sheets = [
+        sheet
+        for sheet in code_sheets
+        if sheet.get("employees") and not sheet.get("legend")
+    ]
+    if len(legend_sources) != 1 or not legendless_employee_sheets:
+        return code_sheets
+
+    source = legend_sources[0]
+    source_legend = [
+        dict(entry)
+        for entry in source.get("legend") or []
+        if isinstance(entry, dict)
+    ]
+    source_markers = [
+        str(marker).strip()
+        for marker in source.get("off_markers") or []
+        if marker is not None
+    ]
+    if not source_legend:
+        return code_sheets
+
+    for sheet in legendless_employee_sheets:
+        sheet["legend"] = [dict(entry) for entry in source_legend]
+        sheet["off_markers"] = list(dict.fromkeys([
+            *[str(marker).strip() for marker in sheet.get("off_markers") or [] if marker is not None],
+            *source_markers,
+        ]))
+        logger.info(
+            "別画像の凡例を補完: schedule=%s legend=%s",
+            sheet.get("filename"),
+            source.get("filename"),
+        )
+
+    if not source.get("employees"):
+        return [sheet for sheet in code_sheets if sheet is not source]
+    return code_sheets
 
 
 # =============================================================================
@@ -297,6 +344,8 @@ def upload():
                     "message": f"勤務表の解析に成功したファイルがありませんでした。詳細: {detail}"
                 })
                 return
+
+            code_sheets = _apply_single_supplemental_legend(code_sheets)
 
             # CSV変換モードでは記号式（code）のみが対象
             if mode == "csv_export" and not code_sheets:
@@ -752,6 +801,182 @@ def download(filename):
     """結果Excelファイルのダウンロード"""
     safe_name = os.path.basename(filename)
     return send_from_directory(os.path.abspath(Config.OUTPUT_FOLDER), safe_name, as_attachment=True)
+
+
+# =============================================================================
+# 月次集約 MVP — quick_compare / quick_export
+# =============================================================================
+
+@app.route("/quick_compare", methods=["POST"])
+def route_quick_compare():
+    """突合結果xlsx 群 + jinjer CSV 群 → 差異一覧xlsx 生成
+
+    フォーム:
+      - kintai_dir : 突合結果xlsx 格納フォルダの絶対パス
+      - jinjer_dir : jinjer 汎用データCSV 格納フォルダの絶対パス
+      - month      : YYYY-MM
+      - output_filename : 任意、未指定なら自動生成
+    """
+    kintai_dir_str = (request.form.get("kintai_dir") or "").strip()
+    jinjer_dir_str = (request.form.get("jinjer_dir") or "").strip()
+    month_label = (request.form.get("month") or "").strip()
+    output_filename = (request.form.get("output_filename") or "").strip()
+
+    errors = []
+    if not kintai_dir_str:
+        errors.append("突合結果フォルダのパスを入力してください")
+    if not jinjer_dir_str:
+        errors.append("jinjer CSV フォルダのパスを入力してください")
+    if not month_label:
+        errors.append("対象月（YYYY-MM）を入力してください")
+
+    kintai_dir = _Path(kintai_dir_str) if kintai_dir_str else None
+    jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
+    if kintai_dir and not kintai_dir.is_dir():
+        errors.append(f"突合結果フォルダが存在しないか、ディレクトリではありません: {kintai_dir}")
+    if jinjer_dir and not jinjer_dir.is_dir():
+        errors.append(f"jinjer CSV フォルダが存在しないか、ディレクトリではありません: {jinjer_dir}")
+
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    if not output_filename:
+        ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"差異一覧_{month_label}_{ts}.xlsx"
+    output_filename = os.path.basename(output_filename)  # 安全化
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result = run_quick_compare(
+            kintai_dir=kintai_dir,
+            jinjer_dir=jinjer_dir,
+            output_path=output_path,
+            month_label=month_label,
+            log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("quick_compare failed")
+        return jsonify({"success": False, "errors": [str(e)], "log": log_lines}), 500
+
+    payload = {
+        "success": result.ok,
+        "download_url": f"/download/{output_filename}" if result.ok else None,
+        "output_filename": output_filename,
+        "stats": {
+            "diff_count": result.diff_count,
+            "danger_count": result.danger_count,
+            "warn_count": result.warn_count,
+            "info_count": result.info_count,
+            "kintai_rows_read": result.kintai_rows_read,
+            "jinjer_rows_read": result.jinjer_rows_read,
+            "name_map_size": result.name_map_size,
+        },
+        "logs": [{"severity": e.severity, "message": e.message, "source": e.source} for e in result.logs],
+        "console": log_lines,
+    }
+    if not result.ok:
+        payload["errors"] = [result.error] if result.error else ["差異一覧生成に失敗しました"]
+        return jsonify(payload), 500
+    return jsonify(payload)
+
+
+@app.route("/quick_export", methods=["POST"])
+def route_quick_export():
+    """差異一覧xlsx + jinjer CSV → アップロード用CSV 生成
+
+    multipart:
+      - diff_file       : 人間判断埋め込み済みの差異一覧xlsx（ファイルアップロード）
+      - jinjer_dir      : 元 jinjer CSV フォルダの絶対パス
+      - output_filename : 任意
+      - execute         : "1" なら本実行、未指定/0 は dry-run
+    """
+    diff_file = request.files.get("diff_file")
+    jinjer_dir_str = (request.form.get("jinjer_dir") or "").strip()
+    output_filename = (request.form.get("output_filename") or "").strip()
+    execute_flag = request.form.get("execute") == "1"
+    dry_run = not execute_flag
+
+    errors = []
+    if not diff_file or not diff_file.filename:
+        errors.append("差異一覧xlsx を選択してください")
+    if not jinjer_dir_str:
+        errors.append("jinjer CSV フォルダのパスを入力してください")
+
+    jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
+    if jinjer_dir and not jinjer_dir.is_dir():
+        errors.append(f"jinjer CSV フォルダが存在しないか、ディレクトリではありません: {jinjer_dir}")
+
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    diff_path = _Path(os.path.join(Config.UPLOAD_FOLDER, f"diff_{uuid.uuid4().hex}.xlsx"))
+    diff_file.save(diff_path)
+
+    if not output_filename:
+        ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"jinjer_upload_{ts}.csv"
+    output_filename = os.path.basename(output_filename)
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result = run_quick_export(
+            diff_xlsx=diff_path,
+            jinjer_dir=jinjer_dir,
+            output_path=output_path,
+            dry_run=dry_run,
+            log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("quick_export failed")
+        _safe_remove(str(diff_path))
+        return jsonify({"success": False, "errors": [str(e)], "log": log_lines}), 500
+    finally:
+        # アップロードした差異一覧xlsxは一時ファイル。書き出し成功後に削除
+        pass
+
+    stats = result.stats
+    payload = {
+        "success": result.ok,
+        "dry_run": dry_run,
+        "download_url": (f"/download/{output_filename}" if result.ok and not dry_run else None),
+        "output_filename": output_filename if not dry_run else None,
+        "stats": {
+            "total_diff_rows": stats.total_diff_rows,
+            "approved": stats.approved,
+            "rejected": stats.rejected,
+            "held": stats.held,
+            "pending": stats.pending,
+            "approved_punch_in": stats.approved_punch_in,
+            "approved_punch_out": stats.approved_punch_out,
+            "approved_break": stats.approved_break,
+            "approved_total": stats.approved_total,
+            "overwritten_punch_in": stats.overwritten_punch_in,
+            "overwritten_punch_out": stats.overwritten_punch_out,
+            "skipped_break": stats.skipped_break,
+            "skipped_total": stats.skipped_total,
+            "not_matched": stats.not_matched,
+            "overwritten_finalized": stats.overwritten_finalized,
+            "total_jinjer_rows": result.total_jinjer_rows,
+        },
+        "warnings": stats.warnings[:200],
+        "console": log_lines,
+    }
+    _safe_remove(str(diff_path))
+
+    if not result.ok:
+        payload["errors"] = [result.error] if result.error else ["CSV 生成に失敗しました"]
+        return jsonify(payload), 500
+    return jsonify(payload)
 
 
 @app.route("/api/status")
