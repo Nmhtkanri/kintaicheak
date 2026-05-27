@@ -367,7 +367,7 @@ def upload():
                 _save_session(session_id, payload)
 
                 # 雛形マッチング（既存雛形があるかチェック→UI に表示）
-                template_csv = Config.JINJER_TEMPLATE_CSV_PATH
+                template_csv = Config.get_jinjer_template_csv_path()
                 for sheet in code_sheets:
                     sheet["template_match"] = match_legend_to_templates(
                         sheet["legend"], template_csv
@@ -452,7 +452,8 @@ def resolve_and_match():
                     resolved_dfs.append(df)
 
                 # 雛形マッチ→未マッチを集約
-                tm = match_legend_to_templates(legend, Config.JINJER_TEMPLATE_CSV_PATH)
+                template_csv = Config.get_jinjer_template_csv_path()
+                tm = match_legend_to_templates(legend, template_csv)
                 unmatched_total.extend(tm.get("unmatched", []))
 
             if not resolved_dfs:
@@ -489,7 +490,7 @@ def resolve_and_match():
                     )
                     gen = generate_new_templates_csv(
                         unique_unmatched,
-                        Config.JINJER_TEMPLATE_CSV_PATH,
+                        template_csv,
                         out_path,
                     )
                     if gen.get("count", 0) > 0:
@@ -621,7 +622,7 @@ def export_jinjer_csv():
                         name_to_id=name_to_id,
                         attendance_group_map=attendance_group_map,
                         output_dir=Config.OUTPUT_FOLDER,
-                        template_csv_path=Config.JINJER_TEMPLATE_CSV_PATH,
+                        template_csv_path=Config.get_jinjer_template_csv_path(),
                         off_markers=off_markers,
                         id_to_official_name=id_to_official_name,
                         filename_hash=hash_suffix,
@@ -681,7 +682,8 @@ def export_jinjer_csv():
                     })
 
                 # 未マッチ雛形を集約（凡例ベース + 統合シフトベース）
-                tm = match_legend_to_templates(legend, Config.JINJER_TEMPLATE_CSV_PATH)
+                template_csv = Config.get_jinjer_template_csv_path()
+                tm = match_legend_to_templates(legend, template_csv)
                 unmatched = list(tm.get("unmatched", []))
                 merged_unmatched = split_result.get("merged_unmatched") or []
 
@@ -700,7 +702,7 @@ def export_jinjer_csv():
                         f"新規雛形_{uuid.uuid4().hex[:8]}.csv",
                     )
                     gen = generate_new_templates_csv(
-                        unmatched, Config.JINJER_TEMPLATE_CSV_PATH, new_path
+                        unmatched, template_csv, new_path
                     )
                     if gen.get("count", 0) > 0:
                         new_template_filename = os.path.basename(gen["path"])

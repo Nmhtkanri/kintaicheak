@@ -54,6 +54,11 @@ class Config:
     # フォルダ内で最新の「スケジュール雛形一覧_YYYY-MM-DD.csv」を自動検出する
     JINJER_TEMPLATE_CSV_PATH = _resolve_jinjer_template_csv_path()
 
+    @staticmethod
+    def get_jinjer_template_csv_path() -> str:
+        """Return the current latest jinjer schedule template CSV path."""
+        return _resolve_jinjer_template_csv_path()
+
     # シフトデータの一時保存ディレクトリ（凡例レビュー → resolve のセッション用）
     SHIFT_SESSION_FOLDER = "uploads/sessions"
 
