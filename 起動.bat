@@ -1,6 +1,12 @@
 @echo off
 title Kintai Checker
-cd /d "%~dp0"
+pushd "%~dp0"
+if errorlevel 1 (
+    echo [ERROR] Failed to open the application folder.
+    echo.
+    pause
+    exit /b 1
+)
 
 echo ============================================================
 echo   Kintai Checker - Starting server...
@@ -12,8 +18,20 @@ echo.
 echo ============================================================
 echo.
 
-REM Python が利用可能なら python app.py を優先する。
-REM 開発中の変更（quick_compare / quick_export など）も即反映される。
+REM Use the bundled EXE first so users do not depend on local Python setup.
+set "EXE=%~dp0dist\KintaiChecker\KintaiChecker.exe"
+if exist "%EXE%" (
+    "%EXE%"
+    echo.
+    echo ============================================================
+    echo   Server stopped.
+    echo ============================================================
+    pause
+    popd
+    exit /b 0
+)
+
+REM Fallback for development/admin PCs when the EXE has not been built yet.
 where python >nul 2>nul
 if not errorlevel 1 (
     start "" /B cmd /c "timeout /t 4 /nobreak > nul && start http://localhost:5000"
@@ -23,27 +41,14 @@ if not errorlevel 1 (
     echo   Server stopped.
     echo ============================================================
     pause
+    popd
     exit /b 0
 )
 
-REM Python が無ければ PyInstaller でビルド済みの EXE をフォールバックで使用。
-set "EXE=%~dp0dist\KintaiChecker\KintaiChecker.exe"
-if exist "%EXE%" (
-    echo [info] Python is not installed. Falling back to bundled EXE.
-    echo        Note: the EXE may be stale -- run build_exe.bat to rebuild if needed.
-    echo.
-    "%EXE%"
-    echo.
-    echo ============================================================
-    echo   Server stopped.
-    echo ============================================================
-    pause
-    exit /b 0
-)
-
-echo [ERROR] Python is not installed and KintaiChecker.exe was not found.
+echo [ERROR] KintaiChecker.exe was not found and Python is not installed.
 echo.
-echo Please install Python, or ask the administrator to run build_exe.bat first.
+echo Please ask the administrator to run build_exe.bat first.
 echo.
 pause
+popd
 exit /b 1
