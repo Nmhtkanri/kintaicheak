@@ -161,6 +161,19 @@ def test_overnight_jinjer_row_matches_split_sap_rows():
     assert result.iloc[1]["jinjer_退勤時刻"] == time(9, 30)
 
 
+def test_total_work_diff_is_included_in_judgment():
+    jinjer = make_df([("山田太郎", date(2024, 1, 15), time(9, 0), time(18, 0))], "jinjer")
+    sheet = make_df([("山田太郎", date(2024, 1, 15), time(9, 0), time(17, 30))], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert unsubmitted == []
+    assert result.iloc[0]["勤務表_総労働時間"] == "8:30"
+    assert result.iloc[0]["jinjer_総労働時間"] == "9:00"
+    assert result.iloc[0]["総労働差分(分)"] == 30
+    assert result.iloc[0]["判定"] == "NG"
+
+
 if __name__ == "__main__":
     test_ok()
     test_ng()

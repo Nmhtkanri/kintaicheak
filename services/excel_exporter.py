@@ -63,25 +63,29 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
 
     headers = [
         "氏名", "日付",
-        "勤務表_出勤", "jinjer_出勤", "出勤差分(分)",
-        "勤務表_退勤", "jinjer_退勤", "退勤差分(分)",
+        "請求勤怠_出勤", "jinjer_出勤", "出勤差分(分)",
+        "請求勤怠_退勤", "jinjer_退勤", "退勤差分(分)",
+        "請求勤怠_総労働", "jinjer_総労働", "総労働差分(分)",
         "判定", "詳細",
-        "jinjer_コメント", "勤務表_コメント"
+        "jinjer_コメント", "請求勤怠_コメント"
     ]
 
     col_map = {
         "氏名": "氏名",
         "日付": "日付",
-        "勤務表_出勤": "勤務表_出勤時刻",
+        "請求勤怠_出勤": "勤務表_出勤時刻",
         "jinjer_出勤": "jinjer_出勤時刻",
         "出勤差分(分)": "出勤差分(分)",
-        "勤務表_退勤": "勤務表_退勤時刻",
+        "請求勤怠_退勤": "勤務表_退勤時刻",
         "jinjer_退勤": "jinjer_退勤時刻",
         "退勤差分(分)": "退勤差分(分)",
+        "請求勤怠_総労働": "勤務表_総労働時間",
+        "jinjer_総労働": "jinjer_総労働時間",
+        "総労働差分(分)": "総労働差分(分)",
         "判定": "判定",
         "詳細": "詳細",
         "jinjer_コメント": "jinjer_コメント",
-        "勤務表_コメント": "勤務表_コメント",
+        "請求勤怠_コメント": "勤務表_コメント",
     }
 
     # ヘッダー行
@@ -118,7 +122,7 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
         for col_idx, val in enumerate(values, start=1):
             cell = ws.cell(row=excel_row, column=col_idx, value=val if val is not None else "")
             cell.alignment = Alignment(vertical="center")
-            # 判定列（9列目）に色付け
+            # 判定に応じて行全体に色付け
             if fill_color:
                 cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
 
@@ -178,7 +182,7 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
 
         # サマリーに未提出者数を追加
         next_row = len(summary_data) + 2
-        ws_summary.cell(row=next_row, column=1, value="勤務表未提出者数").font = Font(bold=True)
+        ws_summary.cell(row=next_row, column=1, value="請求勤怠未提出者数").font = Font(bold=True)
         cell = ws_summary.cell(row=next_row, column=2, value=len(unsubmitted_names))
         cell.fill = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
 

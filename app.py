@@ -196,7 +196,7 @@ def upload():
             errors.append("jinjer ファイルはCSV形式のみ対応しています")
 
     if not timesheet_files or all(f.filename == "" for f in timesheet_files):
-        errors.append("勤務表ファイルが選択されていません")
+        errors.append("請求勤怠ファイルが選択されていません")
     else:
         for f in timesheet_files:
             if f.filename and not allowed_file(f.filename, "timesheet"):
@@ -234,7 +234,7 @@ def upload():
 
                 yield _sse_event("progress", {"message": f"jinjer CSV解析完了: {len(jinjer_df)}件"})
 
-            # 各勤務表をモード別に解析
+            # 各請求勤怠ファイルをモード別に解析
             direct_dfs: list[pd.DataFrame] = []
             code_sheets: list[dict] = []  # 凡例レビュー対象
             total = len(saved_timesheet_paths)
@@ -291,12 +291,12 @@ def upload():
             parse_failures = []
             for idx, (ts_path, ts_filename) in enumerate(saved_timesheet_paths, start=1):
                 yield _sse_event("progress", {
-                    "message": f"勤務表を解析中... ({idx}/{total}: {ts_filename})"
+                    "message": f"請求勤怠を解析中... ({idx}/{total}: {ts_filename})"
                 })
                 try:
                     parsed = parse_timesheet_smart(ts_path)
                 except Exception as e:
-                    logger.error(f"勤務表解析エラー ({ts_filename}): {e}")
+                    logger.error(f"請求勤怠解析エラー ({ts_filename}): {e}")
                     parse_failures.append(f"{ts_filename}: {str(e)}")
                     yield _sse_event("progress", {
                         "message": f"スキップ ({idx}/{total}): {ts_filename} - {str(e)}"
@@ -341,7 +341,7 @@ def upload():
             if not direct_dfs and not code_sheets:
                 detail = " / ".join(parse_failures) if parse_failures else "詳細理由を取得できませんでした"
                 yield _sse_event("error", {
-                    "message": f"勤務表の解析に成功したファイルがありませんでした。詳細: {detail}"
+                    "message": f"請求勤怠の解析に成功したファイルがありませんでした。詳細: {detail}"
                 })
                 return
 
@@ -756,8 +756,8 @@ def _build_match_warnings(jinjer_df, timesheet_df):
         jinjer_range = _date_range_text(jinjer_df) or "不明"
         timesheet_range = _date_range_text(timesheet_df) or "不明"
         warnings.append(
-            "jinjer CSVと勤務表の日付範囲が一致していません。"
-            f"jinjer CSV: {jinjer_range}、勤務表: {timesheet_range}。"
+            "jinjer CSVと請求勤怠の日付範囲が一致していません。"
+            f"jinjer CSV: {jinjer_range}、請求勤怠: {timesheet_range}。"
             "同じ対象月のファイルを選択してください。"
         )
     return warnings
@@ -785,6 +785,9 @@ def _build_done_payload(result_df, excel_filename, unsubmitted_names, warnings=N
             "sheet_end": format_time(row["勤務表_退勤時刻"]),
             "jinjer_end": format_time(row["jinjer_退勤時刻"]),
             "end_diff": int(row["退勤差分(分)"]) if pd.notna(row.get("退勤差分(分)")) else "",
+            "sheet_total_work": str(row.get("勤務表_総労働時間") or ""),
+            "jinjer_total_work": str(row.get("jinjer_総労働時間") or ""),
+            "total_work_diff": int(row["総労働差分(分)"]) if pd.notna(row.get("総労働差分(分)")) else "",
             "judgment": str(row["判定"]),
             "detail": str(row["詳細"]) if row["詳細"] else "",
         })
@@ -814,8 +817,8 @@ def route_quick_compare():
     """突合結果xlsx 群 + jinjer CSV 群 → 差異一覧xlsx 生成
 
     フォーム:
-      - kintai_dir : 突合結果xlsx 格納フォルダの絶対パス
-      - jinjer_dir : jinjer 汎用データCSV 格納フォルダの絶対パス
+      - kintai_dir : 突合結果xlsx ファイルまたは格納フォルダの絶対パス
+      - jinjer_dir : jinjer 汎用データCSV ファイルまたは格納フォルダの絶対パス
       - month      : YYYY-MM
       - output_filename : 任意、未指定なら自動生成
     """
@@ -826,18 +829,22 @@ def route_quick_compare():
 
     errors = []
     if not kintai_dir_str:
-        errors.append("突合結果フォルダのパスを入力してください")
+        errors.append("手順1で出力した勤怠突合結果xlsx、またはその保存フォルダのパスを入力してください")
     if not jinjer_dir_str:
-        errors.append("jinjer CSV フォルダのパスを入力してください")
+        errors.append("jinjer 汎用データCSV、またはその保存フォルダのパスを入力してください")
     if not month_label:
         errors.append("対象月（YYYY-MM）を入力してください")
 
     kintai_dir = _Path(kintai_dir_str) if kintai_dir_str else None
     jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
-    if kintai_dir and not kintai_dir.is_dir():
-        errors.append(f"突合結果フォルダが存在しないか、ディレクトリではありません: {kintai_dir}")
-    if jinjer_dir and not jinjer_dir.is_dir():
-        errors.append(f"jinjer CSV フォルダが存在しないか、ディレクトリではありません: {jinjer_dir}")
+    if kintai_dir and not kintai_dir.exists():
+        errors.append(f"勤怠突合結果xlsxまたはフォルダが見つかりません: {kintai_dir}")
+    elif kintai_dir and kintai_dir.is_file() and kintai_dir.suffix.lower() != ".xlsx":
+        errors.append(f"勤怠突合結果は .xlsx ファイルを指定してください: {kintai_dir}")
+    if jinjer_dir and not jinjer_dir.exists():
+        errors.append(f"jinjer 汎用データCSVまたはフォルダが見つかりません: {jinjer_dir}")
+    elif jinjer_dir and jinjer_dir.is_file() and jinjer_dir.suffix.lower() not in [".csv", ".xlsx"]:
+        errors.append(f"jinjer 汎用データは .csv または .xlsx ファイルを指定してください: {jinjer_dir}")
 
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
@@ -846,6 +853,7 @@ def route_quick_compare():
         ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"差異一覧_{month_label}_{ts}.xlsx"
     output_filename = os.path.basename(output_filename)  # 安全化
+    output_filename = _ensure_extension(output_filename, ".xlsx")
     output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
 
     log_lines: list[str] = []
@@ -893,7 +901,7 @@ def route_quick_export():
 
     multipart:
       - diff_file       : 人間判断埋め込み済みの差異一覧xlsx（ファイルアップロード）
-      - jinjer_dir      : 元 jinjer CSV フォルダの絶対パス
+      - jinjer_dir      : 元 jinjer CSV ファイルまたはフォルダの絶対パス
       - output_filename : 任意
       - execute         : "1" なら本実行、未指定/0 は dry-run
     """
@@ -907,11 +915,13 @@ def route_quick_export():
     if not diff_file or not diff_file.filename:
         errors.append("差異一覧xlsx を選択してください")
     if not jinjer_dir_str:
-        errors.append("jinjer CSV フォルダのパスを入力してください")
+        errors.append("jinjer CSV、またはその保存フォルダのパスを入力してください")
 
     jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
-    if jinjer_dir and not jinjer_dir.is_dir():
-        errors.append(f"jinjer CSV フォルダが存在しないか、ディレクトリではありません: {jinjer_dir}")
+    if jinjer_dir and not jinjer_dir.exists():
+        errors.append(f"jinjer CSVまたはフォルダが見つかりません: {jinjer_dir}")
+    elif jinjer_dir and jinjer_dir.is_file() and jinjer_dir.suffix.lower() != ".csv":
+        errors.append(f"jinjer CSVは .csv ファイルを指定してください: {jinjer_dir}")
 
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
@@ -923,6 +933,7 @@ def route_quick_export():
         ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"jinjer_upload_{ts}.csv"
     output_filename = os.path.basename(output_filename)
+    output_filename = _ensure_extension(output_filename, ".csv")
     output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
 
     log_lines: list[str] = []
@@ -996,6 +1007,15 @@ def _safe_remove(path):
             os.remove(path)
     except Exception:
         pass
+
+
+def _ensure_extension(filename, extension):
+    root, ext = os.path.splitext(filename)
+    if not ext:
+        return filename + extension
+    if ext.lower() != extension:
+        return root + extension
+    return filename
 
 
 if __name__ == "__main__":

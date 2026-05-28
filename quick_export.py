@@ -134,7 +134,21 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
     if not diff_xlsx.exists():
         raise FileNotFoundError(f"差異一覧xlsx が見つかりません: {diff_xlsx}")
 
-    df = pd.read_excel(diff_xlsx, sheet_name="差異一覧", dtype=object)
+    xl = pd.ExcelFile(diff_xlsx)
+    if "差異一覧" not in xl.sheet_names:
+        if "突合結果" in xl.sheet_names:
+            raise ValueError(
+                "選択されたファイルは手順1の勤怠突合結果xlsxです。"
+                "手順3には、手順2で生成して人間判断を入力した差異一覧xlsxを指定してください。"
+            )
+        sheets = "、".join(xl.sheet_names)
+        raise ValueError(
+            "差異一覧シートが見つかりません。"
+            "手順3には、手順2で生成して人間判断を入力した差異一覧xlsxを指定してください。"
+            f" このファイルのシート: {sheets}"
+        )
+
+    df = pd.read_excel(xl, sheet_name="差異一覧", dtype=object)
     stats.total_diff_rows = len(df)
 
     approved: list[ApprovedRow] = []
@@ -189,17 +203,24 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
     return approved
 
 
+def _csv_input_files(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    return sorted([p for p in path.glob("*.csv") if not p.name.startswith("~$")])
+
+
 def load_jinjer_csvs(jinjer_dir: Path) -> tuple[list[str], list[list[str]]]:
     """jinjer ダウンロードCSV を全件 CP932 で読む。
     複数ファイルがある場合は縦結合（ヘッダーは先頭ファイルのものを採用、列数一致を要求）。
+    CSVファイル単体の指定にも対応する。
 
     Returns:
         (headers, rows) — rows は 1行 = list[str]
     """
     if not jinjer_dir.exists():
-        raise FileNotFoundError(f"jinjer CSV フォルダが見つかりません: {jinjer_dir}")
+        raise FileNotFoundError(f"jinjer CSVまたはフォルダが見つかりません: {jinjer_dir}")
 
-    csv_paths = sorted([p for p in jinjer_dir.glob("*.csv") if not p.name.startswith("~$")])
+    csv_paths = _csv_input_files(jinjer_dir)
     if not csv_paths:
         raise RuntimeError(f"jinjer CSV が見つかりません: {jinjer_dir}")
 
@@ -411,7 +432,7 @@ def run_quick_export(
     result = ExportResult(ok=False, output_path=output_path, dry_run=dry_run, stats=stats)
 
     log_func(f"[start] 差異一覧: {diff_xlsx}")
-    log_func(f"[start] jinjer フォルダ: {jinjer_dir}")
+    log_func(f"[start] jinjer CSV/フォルダ: {jinjer_dir}")
     log_func(f"[start] 出力先: {output_path}")
     log_func(f"[start] モード: {'dry-run' if dry_run else 'execute'}")
 

@@ -61,7 +61,7 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 # ===== 出力xlsx 列定義 =====
 DIFF_COLUMNS = [
     "行ID", "従業員ID", "氏名", "対象日付",
-    "差異種別", "勤務表値", "jinjer値", "差分(分)",
+    "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
     "警告レベル", "警告理由",
     "自動修正提案値",
     "人間判断", "判断メモ",
@@ -139,6 +139,94 @@ def format_minutes_as_hhmm(minutes: int | None) -> str:
     return f"{h}:{m:02d}"
 
 
+def clean_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return ""
+    return s
+
+
+def normalize_kintai_result_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """新しい「請求勤怠」ヘッダーを内部処理用の旧キーへ寄せる。
+
+    既存ユーザーがすでに出力済みの「勤務表」ヘッダーの差異一覧も読めるよう、
+    内部キーは当面「勤務表_*」を維持する。
+    """
+    aliases = {
+        "請求勤怠_出勤": "勤務表_出勤",
+        "請求勤怠_出勤時刻": "勤務表_出勤時刻",
+        "請求勤怠_退勤": "勤務表_退勤",
+        "請求勤怠_退勤時刻": "勤務表_退勤時刻",
+        "請求勤怠_総労働": "勤務表_総労働",
+        "請求勤怠_総労働時間": "勤務表_総労働時間",
+        "請求勤怠_総労働時間(分)": "勤務表_総労働時間(分)",
+        "請求勤怠_総労働(分)": "勤務表_総労働(分)",
+        "請求勤怠_コメント": "勤務表_コメント",
+    }
+    rename_map = {
+        src: dst
+        for src, dst in aliases.items()
+        if src in df.columns and dst not in df.columns
+    }
+    if rename_map:
+        return df.rename(columns=rename_map)
+    return df
+
+
+def elapsed_minutes_from_values(start: Any, end: Any) -> int | None:
+    """出勤・退勤値から経過分を計算する。日跨ぎは翌日退勤として扱う。"""
+    start_min = parse_hhmm(start)
+    end_min = parse_hhmm(end)
+    if start_min is None or end_min is None:
+        return None
+    if end_min < start_min:
+        end_min += 24 * 60
+    return end_min - start_min
+
+
+def first_present(row: pd.Series, candidates: list[str]) -> Any:
+    for col in candidates:
+        if col not in row:
+            continue
+        value = row.get(col)
+        if value is None:
+            continue
+        s = str(value).strip()
+        if s and s.lower() not in ("nan", "none"):
+            return value
+    return None
+
+
+def kintai_total_minutes(krow: pd.Series) -> tuple[int | None, str]:
+    """勤怠突合結果行から勤務表側の総労働時間を取得する。
+
+    新しい突合結果に総労働列があればそれを使い、古い突合結果では
+    勤務表_出勤/勤務表_退勤から経過時間を計算する。
+    """
+    explicit = first_present(krow, [
+        "勤務表_総労働",
+        "勤務表_総労働時間",
+        "勤務表_総労働時間(分)",
+        "勤務表_総労働(分)",
+    ])
+    explicit_min = parse_hhmm(explicit)
+    if explicit_min is not None:
+        return explicit_min, format_minutes_as_hhmm(explicit_min)
+    if explicit is not None:
+        try:
+            numeric = int(float(str(explicit)))
+            return numeric, format_minutes_as_hhmm(numeric)
+        except (TypeError, ValueError):
+            pass
+
+    start = first_present(krow, ["勤務表_出勤", "勤務表_出勤時刻"])
+    end = first_present(krow, ["勤務表_退勤", "勤務表_退勤時刻"])
+    total = elapsed_minutes_from_values(start, end)
+    return total, format_minutes_as_hhmm(total)
+
+
 def normalize_date_iso(value: Any) -> str | None:
     """日付値を 'YYYY-MM-DD' に正規化。jinjer の 'YYYY/M/D' にも対応。"""
     if value is None:
@@ -176,14 +264,25 @@ def normalize_date_iso(value: Any) -> str | None:
 KINTAI_RESULT_SHEET_CANDIDATES = ["突合結果", "突合"]
 
 
+def _input_files(path: Path, patterns: list[str]) -> list[Path]:
+    if path.is_file():
+        return [path]
+
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(sorted(path.glob(pattern)))
+    return files
+
+
 def load_kintai_results(kintai_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
-    """突合結果xlsx を全部読んで縦結合する。氏名・日付・出退勤差分を列に持つ。"""
+    """突合結果xlsx を読んで縦結合する。ファイル単体指定にも対応する。"""
     if not kintai_dir.exists():
-        logs.append(LogEntry("ERROR", f"突合結果フォルダが見つかりません: {kintai_dir}"))
+        logs.append(LogEntry("ERROR", f"突合結果xlsxまたはフォルダが見つかりません: {kintai_dir}"))
         return pd.DataFrame()
 
     frames = []
-    for xlsx in sorted(kintai_dir.glob("*.xlsx")):
+    xlsx_files = _input_files(kintai_dir, ["*.xlsx"])
+    for xlsx in xlsx_files:
         # 一時ファイル除外
         if xlsx.name.startswith("~$"):
             continue
@@ -205,6 +304,7 @@ def load_kintai_results(kintai_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
         except Exception as e:
             logs.append(LogEntry("ERROR", f"シート読み込み失敗 {xlsx.name}:{sheet}: {e}"))
             continue
+        df = normalize_kintai_result_columns(df)
         df["_source_file"] = xlsx.name
         frames.append(df)
         logs.append(LogEntry("INFO", f"突合結果読込: {xlsx.name} ({len(df)} 行)"))
@@ -215,28 +315,26 @@ def load_kintai_results(kintai_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
 
 
 def load_jinjer_csvs(jinjer_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
-    """jinjer CSV 群を CP932 で読んで縦結合する。"""
+    """jinjer CSV 群を CP932 で読んで縦結合する。ファイル単体指定にも対応する。"""
     if not jinjer_dir.exists():
-        logs.append(LogEntry("ERROR", f"jinjer CSV フォルダが見つかりません: {jinjer_dir}"))
+        logs.append(LogEntry("ERROR", f"jinjer CSVまたはフォルダが見つかりません: {jinjer_dir}"))
         return pd.DataFrame()
 
     frames = []
-    patterns = ["*.csv", "*.xlsx"]
-    for pattern in patterns:
-        for path in sorted(jinjer_dir.glob(pattern)):
-            if path.name.startswith("~$"):
-                continue
-            try:
-                if path.suffix.lower() == ".csv":
-                    df = pd.read_csv(path, encoding="cp932", dtype=object)
-                else:
-                    df = pd.read_excel(path, dtype=object)
-            except Exception as e:
-                logs.append(LogEntry("ERROR", f"jinjer データ読込失敗 {path.name}: {e}"))
-                continue
-            df["_jinjer_source"] = path.name
-            frames.append(df)
-            logs.append(LogEntry("INFO", f"jinjer 読込: {path.name} ({len(df)} 行)"))
+    for path in _input_files(jinjer_dir, ["*.csv", "*.xlsx"]):
+        if path.name.startswith("~$"):
+            continue
+        try:
+            if path.suffix.lower() == ".csv":
+                df = pd.read_csv(path, encoding="cp932", dtype=object)
+            else:
+                df = pd.read_excel(path, dtype=object)
+        except Exception as e:
+            logs.append(LogEntry("ERROR", f"jinjer データ読込失敗 {path.name}: {e}"))
+            continue
+        df["_jinjer_source"] = path.name
+        frames.append(df)
+        logs.append(LogEntry("INFO", f"jinjer 読込: {path.name} ({len(df)} 行)"))
 
     if not frames:
         return pd.DataFrame()
@@ -354,8 +452,8 @@ def compute_diffs(
             finalized = str(jrow.get(JINJER_HEADERS["finalized"]) or "").strip()
 
         # ----- 出勤差異 -----
-        k_in = str(krow.get("勤務表_出勤") or "").strip()
-        j_in = str(krow.get("jinjer_出勤") or "").strip()
+        k_in = clean_cell(krow.get("勤務表_出勤"))
+        j_in = clean_cell(krow.get("jinjer_出勤"))
         diff_in = to_int_diff(krow.get("出勤差分(分)"))
         if diff_in is not None and diff_in != 0:
             level, reason = classify_punch_diff(diff_in, "in")
@@ -369,10 +467,22 @@ def compute_diffs(
                 source_file=source_file,
             ))
             next_id += 1
+        elif diff_in is None and k_in and not j_in:
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_PUNCH_IN,
+                kintai_value=k_in, jinjer_value="", diff_minutes="",
+                warn_level=LEVEL_WARN,
+                warn_reason="jinjer出勤なし / 請求勤怠側に時刻あり",
+                auto_fix_value=k_in,
+                finalized=finalized,
+                source_file=source_file,
+            ))
+            next_id += 1
 
         # ----- 退勤差異 -----
-        k_out = str(krow.get("勤務表_退勤") or "").strip()
-        j_out = str(krow.get("jinjer_退勤") or "").strip()
+        k_out = clean_cell(krow.get("勤務表_退勤"))
+        j_out = clean_cell(krow.get("jinjer_退勤"))
         diff_out = to_int_diff(krow.get("退勤差分(分)"))
         if diff_out is not None and diff_out != 0:
             level, reason = classify_punch_diff(diff_out, "out")
@@ -386,8 +496,20 @@ def compute_diffs(
                 source_file=source_file,
             ))
             next_id += 1
+        elif diff_out is None and k_out and not j_out:
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_PUNCH_OUT,
+                kintai_value=k_out, jinjer_value="", diff_minutes="",
+                warn_level=LEVEL_WARN,
+                warn_reason="jinjer退勤なし / 請求勤怠側に時刻あり",
+                auto_fix_value=k_out,
+                finalized=finalized,
+                source_file=source_file,
+            ))
+            next_id += 1
 
-        # ----- 休憩警告 / 総労働時間警告 (jinjer 側のみで判定) -----
+        # ----- 休憩警告 / 総労働時間差異 -----
         if jrow is not None:
             break_warn = classify_break(jrow)
             if break_warn:
@@ -403,19 +525,36 @@ def compute_diffs(
                 ))
                 next_id += 1
 
-            total_warn = classify_total_work(jrow)
-            if total_warn:
-                level, reason, j_total = total_warn
+            k_total_min, k_total = kintai_total_minutes(krow)
+            j_total = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
+            j_total_min = parse_hhmm(j_total)
+            if k_total_min is not None and j_total_min is not None and k_total_min != j_total_min:
+                diff_total = k_total_min - j_total_min
+                level, reason = classify_total_work_diff(diff_total, jrow)
                 rows.append(DiffRow(
                     row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
                     kind=DIFF_KIND_TOTAL,
-                    kintai_value="-", jinjer_value=j_total, diff_minutes="",
+                    kintai_value=k_total, jinjer_value=j_total, diff_minutes=str(diff_total),
                     warn_level=level, warn_reason=reason,
                     auto_fix_value="",  # 総労働時間は自動反映しない
                     finalized=finalized,
                     source_file=source_file,
                 ))
                 next_id += 1
+            else:
+                total_warn = classify_total_work(jrow)
+                if total_warn:
+                    level, reason, j_total = total_warn
+                    rows.append(DiffRow(
+                        row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                        kind=DIFF_KIND_TOTAL,
+                        kintai_value=k_total or "-", jinjer_value=j_total, diff_minutes="",
+                        warn_level=level, warn_reason=reason,
+                        auto_fix_value="",  # 総労働時間は自動反映しない
+                        finalized=finalized,
+                        source_file=source_file,
+                    ))
+                    next_id += 1
 
     return rows
 
@@ -497,6 +636,27 @@ def classify_total_work(jrow: dict) -> tuple[str, str, str] | None:
     if not reasons:
         return None
     return level, " / ".join(reasons), j_total_str
+
+
+def classify_total_work_diff(diff_minutes: int, jrow: dict) -> tuple[str, str]:
+    """勤務表とjinjerの総労働時間差異を判定。"""
+    abs_diff = abs(diff_minutes)
+    reasons = [f"請求勤怠総労働とjinjer総労働の差分 {abs_diff}分"]
+    level = LEVEL_INFO
+    if abs_diff >= PUNCH_DIFF_WARN_MIN:
+        level = LEVEL_WARN
+
+    j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
+    j_punch_in = str(jrow.get(JINJER_HEADERS["punch_in_1"]) or "").strip()
+    j_total_min = parse_hhmm(j_total_str)
+    if j_total_min == 0 and j_punch_in:
+        level = LEVEL_DANGER
+        reasons.append("出勤打刻あり/総労働 0:00 (集計不整合)")
+    elif j_total_min is not None and j_total_min > LONG_WORK_HOURS * 60 and level == LEVEL_INFO:
+        level = LEVEL_WARN
+        reasons.append(f"総労働 {format_minutes_as_hhmm(j_total_min)} (>{LONG_WORK_HOURS}h)")
+
+    return level, " / ".join(reasons)
 
 
 # ----------------------------------------------------------------------
@@ -635,8 +795,8 @@ def run_quick_compare(
     logs: list[LogEntry] = []
     result = CompareResult(ok=False, output_path=output_path, logs=logs)
 
-    log_func(f"[start] 突合結果フォルダ: {kintai_dir}")
-    log_func(f"[start] jinjer CSV フォルダ: {jinjer_dir}")
+    log_func(f"[start] 勤怠突合結果xlsx/フォルダ: {kintai_dir}")
+    log_func(f"[start] jinjer CSV/フォルダ: {jinjer_dir}")
     log_func(f"[start] 出力先: {output_path}")
 
     kintai_df = load_kintai_results(kintai_dir, logs)

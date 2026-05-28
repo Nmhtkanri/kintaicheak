@@ -107,26 +107,34 @@ function applyModeUI(mode) {
     const targetMonthInput = document.getElementById('target-month');
     const settingsSection = document.getElementById('settings-section');
     const runBtn = document.getElementById('run-btn');
+    const matchStepHeader = document.getElementById('match-step-header');
+    const scheduleStepHeader = document.getElementById('schedule-step-header');
+    const monthlyCompareCard = document.getElementById('monthly-compare-card');
+    const monthlyExportCard = document.getElementById('monthly-export-card');
 
     if (mode === 'csv_export') {
-        // 突合モード専用UIを非表示・無効化（FormDataから除外）
+        // 勤怠チェックモード専用UIを非表示・無効化（FormDataから除外）
         if (jinjerSection) jinjerSection.style.display = 'none';
         if (timesheetSection) timesheetSection.style.display = 'none';
         if (jinjerInput) jinjerInput.disabled = true;
         if (timesheetInput) timesheetInput.disabled = true;
 
-        // CSV変換モード専用UIを表示・有効化
+        // スケジュールアップロードモード専用UIを表示・有効化
         if (targetYmSection) targetYmSection.style.display = '';
         if (shiftFilesSection) shiftFilesSection.style.display = '';
         if (shiftFilesInput) shiftFilesInput.disabled = false;
         if (targetYearInput) targetYearInput.disabled = false;
         if (targetMonthInput) targetMonthInput.disabled = false;
+        if (matchStepHeader) matchStepHeader.style.display = 'none';
+        if (scheduleStepHeader) scheduleStepHeader.style.display = '';
+        if (monthlyCompareCard) monthlyCompareCard.style.display = 'none';
+        if (monthlyExportCard) monthlyExportCard.style.display = 'none';
 
         // 許容差分は不要
         if (settingsSection) settingsSection.style.display = 'none';
-        if (runBtn) runBtn.textContent = 'CSV変換実行';
+        if (runBtn) runBtn.textContent = 'スケジュールCSVを作成';
     } else {
-        // 突合モード専用UIを表示・有効化
+        // 勤怠チェックモード専用UIを表示・有効化
         if (jinjerSection) jinjerSection.style.display = '';
         if (timesheetSection) timesheetSection.style.display = '';
         if (jinjerInput) jinjerInput.disabled = false;
@@ -134,12 +142,16 @@ function applyModeUI(mode) {
         if (jinjerRequiredTag) jinjerRequiredTag.style.display = 'inline-block';
         if (jinjerOptionalTag) jinjerOptionalTag.style.display = 'none';
 
-        // CSV変換モード専用UIを非表示・無効化
+        // スケジュールアップロードモード専用UIを非表示・無効化
         if (targetYmSection) targetYmSection.style.display = 'none';
         if (shiftFilesSection) shiftFilesSection.style.display = 'none';
         if (shiftFilesInput) shiftFilesInput.disabled = true;
         if (targetYearInput) targetYearInput.disabled = true;
         if (targetMonthInput) targetMonthInput.disabled = true;
+        if (matchStepHeader) matchStepHeader.style.display = '';
+        if (scheduleStepHeader) scheduleStepHeader.style.display = 'none';
+        if (monthlyCompareCard) monthlyCompareCard.style.display = '';
+        if (monthlyExportCard) monthlyExportCard.style.display = '';
 
         if (settingsSection) settingsSection.style.display = '';
         if (runBtn) runBtn.textContent = 'チェック実行';
@@ -266,7 +278,7 @@ function startProcessing() {
 function stopProcessing(hideProgress = true) {
     runBtn.disabled = false;
     // モードに応じたボタンラベルに戻す
-    runBtn.textContent = (getCurrentMode() === 'csv_export') ? 'CSV変換実行' : 'チェック実行';
+    runBtn.textContent = (getCurrentMode() === 'csv_export') ? 'スケジュールCSVを作成' : 'チェック実行';
     if (hideProgress) progressArea.style.display = 'none';
 }
 
@@ -366,12 +378,13 @@ function renderTable(rows) {
             row.name, row.date,
             row.sheet_start, row.jinjer_start, row.start_diff,
             row.sheet_end, row.jinjer_end, row.end_diff,
+            row.sheet_total_work, row.jinjer_total_work, row.total_work_diff,
             row.judgment, row.detail
         ];
         cells.forEach((val, idx) => {
             const td = document.createElement('td');
             td.textContent = val !== null && val !== undefined ? val : '';
-            if (idx === 8) {
+            if (idx === 11) {
                 td.className = judgeClass[row.judgment] || '';
             }
             tr.appendChild(td);
@@ -424,7 +437,7 @@ function renderLegendSheet(sheet, sheetIdx) {
     `;
     wrap.appendChild(header);
 
-    // 対象年月（CSV変換モードでは必須）
+    // 対象年月
     const ymRow = document.createElement('div');
     ymRow.className = 'legend-ym-row';
     ymRow.innerHTML = `
@@ -434,7 +447,7 @@ function renderLegendSheet(sheet, sheetIdx) {
             <input type="number" data-ym="month" value="${sheet.month || ''}" placeholder="4" min="1" max="12" style="width:60px">
             月
         </label>
-        <span class="legend-ym-hint">※CSV変換モードでは必須</span>
+        <span class="legend-ym-hint">※年月が読み取れない場合のみ入力</span>
     `;
     wrap.appendChild(ymRow);
 
@@ -522,7 +535,7 @@ function renderEmployeesEditor(sheet, sheetIdx) {
     if (employees.length === 0) {
         const tr = document.createElement('tr');
         tr.className = 'legend-employees-empty';
-        tr.innerHTML = `<td colspan="3">⚠️ 画像から従業員を抽出できませんでした。下の「+ 従業員を追加」から手動で追加してください（ただしシフトは画像から取得できないため、CSV変換は出来ません）。</td>`;
+        tr.innerHTML = `<td colspan="3">⚠️ 画像から従業員を抽出できませんでした。下の「+ 従業員を追加」から手動で追加してください（ただしシフトは画像から取得できないため、スケジュールCSVは作成できません）。</td>`;
         tbody.appendChild(tr);
     }
 
@@ -765,7 +778,7 @@ legendConfirmBtn.addEventListener('click', async () => {
         return;
     }
 
-    // CSV変換モードでは年月必須
+    // スケジュールアップロードモードでは年月必須
     if (pendingMode === 'csv_export') {
         for (const s of sheets) {
             if (!s.year || !s.month) {
@@ -821,9 +834,11 @@ legendConfirmBtn.addEventListener('click', async () => {
 });
 
 // =============================================================================
-// CSV変換モード結果表示
+// スケジュールアップロードモード結果表示
 // =============================================================================
 function showCsvExportResult(data) {
+    if (!csvExportArea) return;
+
     const { csv_files, missing_ids, merges, new_template_filename, new_template_count } = data;
 
     const list = document.getElementById('csv-files-list');

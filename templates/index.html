@@ -10,24 +10,51 @@
     </div>
     {% endif %}
 
-    <form id="upload-form" enctype="multipart/form-data">
+    <div class="workflow-heading">
+        <div>
+            <div class="workflow-kicker">処理モード</div>
+            <h2>やりたい作業を選んでください</h2>
+        </div>
+        <div class="workflow-note">勤怠チェック / スケジュールアップロード</div>
+    </div>
 
+    <form id="upload-form" class="workflow-card workflow-card-primary" enctype="multipart/form-data">
         <!-- モード選択 -->
         <div class="mode-selector">
             <label class="mode-option">
                 <input type="radio" name="mode" value="match" checked>
                 <span class="mode-card">
-                    <span class="mode-title">📊 突合モード</span>
-                    <span class="mode-desc">jinjer CSV と勤務表を突き合わせて差分検出</span>
+                    <span class="mode-title">勤怠チェックモード</span>
+                    <span class="mode-desc">jinjer 勤怠CSVと請求勤怠を突き合わせます</span>
                 </span>
             </label>
             <label class="mode-option">
                 <input type="radio" name="mode" value="csv_export">
                 <span class="mode-card">
-                    <span class="mode-title">📤 CSV変換モード</span>
-                    <span class="mode-desc">勤務表（記号式）→ jinjerインポート用CSVに変換</span>
+                    <span class="mode-title">スケジュールアップロードモード</span>
+                    <span class="mode-desc">画像・Excelなどからスケジュールを読み取り、jinjer用CSVを作ります</span>
                 </span>
             </label>
+        </div>
+
+        <div class="step-header" id="match-step-header">
+            <div>
+                <div class="step-number">1</div>
+                <div class="step-copy">
+                    <div class="section-title">勤怠チェック</div>
+                    <p class="hint">jinjer 勤怠CSVと請求勤怠を突合し、差異がある行だけを確認します。</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="step-header" id="schedule-step-header" style="display:none">
+            <div>
+                <div class="step-number">1</div>
+                <div class="step-copy">
+                    <div class="section-title">スケジュールアップロード</div>
+                    <p class="hint">シフト表や凡例画像を読み取り、jinjerに取り込めるスケジュールCSVを作成します。</p>
+                </div>
+            </div>
         </div>
 
         <!-- jinjer CSV -->
@@ -51,9 +78,9 @@
             </div>
         </div>
 
-        <!-- 勤務表（突合モード用） -->
+        <!-- 請求勤怠（突合モード用） -->
         <div class="upload-section" id="timesheet-section">
-            <div class="section-title">勤務表ファイル（複数選択可）</div>
+            <div class="section-title">請求勤怠ファイル（複数選択可）</div>
             <div class="drop-zone" id="timesheet-drop-zone" data-input="timesheet_files">
                 <div class="drop-zone-inner">
                     <div class="drop-icon">📋</div>
@@ -69,10 +96,10 @@
             </div>
         </div>
 
-        <!-- 対象年月（CSV変換モードのみ）-->
+        <!-- 対象年月（スケジュールアップロードモード用）-->
         <div class="upload-section" id="target-ym-section" style="display:none">
-            <div class="section-title">🗓️ 対象年月</div>
-            <div style="padding: 8px 14px; display:flex; align-items:center; gap:8px;">
+            <div class="section-title">対象年月</div>
+            <div style="padding: 8px 14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                 <input type="number" name="target_year" id="target-year"
                        placeholder="2026" min="2000" max="2099"
                        style="width:90px; padding:4px 8px;">
@@ -81,26 +108,26 @@
                        placeholder="5" min="1" max="12"
                        style="width:60px; padding:4px 8px;">
                 <span>月</span>
-                <span class="hint" style="margin-left: 12px;">
-                    ※xlsxシフト表＋シフトルールの組み合わせはこの年月で構造化解析します（未入力ならClaude経由）
+                <span class="hint" style="margin-left: 8px;">
+                    Excelから年月が読み取れない場合だけ入力してください
                 </span>
             </div>
         </div>
 
-        <!-- シフト表・凡例ファイル（CSV変換モード用） -->
+        <!-- シフト表・凡例ファイル（スケジュールアップロードモード用） -->
         <div class="upload-section" id="shift-files-section" style="display:none">
-            <div class="section-title">📅 シフト表・凡例画像</div>
+            <div class="section-title">スケジュール画像・Excel</div>
             <div class="drop-zone" id="shift-files-drop-zone" data-input="timesheet_files">
                 <div class="drop-zone-inner">
                     <div class="drop-icon">📅</div>
-                    <p>シフト表・凡例画像をまとめてここにドラッグ&ドロップ、または</p>
+                    <p>シフト表・凡例画像をまとめてドラッグ&ドロップ、または</p>
                     <label class="btn btn-secondary">
                         ファイルを選択
                         <input type="file" name="timesheet_files" id="shift-files-input"
                                accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
                     </label>
                     <p class="hint">対応形式: .xlsx .xls .xlsb .pdf .png .jpg .jpeg</p>
-                    <p class="hint">※凡例が別画像なら、シフト表と一緒に追加してください</p>
+                    <p class="hint">凡例が別画像の場合は、シフト表と一緒に追加してください</p>
                 </div>
                 <div class="selected-files" id="shift-files-selected"></div>
             </div>
@@ -168,12 +195,15 @@
                         <tr>
                             <th>氏名</th>
                             <th>日付</th>
-                            <th>勤務表_出勤</th>
+                            <th>請求勤怠_出勤</th>
                             <th>jinjer_出勤</th>
                             <th>出勤差(分)</th>
-                            <th>勤務表_退勤</th>
+                            <th>請求勤怠_退勤</th>
                             <th>jinjer_退勤</th>
                             <th>退勤差(分)</th>
+                            <th>請求勤怠_総労働</th>
+                            <th>jinjer_総労働</th>
+                            <th>総労働差(分)</th>
                             <th>判定</th>
                             <th>詳細</th>
                         </tr>
@@ -185,7 +215,7 @@
 
         <!-- 未提出者リスト -->
         <div id="unsubmitted-area" style="display:none">
-            <div class="section-title" style="margin-top:1.5rem">📝 勤務表未提出者</div>
+            <div class="section-title" style="margin-top:1.5rem">📝 請求勤怠未提出者</div>
             <div class="unsubmitted-list" id="unsubmitted-list"></div>
         </div>
 
@@ -201,21 +231,21 @@
         <div id="new-template-msg" class="new-template-msg" style="display:none"></div>
     </div>
 
-    <!-- CSV変換モード結果エリア -->
+    <!-- スケジュールアップロードモード結果エリア -->
     <div id="csv-export-area" style="display:none">
         <hr class="divider">
-        <div class="section-title">📤 jinjerカレンダー用CSVをエクスポート</div>
+        <div class="section-title">スケジュールCSV出力結果</div>
         <div id="csv-split-note" class="csv-split-note" style="display:none"></div>
         <div id="csv-files-list" class="csv-files-list"></div>
 
         <div id="missing-ids-warn" class="alert alert-warning" style="display:none; margin-top: 12px;">
-            <strong>⚠️ 従業員IDが取得できなかった人がいます:</strong>
+            <strong>従業員IDが取得できなかった人がいます:</strong>
             <span id="missing-ids-list"></span>
             <p style="margin-top:6px; font-size:12px">CSVの該当行は ID が空欄になっています。jinjer 画面で手動補完してください。</p>
         </div>
 
         <div id="merges-area" style="display:none; margin-top: 12px;">
-            <div class="section-title" style="font-size:14px">🔗 深夜跨ぎシフトの自動統合</div>
+            <div class="section-title" style="font-size:14px">深夜跨ぎシフトの自動統合</div>
             <p class="hint" style="margin:4px 0 8px 0">以下の連続日シフトを1本に統合しました。翌日のセルは休扱い（所/法）になっています。</p>
             <div id="merges-list" class="merges-list"></div>
         </div>
@@ -226,24 +256,28 @@
     <!-- ============================================================ -->
     <!-- 月次集約モード — quick_compare / quick_export                  -->
     <!-- ============================================================ -->
-    <hr class="divider" style="margin-top:2rem">
-    <div class="section-title">📑 月次集約モード（5月本番MVP）</div>
-    <p class="hint" style="margin-bottom: 12px">
-        既に各社員ぶんの突合が完了している前提で、複数の突合結果xlsx を 1 冊に集約 → 人間が承認 → jinjer アップロード用CSV を生成します。
-    </p>
-
-    <div class="upload-section">
-        <div class="section-title">① 差異一覧の生成 (quick_compare)</div>
+    <div class="workflow-card" id="monthly-compare-card">
+        <div class="step-header">
+            <div>
+                <div class="step-number">2</div>
+                <div class="step-copy">
+                    <div class="section-title">差異一覧を作る（手順1の結果を月次でまとめる）</div>
+                    <p class="hint">手順1で出た勤怠突合結果xlsxと、元のjinjer汎用CSVを使って、人間判断用の差異一覧を作成します。</p>
+                </div>
+            </div>
+        </div>
         <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
             <label>
-                突合結果xlsx フォルダ:
-                <input type="text" id="qc-kintai-dir" placeholder="例: Y:\給与明細\R8年\5月\突合結果"
+                手順1の勤怠突合結果xlsx（ファイルまたは保存フォルダ）:
+                <input type="text" id="qc-kintai-dir" placeholder="例: C:\Users\谷津晴香\Downloads\勤怠突合結果_20260527_165611.xlsx"
                        style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">1ファイルだけならxlsxをそのまま指定してOKです。複数人分をまとめる場合はxlsxが入ったフォルダを指定します。</div>
             </label>
             <label>
-                jinjer 汎用データCSV フォルダ:
-                <input type="text" id="qc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ"
+                jinjer 汎用データCSV（ファイルまたは保存フォルダ）:
+                <input type="text" id="qc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ\汎用データ.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">手順1で使った勤怠CSVではなく、jinjerから出した汎用データCSVを指定します。</div>
             </label>
             <label style="display:inline-flex; align-items:center; gap:6px">
                 対象月:
@@ -251,7 +285,7 @@
                        style="width:140px; padding:6px 10px">
             </label>
             <label>
-                出力ファイル名(任意):
+                出力ファイル名(任意・.xlsxは自動で付きます):
                 <input type="text" id="qc-output-filename" placeholder="差異一覧_2026-05.xlsx"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
@@ -277,23 +311,32 @@
         <div id="qc-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
-    <div class="upload-section">
-        <div class="section-title">② アップロード用CSVの生成 (quick_export)</div>
+    <div class="workflow-card" id="monthly-export-card">
+        <div class="step-header">
+            <div>
+                <div class="step-number">3</div>
+                <div class="step-copy">
+                    <div class="section-title">アップロード用CSVを作る</div>
+                    <p class="hint">差異一覧で承認・却下・保留を入力した後、jinjerに戻すCSVを生成します。</p>
+                </div>
+            </div>
+        </div>
         <p class="hint" style="padding:0 14px">
-            ①で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。
+            手順2で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。手順1の勤怠突合結果xlsxではありません。
         </p>
         <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
             <label>
-                人間判断を埋めた差異一覧xlsx:
+                人間判断を埋めた差異一覧xlsx（手順2の出力）:
                 <input type="file" id="qe-diff-file" accept=".xlsx" style="margin-top:4px">
             </label>
             <label>
-                jinjer 汎用データCSV フォルダ(①と同じものを指定):
-                <input type="text" id="qe-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ"
+                jinjer 汎用データCSV（ファイルまたは保存フォルダ・手順2と同じもの）:
+                <input type="text" id="qe-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ\汎用データ.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">CSVファイルを直接指定してOKです。複数CSVをまとめる場合だけフォルダを指定します。</div>
             </label>
             <label>
-                出力ファイル名(任意):
+                出力ファイル名(任意・.csvは自動で付きます):
                 <input type="text" id="qe-output-filename" placeholder="jinjer_upload_2026-05.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>

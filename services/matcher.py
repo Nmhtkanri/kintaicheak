@@ -60,6 +60,24 @@ def time_diff_minutes(t1, t2):
     return m1 - m2
 
 
+def elapsed_minutes(start, end):
+    """出勤から退勤までの経過分を返す。日跨ぎは翌日退勤として扱う。"""
+    start_min = _to_minutes(start)
+    end_min = _to_minutes(end)
+    if start_min is None or end_min is None:
+        return None
+    if end_min < start_min:
+        end_min += 24 * 60
+    return end_min - start_min
+
+
+def format_duration(minutes):
+    if minutes is None or pd.isna(minutes):
+        return ""
+    h, m = divmod(int(minutes), 60)
+    return f"{h}:{m:02d}"
+
+
 def _is_midnight(value):
     return isinstance(value, time) and value.hour == 0 and value.minute == 0
 
@@ -175,9 +193,11 @@ def judge(row, threshold_minutes=10):
     start_diff = time_diff_minutes(sheet_start, jinjer_start)
     end_diff = time_diff_minutes(sheet_end, jinjer_end)
 
+    total_diff = row.get("総労働差分(分)")
     start_diff_abs = abs(start_diff) if start_diff is not None else 0
     end_diff_abs = abs(end_diff) if end_diff is not None else 0
-    max_diff = max(start_diff_abs, end_diff_abs)
+    total_diff_abs = abs(total_diff) if total_diff is not None and pd.notna(total_diff) else 0
+    max_diff = max(start_diff_abs, end_diff_abs, total_diff_abs)
 
     # 3. 判定
     if max_diff <= threshold_minutes:
@@ -329,6 +349,25 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     merged["出勤差分(分)"] = merged.apply(lambda r: calc_diff(r, "勤務表_出勤時刻", "jinjer_出勤時刻"), axis=1)
     merged["退勤差分(分)"] = merged.apply(lambda r: calc_diff(r, "勤務表_退勤時刻", "jinjer_退勤時刻"), axis=1)
 
+    merged["勤務表_総労働時間(分)"] = merged.apply(
+        lambda r: elapsed_minutes(r.get("勤務表_出勤時刻"), r.get("勤務表_退勤時刻")),
+        axis=1,
+    )
+    merged["jinjer_総労働時間(分)"] = merged.apply(
+        lambda r: elapsed_minutes(r.get("jinjer_出勤時刻"), r.get("jinjer_退勤時刻")),
+        axis=1,
+    )
+    merged["総労働差分(分)"] = merged.apply(
+        lambda r: (
+            abs(r.get("勤務表_総労働時間(分)") - r.get("jinjer_総労働時間(分)"))
+            if pd.notna(r.get("勤務表_総労働時間(分)")) and pd.notna(r.get("jinjer_総労働時間(分)"))
+            else None
+        ),
+        axis=1,
+    )
+    merged["勤務表_総労働時間"] = merged["勤務表_総労働時間(分)"].apply(format_duration)
+    merged["jinjer_総労働時間"] = merged["jinjer_総労働時間(分)"].apply(format_duration)
+
     # 判定
     results = merged.apply(lambda r: judge(r, threshold_minutes), axis=1)
     merged["判定"] = [r[0] for r in results]
@@ -343,6 +382,9 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         "勤務表_退勤時刻",
         "jinjer_退勤時刻",
         "退勤差分(分)",
+        "勤務表_総労働時間",
+        "jinjer_総労働時間",
+        "総労働差分(分)",
         "判定",
         "詳細",
         "jinjer_コメント",
