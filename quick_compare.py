@@ -59,12 +59,17 @@ SHORT_BREAK_AT_LONG_WORK = 6  # 勤務 6h 超で休憩 0:00 なら DANGER（労�
 OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 
 # ===== 出力xlsx 列定義 =====
+# 「人間判断」を「自動修正提案値」の直後に置く。判断列を提案値のすぐ隣にすることで、
+# ユーザーが手入力欄（時刻を入れる列）へ承認/却下/保留を誤入力するのを防ぐ。
+# 手入力欄（任意・上級者向け）は右側へ寄せる。
+# ※ quick_export 側は列名で読むため、列順を変えても後方互換は保たれる。
 DIFF_COLUMNS = [
     "行ID", "従業員ID", "氏名", "対象日付",
     "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
     "警告レベル", "警告理由",
     "自動修正提案値",
     "人間判断", "判断メモ",
+    "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
     "実績確定状況",  # 参考表示のみ。警告レベル判定には使わない
     "元突合結果ファイル",
 ]
@@ -664,6 +669,8 @@ def classify_total_work_diff(diff_minutes: int, jrow: dict) -> tuple[str, str]:
 # ----------------------------------------------------------------------
 
 HEADER_FILL = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+# 「人間判断」列ヘッダー強調（入力すべき列だと分かるように）
+JUDGE_HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 LEVEL_FILL = {
     LEVEL_DANGER: PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
     LEVEL_WARN: PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
@@ -703,26 +710,38 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     ws = wb.create_sheet("差異一覧")
     for col_idx, header in enumerate(DIFF_COLUMNS, start=1):
         c = ws.cell(row=1, column=col_idx, value=header)
-        c.fill = HEADER_FILL
+        # 「人間判断」列は入力すべき列だと一目で分かるよう、ヘッダーを目立たせる
+        c.fill = JUDGE_HEADER_FILL if header == "人間判断" else HEADER_FILL
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center")
     ws.auto_filter.ref = f"A1:{get_column_letter(len(DIFF_COLUMNS))}1"
     ws.freeze_panes = "A2"
 
-    # データ行
+    # データ行（列名→値の対応で書き込み、列順の変更に強くする）
     for r_idx, drow in enumerate(diff_rows, start=2):
-        values = [
-            drow.row_id, drow.emp_id, drow.name, drow.target_date,
-            drow.kind, drow.kintai_value, drow.jinjer_value, drow.diff_minutes,
-            drow.warn_level, drow.warn_reason,
-            drow.auto_fix_value,
-            "",  # 人間判断（プルダウン）
-            "",  # 判断メモ
-            drow.finalized,  # 実績確定状況（参考表示）
-            drow.source_file,
-        ]
-        for c_idx, val in enumerate(values, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=val)
+        row_values = {
+            "行ID": drow.row_id,
+            "従業員ID": drow.emp_id,
+            "氏名": drow.name,
+            "対象日付": drow.target_date,
+            "差異種別": drow.kind,
+            "請求勤怠値": drow.kintai_value,
+            "jinjer値": drow.jinjer_value,
+            "差分(分)": drow.diff_minutes,
+            "警告レベル": drow.warn_level,
+            "警告理由": drow.warn_reason,
+            "自動修正提案値": drow.auto_fix_value,
+            "人間判断": "",        # プルダウンで入力
+            "判断メモ": "",
+            "手入力修正値": "",    # 出勤/退勤の提案値を人間が上書きしたい場合のみ
+            "手入力休憩1": "",     # 休憩差異を承認して汎用データに反映する場合のみ
+            "手入力復帰1": "",
+            "手入力休憩時間": "",
+            "実績確定状況": drow.finalized,  # 参考表示
+            "元突合結果ファイル": drow.source_file,
+        }
+        for c_idx, header in enumerate(DIFF_COLUMNS, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=row_values.get(header, ""))
             cell.alignment = Alignment(vertical="center")
         # 警告レベル列に色塗り
         fill = LEVEL_FILL.get(drow.warn_level)
@@ -743,10 +762,17 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         ws.add_data_validation(dv)
         dv.add(f"{judge_col_letter}2:{judge_col_letter}{1 + len(diff_rows)}")
 
-    # 列幅
-    widths = [6, 12, 16, 12, 10, 10, 10, 8, 10, 40, 10, 10, 28, 12, 32]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    # 列幅（列名で指定。列順を変えても崩れない）
+    width_map = {
+        "行ID": 6, "従業員ID": 12, "氏名": 16, "対象日付": 12,
+        "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
+        "警告レベル": 10, "警告理由": 40, "自動修正提案値": 14,
+        "人間判断": 12, "判断メモ": 28,
+        "手入力修正値": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
+        "実績確定状況": 12, "元突合結果ファイル": 32,
+    }
+    for i, header in enumerate(DIFF_COLUMNS, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width_map.get(header, 14)
 
     # 取込ログ
     ws_log = wb.create_sheet("取込ログ")

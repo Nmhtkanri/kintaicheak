@@ -7,6 +7,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from quick_compare import (  # noqa: E402
+    DIFF_COLUMNS,
     DIFF_KIND_PUNCH_IN,
     DIFF_KIND_PUNCH_OUT,
     JINJER_HEADERS,
@@ -71,3 +72,10 @@ def test_normalize_kintai_result_columns_accepts_seikyu_kintai_headers():
     assert normalized.iloc[0]["勤務表_出勤"] == "9:00"
     assert normalized.iloc[0]["勤務表_退勤"] == "18:00"
     assert normalized.iloc[0]["勤務表_総労働"] == "9:00"
+
+
+def test_diff_columns_include_manual_review_fields():
+    assert "手入力修正値" in DIFF_COLUMNS
+    assert "手入力休憩1" in DIFF_COLUMNS
+    assert "手入力復帰1" in DIFF_COLUMNS
+    assert "手入力休憩時間" in DIFF_COLUMNS

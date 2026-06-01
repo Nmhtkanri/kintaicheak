@@ -11,7 +11,7 @@
   3. 承認行に応じて該当セルを上書き:
      - 出勤差異 → 出勤1（22列目）
      - 退勤差異 → 退勤1（23列目）
-     - 休憩差異 → 警告のみ、上書きしない
+     - 休憩差異 → 手入力休憩1 / 手入力復帰1 / 手入力休憩時間 があれば該当列へ反映
      - 総労働時間差異 → 警告のみ、上書きしない
   4. 全件をそのままアップロード用CSV として書き出す
 
@@ -33,7 +33,7 @@ import io
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, time
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,9 @@ import pandas as pd
 # ===== jinjer CSV の上書き対象列（ヘッダー名で照合） =====
 JINJER_COL_PUNCH_IN = "出勤1"
 JINJER_COL_PUNCH_OUT = "退勤1"
+JINJER_COL_BREAK_1_START = "休憩1"
+JINJER_COL_BREAK_1_END = "復帰1"
+JINJER_COL_BREAK_TOTAL = "休憩時間"
 JINJER_COL_EMP_ID = "*従業員ID"
 JINJER_COL_DATE = "*年月日"
 
@@ -55,6 +58,15 @@ DIFF_KIND_TOTAL = "総労働時間"
 JUDGE_APPROVE = "承認"
 JUDGE_REJECT = "却下"
 JUDGE_HOLD = "保留"
+JUDGMENTS = {JUDGE_APPROVE, JUDGE_REJECT, JUDGE_HOLD}
+
+# 「人間判断」を入力すべきなのに、誤って判断（承認/却下/保留）が書き込まれやすい列。
+# 本来これらの列には時刻・数値・メモが入るため、判断キーワードが入っていたら
+# 「人間判断」列の入力ミスとみなして回収する（先頭ほど優先）。
+MISPLACED_JUDGE_COLS = [
+    "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
+    "自動修正提案値", "判断メモ",
+]
 
 
 # ----------------------------------------------------------------------
@@ -67,6 +79,10 @@ class ApprovedRow:
     target_date_iso: str  # YYYY-MM-DD
     kind: str
     auto_fix_value: str
+    manual_fix_value: str
+    manual_break_start: str
+    manual_break_end: str
+    manual_break_total: str
     name: str  # 表示用
     warn_level: str
     source_diff_row_id: int
@@ -89,8 +105,13 @@ class Stats:
     overwritten_punch_out: int = 0
     skipped_break: int = 0  # 承認されたが上書きしなかった
     skipped_total: int = 0
+    overwritten_break_start: int = 0
+    overwritten_break_end: int = 0
+    overwritten_break_total: int = 0
     not_matched: int = 0  # jinjer 行が見つからない承認行
     overwritten_finalized: int = 0  # 上書きしたうち実績確定済みだった件数（参考表示）
+    recovered_misplaced: int = 0  # 「人間判断」列以外に入っていた判断を回収した件数
+    misplaced_by_col: dict[str, int] = field(default_factory=dict)  # 列名→誤入力件数
     warnings: list[str] = field(default_factory=list)
 
 
@@ -125,6 +146,27 @@ def iso_to_jinjer_date(date_iso: str) -> str:
     return f"{d.year}/{d.month}/{d.day}"
 
 
+def clean_excel_text(value: Any) -> str:
+    """Excel由来の値を、jinjer汎用データCSVへ書く文字列に正規化する。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, datetime):
+        return value.strftime("%H:%M")
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return ""
+    return s
+
+
 # ----------------------------------------------------------------------
 # 入力読み込み
 # ----------------------------------------------------------------------
@@ -154,6 +196,21 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
     approved: list[ApprovedRow] = []
     for _, row in df.iterrows():
         judge = str(row.get("人間判断") or "").strip()
+
+        # 判断が「人間判断」列に無い場合、別列への入力ミスを回収する。
+        # 承認/却下/保留 は時刻・メモには本来現れない閉じた語彙なので、
+        # 他の列に厳密一致で入っていれば判断の置き場所間違いとみなして拾う。
+        misplaced_col: str | None = None
+        if judge not in JUDGMENTS:
+            for col in MISPLACED_JUDGE_COLS:
+                v = str(row.get(col) or "").strip()
+                if v in JUDGMENTS:
+                    judge = v
+                    misplaced_col = col
+                    stats.recovered_misplaced += 1
+                    stats.misplaced_by_col[col] = stats.misplaced_by_col.get(col, 0) + 1
+                    break
+
         if judge == JUDGE_APPROVE:
             stats.approved += 1
         elif judge == JUDGE_REJECT:
@@ -166,10 +223,22 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
             stats.pending += 1
             continue
 
+        # 判断を回収した列の値は「承認」等の文字列なので、時刻として書き込まないよう除外する。
+        def _field(col: str) -> str:
+            if col == misplaced_col:
+                return ""
+            v = clean_excel_text(row.get(col))
+            # 念のため、どの入力欄にも判断キーワードが時刻として紛れ込まないよう除外
+            return "" if v in JUDGMENTS else v
+
         emp_id = str(row.get("従業員ID") or "").strip()
         date_iso = normalize_date_iso(row.get("対象日付"))
         kind = str(row.get("差異種別") or "").strip()
-        auto_fix = str(row.get("自動修正提案値") or "").strip()
+        auto_fix = _field("自動修正提案値")
+        manual_fix = _field("手入力修正値")
+        manual_break_start = _field("手入力休憩1")
+        manual_break_end = _field("手入力復帰1")
+        manual_break_total = _field("手入力休憩時間")
         name = str(row.get("氏名") or "").strip()
         warn_level = str(row.get("警告レベル") or "").strip()
         row_id_raw = row.get("行ID")
@@ -186,7 +255,12 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
 
         approved.append(ApprovedRow(
             emp_id=emp_id, target_date_iso=date_iso, kind=kind,
-            auto_fix_value=auto_fix, name=name, warn_level=warn_level,
+            auto_fix_value=auto_fix,
+            manual_fix_value=manual_fix,
+            manual_break_start=manual_break_start,
+            manual_break_end=manual_break_end,
+            manual_break_total=manual_break_total,
+            name=name, warn_level=warn_level,
             source_diff_row_id=row_id,
         ))
 
@@ -199,6 +273,18 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
             stats.approved_break += 1
         elif kind == DIFF_KIND_TOTAL:
             stats.approved_total += 1
+
+    # 判断が「人間判断」列以外に入っていたものを回収した場合、目立つ警告を残す。
+    if stats.recovered_misplaced:
+        detail = "、".join(
+            f"『{col}』列 {cnt}件" for col, cnt in stats.misplaced_by_col.items()
+        )
+        stats.warnings.insert(
+            0,
+            f"⚠️ 判断（承認/却下/保留）が「人間判断」列ではなく {detail} に入力されていました。"
+            f"合計 {stats.recovered_misplaced} 件を自動で回収して処理しました。"
+            "次回は必ず「人間判断」列（プルダウンのある列）に入力してください。",
+        )
 
     return approved
 
@@ -294,23 +380,61 @@ def apply_approved_rows(
     （実績確定済 = 本人が打刻申請を確定しただけで、勤怠が正しいことを保証しない。
     原則として請求勤怠が正しいため、管理部の判断＝承認なら実績確定済でも上書きする）。
     """
-    try:
-        punch_in_col = headers.index(JINJER_COL_PUNCH_IN)
-        punch_out_col = headers.index(JINJER_COL_PUNCH_OUT)
-    except ValueError as e:
-        raise RuntimeError(f"jinjer CSV に上書き対象列がありません: {e}")
+    required_cols = [JINJER_COL_PUNCH_IN, JINJER_COL_PUNCH_OUT]
+    missing = [col for col in required_cols if col not in headers]
+    if missing:
+        raise RuntimeError(f"jinjer CSV に上書き対象列がありません: {', '.join(missing)}")
+    punch_in_col = headers.index(JINJER_COL_PUNCH_IN)
+    punch_out_col = headers.index(JINJER_COL_PUNCH_OUT)
+    break_start_col = headers.index(JINJER_COL_BREAK_1_START) if JINJER_COL_BREAK_1_START in headers else None
+    break_end_col = headers.index(JINJER_COL_BREAK_1_END) if JINJER_COL_BREAK_1_END in headers else None
+    break_total_col = headers.index(JINJER_COL_BREAK_TOTAL) if JINJER_COL_BREAK_TOTAL in headers else None
 
     # 実績確定状況列があれば、上書きしたうち何件が実績確定済だったかを集計する（参考表示のみ）
     finalized_col = headers.index("実績確定状況") if "実績確定状況" in headers else None
 
     for app in approved:
-        # 休憩・総労働時間は自動反映しない（ユーザー指示）
+        # 休憩は請求勤怠から自動推定せず、人間が差異一覧に入力した欄だけ反映する。
         if app.kind == DIFF_KIND_BREAK:
-            stats.skipped_break += 1
-            stats.warnings.append(
-                f"行ID={app.source_diff_row_id} 休憩差異が承認されましたが、自動反映はスキップしました "
-                f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
-            )
+            key = (app.emp_id, app.target_date_iso)
+            idx = row_index.get(key)
+            if idx is None:
+                stats.not_matched += 1
+                stats.warnings.append(
+                    f"行ID={app.source_diff_row_id} jinjer CSV に該当行なし "
+                    f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
+                )
+                continue
+
+            wrote = False
+            if app.manual_break_start:
+                if break_start_col is None:
+                    stats.warnings.append(f"行ID={app.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_START}' 列がありません")
+                else:
+                    rows[idx][break_start_col] = app.manual_break_start
+                    stats.overwritten_break_start += 1
+                    wrote = True
+            if app.manual_break_end:
+                if break_end_col is None:
+                    stats.warnings.append(f"行ID={app.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_END}' 列がありません")
+                else:
+                    rows[idx][break_end_col] = app.manual_break_end
+                    stats.overwritten_break_end += 1
+                    wrote = True
+            if app.manual_break_total:
+                if break_total_col is None:
+                    stats.warnings.append(f"行ID={app.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_TOTAL}' 列がありません")
+                else:
+                    rows[idx][break_total_col] = app.manual_break_total
+                    stats.overwritten_break_total += 1
+                    wrote = True
+
+            if not wrote:
+                stats.skipped_break += 1
+                stats.warnings.append(
+                    f"行ID={app.source_diff_row_id} 休憩差異が承認されましたが、手入力休憩欄が空のため反映しませんでした "
+                    f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
+                )
             continue
         if app.kind == DIFF_KIND_TOTAL:
             stats.skipped_total += 1
@@ -340,10 +464,10 @@ def apply_approved_rows(
 
         # 上書き（実績確定済かどうかに関わらず、承認されたものは上書きする）
         if app.kind == DIFF_KIND_PUNCH_IN:
-            rows[idx][punch_in_col] = app.auto_fix_value
+            rows[idx][punch_in_col] = app.manual_fix_value or app.auto_fix_value
             stats.overwritten_punch_in += 1
         elif app.kind == DIFF_KIND_PUNCH_OUT:
-            rows[idx][punch_out_col] = app.auto_fix_value
+            rows[idx][punch_out_col] = app.manual_fix_value or app.auto_fix_value
             stats.overwritten_punch_out += 1
 
         # 参考集計: 上書き対象が実績確定済だった件数
@@ -375,16 +499,22 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"  却下       : {stats.rejected}")
     print(f"  保留       : {stats.held}")
     print(f"  未判断     : {stats.pending}")
+    if stats.recovered_misplaced:
+        detail = "、".join(f"{col}={cnt}" for col, cnt in stats.misplaced_by_col.items())
+        print(f"  ※ 判断の列ミスを回収: {stats.recovered_misplaced} 件 ({detail})")
     print()
     print(f"{mode} ===== 承認の種別内訳 =====")
     print(f"  出勤差異   : {stats.approved_punch_in} → 出勤1 列に上書き")
     print(f"  退勤差異   : {stats.approved_punch_out} → 退勤1 列に上書き")
-    print(f"  休憩差異   : {stats.approved_break} → 警告のみ、上書きしない")
+    print(f"  休憩差異   : {stats.approved_break} → 手入力欄がある場合のみ休憩列へ上書き")
     print(f"  総労働時間 : {stats.approved_total} → 警告のみ、上書きしない")
     print()
     print(f"{mode} ===== 実際の上書き結果 =====")
     print(f"  出勤1 上書き         : {stats.overwritten_punch_in}")
     print(f"  退勤1 上書き         : {stats.overwritten_punch_out}")
+    print(f"  休憩1 上書き         : {stats.overwritten_break_start}")
+    print(f"  復帰1 上書き         : {stats.overwritten_break_end}")
+    print(f"  休憩時間 上書き      : {stats.overwritten_break_total}")
     print(f"  休憩スキップ         : {stats.skipped_break}")
     print(f"  総労働スキップ       : {stats.skipped_total}")
     print(f"  jinjer行 未マッチ    : {stats.not_matched}")

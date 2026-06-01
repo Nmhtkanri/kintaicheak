@@ -322,7 +322,7 @@
             </div>
         </div>
         <p class="hint" style="padding:0 14px">
-            手順2で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。手順1の勤怠突合結果xlsxではありません。
+            手順2で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値だけ汎用データへ反映します。
         </p>
         <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
             <label>
@@ -356,6 +356,7 @@
                 <tr><td style="padding:2px 8px">承認 / 却下 / 保留 / 未判断:</td><td><span id="qe-judges"></span></td></tr>
                 <tr><td style="padding:2px 8px">出勤1 上書き:</td><td><span id="qe-overwrite-in">0</span></td></tr>
                 <tr><td style="padding:2px 8px">退勤1 上書き:</td><td><span id="qe-overwrite-out">0</span></td></tr>
+                <tr><td style="padding:2px 8px">休憩列 上書き:</td><td><span id="qe-overwrite-break">0</span></td></tr>
                 <tr><td style="padding:2px 8px">休憩・総労働時間スキップ:</td><td><span id="qe-skipped">0</span></td></tr>
                 <tr><td style="padding:2px 8px">jinjer 行 未マッチ:</td><td><span id="qe-notmatched">0</span></td></tr>
                 <tr><td style="padding:2px 8px">うち実績確定済を上書き(参考):</td><td><span id="qe-finalized">0</span></td></tr>
@@ -471,6 +472,9 @@
                 `${s.approved} / ${s.rejected} / ${s.held} / ${s.pending}`;
             document.getElementById('qe-overwrite-in').textContent = s.overwritten_punch_in;
             document.getElementById('qe-overwrite-out').textContent = s.overwritten_punch_out;
+            document.getElementById('qe-overwrite-break').textContent =
+                (s.overwritten_break_start + s.overwritten_break_end + s.overwritten_break_total) +
+                ' (休憩1:' + s.overwritten_break_start + ', 復帰1:' + s.overwritten_break_end + ', 休憩時間:' + s.overwritten_break_total + ')';
             document.getElementById('qe-skipped').textContent = (s.skipped_break + s.skipped_total) + ' (休憩:' + s.skipped_break + ', 総労働:' + s.skipped_total + ')';
             document.getElementById('qe-notmatched').textContent = s.not_matched;
             document.getElementById('qe-finalized').textContent = s.overwritten_finalized;
