@@ -117,6 +117,60 @@ def test_staff_code_sheet_name_does_not_match_multiple_jinjer_employees():
     assert result.iloc[0]["判定"] == "データ欠損"
 
 
+def test_fuzzy_matches_single_kanji_ocr_misread():
+    """OCRが氏名を1文字誤読しても、jinjer側に唯一の近似候補があれば突合する。
+
+    実例: PDFの担当者名「矢野瑞穂」をOCRが「矢野瑞也」と誤読したケース。
+    jinjer側の氏名（矢野 瑞穂）に寄せて突合・表示されること。
+    """
+    jinjer = make_df([
+        ("矢野 瑞穂", date(2026, 5, 1), time(8, 50), time(19, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("矢野瑞也", date(2026, 5, 1), time(8, 50), time(19, 30)),
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert unsubmitted == []
+    assert len(result) == 1
+    assert result.iloc[0]["氏名"] == "矢野 瑞穂"  # jinjer側の正しい氏名に寄る
+    assert result.iloc[0]["判定"] == "OK"
+
+
+def test_fuzzy_does_not_match_when_two_close_candidates():
+    """近似候補がjinjer側に2人以上いるときは曖昧なので結びつけない。"""
+    jinjer = make_df([
+        ("山田太郎", date(2026, 5, 1), time(9, 0), time(18, 0)),
+        ("山田次郎", date(2026, 5, 1), time(9, 0), time(18, 0)),
+    ], "jinjer")
+    sheet = make_df([
+        ("山田三郎", date(2026, 5, 1), time(9, 0), time(18, 0)),  # 両者と編集距離1
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert set(unsubmitted) == {"山田太郎", "山田次郎"}
+    assert result.iloc[0]["氏名"] == "山田三郎"
+    assert result.iloc[0]["判定"] == "データ欠損"
+
+
+def test_fuzzy_does_not_match_short_surname():
+    """4文字未満の短い姓は近似一致の対象外（田中/田口の誤マッチ防止）。"""
+    jinjer = make_df([
+        ("田口", date(2026, 5, 1), time(9, 0), time(18, 0)),
+    ], "jinjer")
+    sheet = make_df([
+        ("田中", date(2026, 5, 1), time(9, 0), time(18, 0)),
+    ], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert unsubmitted == ["田口"]
+    assert result.iloc[0]["氏名"] == "田中"
+    assert result.iloc[0]["判定"] == "データ欠損"
+
+
 def test_unique_surname_sheet_name_matches_jinjer_employee():
     """PDFファイル名が姓だけでも、jinjer側で一意ならその社員に寄せる"""
     jinjer = make_df([

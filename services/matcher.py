@@ -44,6 +44,24 @@ def _is_probable_staff_code(name):
     return bool(re.fullmatch(r"[A-Z0-9_-]{2,12}", raw))
 
 
+def _levenshtein(a, b):
+    """2文字列の編集距離（挿入/削除/置換）を返す。"""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
+        prev = cur
+    return prev[-1]
+
+
 def _to_minutes(t):
     """datetime.timeを分に変換"""
     if t is None or (not isinstance(t, time)):
@@ -253,6 +271,24 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         ]
         return candidates[0] if len(candidates) == 1 else None
 
+    def choose_fuzzy_key(key):
+        """OCRの1文字誤読を吸収する近似一致。
+
+        スキャン勤務表のOCRは氏名の漢字を1文字だけ読み違えることがある
+        （例: 矢野瑞穂 → 矢野瑞也）。完全一致・部分一致のどちらも外れたときに限り、
+        jinjer側に「編集距離1で他に候補がない」氏名が1つだけある場合だけ採用する。
+        誤マッチ防止のため、両者とも4文字以上のフルネームに限定する
+        （田中/田口のような短い姓だけの誤一致を避ける）。
+        """
+        if not key or len(key) < 4 or key in jinjer_name_keys:
+            return None
+        candidates = [
+            jinjer_key
+            for jinjer_key in jinjer_name_keys
+            if jinjer_key and len(jinjer_key) >= 4 and _levenshtein(key, jinjer_key) <= 1
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
     def choose_sheet_key(name):
         for key in normalize_name_keys(name):
             if key in jinjer_name_keys:
@@ -260,6 +296,11 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
             partial_key = choose_unique_partial_key(key)
             if partial_key:
                 return partial_key
+        # 完全一致・部分一致が無いときだけ、OCR誤読を想定した近似一致を試す
+        for key in normalize_name_keys(name):
+            fuzzy_key = choose_fuzzy_key(key)
+            if fuzzy_key:
+                return fuzzy_key
         keys = normalize_name_keys(name)
         return keys[0] if keys else ""
 

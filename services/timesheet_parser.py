@@ -93,8 +93,19 @@ def _pdf_to_text_or_bytes(filepath):
     return full_text, None
 
 
+# 画像化したPDFページの長辺の上限(px)。
+# Anthropic APIは長辺1568pxを超える画像を内部で縮小するため、これ以上大きくしても
+# 精度は上がらず、base64後のサイズだけ膨らんでリクエスト上限(32MB)を超えて413になる。
+_PDF_RENDER_MAX_LONG_EDGE = 2000
+
+
 def _pdf_first_page_to_png_bytes(filepath):
-    """文字を持たないPDFを画像解析に回すため、1ページ目をPNG化する。"""
+    """文字を持たないPDFを画像解析に回すため、1ページ目をPNG化する。
+
+    レンダリング倍率は固定せず、ページ実寸から長辺が _PDF_RENDER_MAX_LONG_EDGE 以内に
+    収まるよう動的に決める。高解像度スキャンPDFでも画像が肥大化せず、Claude APIの
+    リクエストサイズ上限(32MB)・画像最大辺(8000px)を超えない。
+    """
     try:
         import pypdfium2 as pdfium
 
@@ -102,7 +113,15 @@ def _pdf_first_page_to_png_bytes(filepath):
         if len(pdf) == 0:
             return None
         page = pdf[0]
-        bitmap = page.render(scale=4.0)
+        width_pt, height_pt = page.get_size()  # scale=1.0 相当のピクセル寸法
+        native_long_edge = max(width_pt, height_pt)
+        if native_long_edge <= 0:
+            scale = 4.0
+        else:
+            # 長辺を _PDF_RENDER_MAX_LONG_EDGE に合わせる倍率。小さなPDFは拡大、
+            # 巨大スキャンは縮小する。拡大しすぎを防ぐため上限は4.0倍。
+            scale = min(4.0, _PDF_RENDER_MAX_LONG_EDGE / native_long_edge)
+        bitmap = page.render(scale=scale)
         image = bitmap.to_pil().convert("RGB")
         buf = io.BytesIO()
         image.save(buf, format="PNG")
