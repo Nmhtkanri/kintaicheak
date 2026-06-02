@@ -778,6 +778,37 @@ def _extract_fieldglass_name_from_filename(filepath):
     return tail.upper() if tail else None
 
 
+def _is_katakana_only_name(name):
+    """氏名が（スペースを除き）カタカナのみで構成されるか。
+
+    ERCSTS等の外国人ワーカーは、ファイル名に「ラミタさん」のようなカタカナの
+    通称が付くことがある。jinjer側はローマ字（例: MAHARJAN RAMITA）で登録される
+    ため、カタカナ通称のままでは突合できない。この判定で通称を検出し、PDF本文の
+    ローマ字氏名を優先する。漢字氏名（例: 奈良）はjinjerの漢字氏名と部分一致する
+    ため対象外。
+    """
+    if not name:
+        return False
+    core = re.sub(r"\s", "", str(name))
+    if not core:
+        return False
+    return all(
+        ("゠" <= ch <= "ヿ") or ("ｦ" <= ch <= "ﾟ") or ch == "ー"
+        for ch in core
+    )
+
+
+def _choose_fieldglass_name(filename_name, worker_name):
+    """Fieldglass勤務表の突合用氏名を決める。
+
+    通常はファイル名由来の氏名を使うが、それがカタカナの通称（jinjerと一致しない）で
+    PDF本文にローマ字氏名がある場合は、ローマ字氏名を優先する。
+    """
+    if filename_name and _is_katakana_only_name(filename_name) and worker_name:
+        return worker_name
+    return filename_name or worker_name
+
+
 def _parse_fieldglass_worker_name(text):
     match = re.search(r"\bWorker\s+([^(\n]+)\(", text)
     if not match:
@@ -866,7 +897,10 @@ def _parse_fieldglass_pdf_timesheet(filepath):
     period_start = datetime.strptime(period_match.group(1), "%Y-%m-%d").date()
     period_end = datetime.strptime(period_match.group(2), "%Y-%m-%d").date()
 
-    name = _extract_fieldglass_name_from_filename(filepath) or _parse_fieldglass_worker_name(text)
+    name = _choose_fieldglass_name(
+        _extract_fieldglass_name_from_filename(filepath),
+        _parse_fieldglass_worker_name(text),
+    )
     if not name:
         return None
 

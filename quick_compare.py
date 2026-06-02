@@ -191,6 +191,26 @@ def elapsed_minutes_from_values(start: Any, end: Any) -> int | None:
     return end_min - start_min
 
 
+def to_jinjer_overnight_punch_out(punch_in: Any, punch_out: Any) -> str:
+    """日跨ぎ勤務の退勤時刻を jinjer インポート用の 24時超表記へ変換する。
+
+    jinjer は「年月日」を勤務開始日として扱うため、翌朝退勤は 24時を超える表記
+    （例: 翌 08:15 → 32:15）でないとインポートできない。請求勤怠の出勤 > 退勤
+    （= 退勤が翌日にずれ込んだ夜勤）のときだけ、退勤に 24h を足した 'HH:MM' を返す。
+
+    日跨ぎでない・出退勤のどちらかが空/不正なときは、退勤値をそのまま返す。
+    すでに 24時超表記（32:15 等）なら out >= in となり再変換されない（冪等）。
+    """
+    out_clean = clean_cell(punch_out)
+    in_min = parse_hhmm(punch_in)
+    out_min = parse_hhmm(punch_out)
+    if in_min is None or out_min is None or out_min >= in_min:
+        return out_clean
+    adjusted = out_min + 24 * 60
+    h, m = divmod(adjusted, 60)
+    return f"{h:02d}:{m:02d}"
+
+
 def first_present(row: pd.Series, candidates: list[str]) -> Any:
     for col in candidates:
         if col not in row:
@@ -496,7 +516,7 @@ def compute_diffs(
                 kind=DIFF_KIND_PUNCH_OUT,
                 kintai_value=k_out, jinjer_value=j_out, diff_minutes=str(diff_out),
                 warn_level=level, warn_reason=reason,
-                auto_fix_value=k_out,
+                auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
                 finalized=finalized,
                 source_file=source_file,
             ))
@@ -508,7 +528,7 @@ def compute_diffs(
                 kintai_value=k_out, jinjer_value="", diff_minutes="",
                 warn_level=LEVEL_WARN,
                 warn_reason="jinjer退勤なし / 請求勤怠側に時刻あり",
-                auto_fix_value=k_out,
+                auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
                 finalized=finalized,
                 source_file=source_file,
             ))

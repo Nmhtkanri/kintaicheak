@@ -250,6 +250,37 @@ def test_parse_fieldglass_pdf_direct(monkeypatch, tmp_path):
     assert df.iloc[2]["退勤時刻"] == time(21, 30)
 
 
+def test_parse_fieldglass_pdf_katakana_filename_uses_romaji_worker_name(monkeypatch, tmp_path):
+    """ファイル名がカタカナ通称（ラミタ）でも、PDF本文のローマ字氏名で突合できる。
+
+    jinjer側はローマ字（MAHARJAN RAMITA）で登録されるため、カタカナ通称のままでは
+    一致しない。PDF本文の "Worker Ramita, Maharjan" を採用して MAHARJAN RAMITA とする。
+    """
+    path = tmp_path / "timesheet_ERCSTS0ラミタさん.pdf"
+    pdf_text = "\n".join([
+        "Time Sheet",
+        "ID ERCSTS01173544 Worker Ramita, Maharjan(ERCSWK00144175)",
+        "Period 2026-05-01 to 2026-05-31 Job Posting Support Engineer|JP|Job Stage",
+        "Time in/time out",
+        "Day 5-01 Thu 5-02 Fri 5-03 Sat Total",
+        "Time In 09:00 09:00 00:00",
+        "Time Out 22:30 20:00 00:00",
+        "Total 12h 30m 10h 0m 0h 0m 22h 30m",
+    ])
+    monkeypatch.setattr(
+        timesheet_parser,
+        "_pdf_to_text_or_bytes",
+        lambda filepath: (pdf_text, None),
+    )
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert df["氏名"].tolist() == ["MAHARJAN RAMITA", "MAHARJAN RAMITA"]
+    assert df.iloc[0]["日付"] == date(2026, 5, 1)
+
+
 def test_image_only_pdf_is_sent_as_image_for_ai_fallback(tmp_path):
     path = tmp_path / "scanned_timesheet.pdf"
     image = Image.new("RGB", (480, 640), "white")

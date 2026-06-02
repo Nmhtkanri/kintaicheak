@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -144,6 +145,36 @@ def iso_to_jinjer_date(date_iso: str) -> str:
     """'2026-05-12' → '2026/5/12'（jinjer の 0パディングなし形式）"""
     d = datetime.strptime(date_iso, "%Y-%m-%d").date()
     return f"{d.year}/{d.month}/{d.day}"
+
+
+_HHMM_RE = re.compile(r"^(\d{1,3}):(\d{2})")
+
+
+def _hhmm_to_minutes(value: Any) -> int | None:
+    """'H:MM' / 'HH:MM'（24時超表記含む）を分に変換。不正値は None。"""
+    if value is None:
+        return None
+    m = _HHMM_RE.match(str(value).strip())
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def to_overnight_punch_out(punch_in: Any, punch_out: str) -> str:
+    """退勤が翌朝に跨ぐ場合、jinjer インポート用の 24時超表記へ変換する。
+
+    出勤 > 退勤（夜勤で翌日にずれ込み）のときだけ退勤に 24h を足す（08:15→32:15）。
+    すでに 24時超表記なら out >= in となり再変換しない（冪等）。出退勤の判定が
+    できないときは元の退勤値をそのまま返す。
+    """
+    if not punch_out:
+        return punch_out
+    in_min = _hhmm_to_minutes(punch_in)
+    out_min = _hhmm_to_minutes(punch_out)
+    if in_min is None or out_min is None or out_min >= in_min:
+        return punch_out
+    adjusted = out_min + 24 * 60
+    return f"{adjusted // 60:02d}:{adjusted % 60:02d}"
 
 
 def clean_excel_text(value: Any) -> str:
@@ -467,7 +498,11 @@ def apply_approved_rows(
             rows[idx][punch_in_col] = app.manual_fix_value or app.auto_fix_value
             stats.overwritten_punch_in += 1
         elif app.kind == DIFF_KIND_PUNCH_OUT:
-            rows[idx][punch_out_col] = app.manual_fix_value or app.auto_fix_value
+            new_out = app.manual_fix_value or app.auto_fix_value
+            # 夜勤で翌朝退勤の場合、jinjer は 24時超表記でないとインポートできないため
+            # 現在の出勤1と突き合わせて 08:15→32:15 のように補正する（冪等・安全網）。
+            new_out = to_overnight_punch_out(rows[idx][punch_in_col], new_out)
+            rows[idx][punch_out_col] = new_out
             stats.overwritten_punch_out += 1
 
         # 参考集計: 上書き対象が実績確定済だった件数

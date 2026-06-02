@@ -14,6 +14,7 @@ from quick_compare import (  # noqa: E402
     LogEntry,
     compute_diffs,
     normalize_kintai_result_columns,
+    to_jinjer_overnight_punch_out,
 )
 
 
@@ -72,6 +73,48 @@ def test_normalize_kintai_result_columns_accepts_seikyu_kintai_headers():
     assert normalized.iloc[0]["勤務表_出勤"] == "9:00"
     assert normalized.iloc[0]["勤務表_退勤"] == "18:00"
     assert normalized.iloc[0]["勤務表_総労働"] == "9:00"
+
+
+def test_to_jinjer_overnight_punch_out():
+    # 翌朝退勤（出勤 > 退勤）→ 24時超表記へ変換
+    assert to_jinjer_overnight_punch_out("21:00", "08:15") == "32:15"
+    assert to_jinjer_overnight_punch_out("17:00", "01:30") == "25:30"
+    # 通常勤務（出勤 < 退勤）→ そのまま
+    assert to_jinjer_overnight_punch_out("9:00", "18:00") == "18:00"
+    # すでに24時超表記なら再変換しない（冪等）
+    assert to_jinjer_overnight_punch_out("21:00", "32:15") == "32:15"
+    # 出退勤のどちらかが空/不正ならそのまま
+    assert to_jinjer_overnight_punch_out("", "08:15") == "08:15"
+    assert to_jinjer_overnight_punch_out("21:00", "") == ""
+
+
+def test_compute_diffs_converts_overnight_punch_out_to_jinjer_format():
+    """夜勤（請求勤怠 出勤21:00→退勤翌08:15）の退勤提案値が 32:15 になる。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "21:00",
+        "jinjer_出勤": "21:00",
+        "出勤差分(分)": 0,
+        "勤務表_退勤": "08:15",
+        "jinjer_退勤": "",
+        "退勤差分(分)": None,
+        "_source_file": "勤怠突合結果.xlsx",
+    }])
+    logs: list[LogEntry] = []
+
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): _jinjer_row(**{JINJER_HEADERS["punch_in_1"]: "21:00"})},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+    )
+
+    out_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT]
+    assert len(out_rows) == 1
+    # 請求勤怠値（表示）は元の 08:15、自動修正提案値は jinjer 用の 32:15
+    assert out_rows[0].kintai_value == "08:15"
+    assert out_rows[0].auto_fix_value == "32:15"
 
 
 def test_diff_columns_include_manual_review_fields():
