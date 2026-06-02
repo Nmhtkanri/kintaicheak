@@ -40,6 +40,59 @@ def test_parse_itone_dispatch_timesheet_excel_direct(tmp_path):
     assert df.iloc[0]["コメント"] == "JANET更改業務：時間外会議"
 
 
+def test_parse_nmht_work_time_report_excel_direct(tmp_path):
+    path = tmp_path / "勤務表（菅原孝）202509_202605.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "勤務時間報告書"
+    ws["C2"] = "年"
+    ws["E2"] = "月"
+    ws["F2"] = "勤務時間報告書Ver3.3.3"
+    ws["C3"] = 2026
+    ws["E3"] = 5
+    ws["C6"] = "氏名"
+    ws["E6"] = "菅原　孝"
+    ws["C11"] = "日"
+    ws["E11"] = "勤務"
+    ws["F11"] = "開始時間"
+    ws["H11"] = "終了時間"
+    ws["T11"] = "備考"
+    ws["F12"] = "時"
+    ws["G12"] = "分"
+    ws["H12"] = "時"
+    ws["I12"] = "分"
+    ws["C13"] = 1
+    ws["E13"] = "出勤"
+    ws["F13"] = 9
+    ws["G13"] = 0
+    ws["H13"] = 19
+    ws["I13"] = 45
+    ws["T13"] = "テレワーク"
+    ws["C14"] = 2
+    ws["E14"] = "有休(全休)"
+    ws["C15"] = 3
+    ws["E15"] = "出勤"
+    ws["F15"] = 6
+    ws["G15"] = 30
+    ws["H15"] = 24
+    ws["I15"] = 0
+    wb.save(path)
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert len(df) == 2
+    assert df["氏名"].tolist() == ["菅原　孝", "菅原　孝"]
+    assert df.iloc[0]["日付"] == date(2026, 5, 1)
+    assert df.iloc[0]["出勤時刻"] == time(9, 0)
+    assert df.iloc[0]["退勤時刻"] == time(19, 45)
+    assert df.iloc[0]["コメント"] == "テレワーク"
+    assert df.iloc[1]["日付"] == date(2026, 5, 3)
+    assert df.iloc[1]["出勤時刻"] == time(6, 30)
+    assert df.iloc[1]["退勤時刻"] == time(0, 0)
+
+
 def test_parse_sap_timesheet_excel_direct(tmp_path):
     path = tmp_path / "sap_timesheet.xlsx"
     pd.DataFrame([

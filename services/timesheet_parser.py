@@ -330,6 +330,28 @@ def _parse_excel_date(value):
     return None
 
 
+def _parse_hour_minute_cells(hour_value, minute_value):
+    """時・分が別セルの値を datetime.time に変換する。"""
+    if hour_value is None or minute_value is None:
+        return None
+    try:
+        if pd.isna(hour_value) or pd.isna(minute_value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        hour = int(float(str(hour_value).strip()))
+        minute = int(float(str(minute_value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        return dt_time(hour % 24, minute)
+    except ValueError:
+        return None
+
+
 def _read_text_auto_encoding(filepath):
     """テキストファイルを文字コード自動判定で読み込む"""
     last_error = None
@@ -469,6 +491,93 @@ def _parse_itone_dispatch_timesheet_file(filepath):
         return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
     except Exception:
         logger.exception("ITone派遣労働者勤務報告書の解析に失敗しました: %s", filepath)
+        return None
+    finally:
+        if converted_path:
+            try:
+                os.remove(converted_path)
+            except OSError:
+                pass
+
+
+def _parse_nmht_work_time_report_file(filepath):
+    """NMHTの勤務時間報告書Ver3系を直接DataFrame化する。"""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in (".xlsx", ".xlsb"):
+        return None
+
+    workbook_path = filepath
+    converted_path = None
+    if ext == ".xlsb":
+        converted_path = _convert_xlsb_to_xlsx(filepath)
+        if converted_path is None:
+            return None
+        workbook_path = converted_path
+
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(workbook_path, data_only=True)
+        if "勤務時間報告書" not in wb.sheetnames:
+            return None
+
+        ws = wb["勤務時間報告書"]
+        version_label = str(ws["F2"].value or "").strip()
+        if "勤務時間報告書Ver" not in version_label:
+            return None
+        if str(ws["C11"].value or "").strip() != "日" or str(ws["E11"].value or "").strip() != "勤務":
+            return None
+
+        employee_name = ws["E6"].value or _extract_itone_name_from_filename(filepath)
+        if not employee_name:
+            return None
+        employee_name = str(employee_name).strip()
+
+        try:
+            year = int(float(str(ws["C3"].value).strip()))
+            month = int(float(str(ws["E3"].value).strip()))
+        except (TypeError, ValueError):
+            return None
+
+        rows = []
+        for row_idx in range(13, ws.max_row + 1):
+            day_value = ws.cell(row_idx, 3).value  # C
+            try:
+                day = int(float(str(day_value).strip()))
+                work_date = date(year, month, day)
+            except (TypeError, ValueError):
+                continue
+
+            start = _parse_hour_minute_cells(
+                ws.cell(row_idx, 6).value,  # F
+                ws.cell(row_idx, 7).value,  # G
+            )
+            end = _parse_hour_minute_cells(
+                ws.cell(row_idx, 8).value,  # H
+                ws.cell(row_idx, 9).value,  # I
+            )
+            if start is None and end is None:
+                continue
+
+            comment = ws.cell(row_idx, 20).value  # T 備考
+            if comment is not None:
+                comment = str(comment).strip() or None
+
+            rows.append({
+                "氏名": employee_name,
+                "日付": work_date,
+                "出勤時刻": start,
+                "退勤時刻": end,
+                "コメント": comment,
+                "データソース": "勤務表",
+            })
+
+        if not rows:
+            return None
+
+        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    except Exception:
+        logger.exception("NMHT勤務時間報告書の解析に失敗しました: %s", filepath)
         return None
     finally:
         if converted_path:
@@ -819,6 +928,7 @@ def _parse_fieldglass_pdf_timesheet(filepath):
 def _parse_known_timesheet_file(filepath):
     """既知フォーマットをAI解析せずに直接読む"""
     for parser in (
+        _parse_nmht_work_time_report_file,
         _parse_itone_dispatch_timesheet_file,
         _parse_sap_timesheet_file,
         _parse_estaffing_timesheet_csv,
