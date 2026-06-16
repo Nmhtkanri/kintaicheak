@@ -65,7 +65,7 @@ JUDGMENTS = {JUDGE_APPROVE, JUDGE_REJECT, JUDGE_HOLD}
 # 本来これらの列には時刻・数値・メモが入るため、判断キーワードが入っていたら
 # 「人間判断」列の入力ミスとみなして回収する（先頭ほど優先）。
 MISPLACED_JUDGE_COLS = [
-    "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
+    "打刻修正", "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
     "自動修正提案値", "判断メモ",
 ]
 
@@ -266,7 +266,8 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
         date_iso = normalize_date_iso(row.get("対象日付"))
         kind = str(row.get("差異種別") or "").strip()
         auto_fix = _field("自動修正提案値")
-        manual_fix = _field("手入力修正値")
+        # 列名は「打刻修正」（新）。旧フォーマットの「手入力修正値」も後方互換で読む。
+        manual_fix = _field("打刻修正") or _field("手入力修正値")
         manual_break_start = _field("手入力休憩1")
         manual_break_end = _field("手入力復帰1")
         manual_break_total = _field("手入力休憩時間")
@@ -658,12 +659,20 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _unquote_path(s: str) -> str:
+    """前後の空白と、前後が同じクォートで囲まれているときだけ1組を除去する。"""
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
+
+
 def main() -> int:
     args = parse_args()
     result = run_quick_export(
-        diff_xlsx=Path(args.diff),
-        jinjer_dir=Path(args.jinjer_dir),
-        output_path=Path(args.output),
+        diff_xlsx=Path(_unquote_path(args.diff)),
+        jinjer_dir=Path(_unquote_path(args.jinjer_dir)),
+        output_path=Path(_unquote_path(args.output)),
         dry_run=not args.execute,
     )
     return 0 if result.ok else 1

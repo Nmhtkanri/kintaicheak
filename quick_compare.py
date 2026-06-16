@@ -65,14 +65,54 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 # ※ quick_export 側は列名で読むため、列順を変えても後方互換は保たれる。
 DIFF_COLUMNS = [
     "行ID", "従業員ID", "氏名", "対象日付",
+    # 汎用データから転記する予定・有休（その日の前提情報。参考表示のみ）
+    "出勤予定", "退勤予定", "休憩予定", "有休", "AM有休", "PM有休",
     "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
     "警告レベル", "警告理由",
     "自動修正提案値",
     "人間判断", "判断メモ",
-    "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
+    "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
     "実績確定状況",  # 参考表示のみ。警告レベル判定には使わない
     "元突合結果ファイル",
 ]
+
+# 汎用データから転記する予定・有休 列のキャノニカル名 → (候補ヘッダー, 完全一致のみか)
+# 有休系は完全一致のみ（部分一致だと「有休」が「AM有休」「PM有休」を誤ヒットするため）。
+JINJER_EXTRA_COLUMNS: dict[str, tuple[list[str], bool]] = {
+    "出勤予定": (["出勤予定時刻", "出勤予定"], False),
+    "退勤予定": (["退勤予定時刻", "退勤予定"], False),
+    "休憩予定": (["休憩予定時間", "休憩予定"], False),
+    "有休": (["有休"], True),
+    "AM有休": (["AM有休"], True),
+    "PM有休": (["PM有休"], True),
+}
+
+
+def resolve_jinjer_extra_columns(columns) -> dict[str, str]:
+    """汎用データの実ヘッダーから、予定/有休 のキャノニカル名→実ヘッダー名を解決する。
+
+    完全一致を優先し、exact_only=False の列のみ部分一致でフォールバックする。
+    見つからない列は dict に含めない（呼び出し側で空欄転記＋警告ログにする）。
+    """
+    cols = [str(c).strip() for c in columns]
+    resolved: dict[str, str] = {}
+    for canonical, (candidates, exact_only) in JINJER_EXTRA_COLUMNS.items():
+        found = None
+        for cand in candidates:  # 完全一致
+            if cand in cols:
+                found = cand
+                break
+        if found is None and not exact_only:  # 部分一致フォールバック
+            for cand in candidates:
+                for col in cols:
+                    if cand in col:
+                        found = col
+                        break
+                if found:
+                    break
+        if found:
+            resolved[canonical] = found
+    return resolved
 
 DIFF_KIND_PUNCH_IN = "出勤"
 DIFF_KIND_PUNCH_OUT = "退勤"
@@ -104,6 +144,13 @@ class DiffRow:
     auto_fix_value: str
     finalized: str  # 実績確定状況（参考情報。"TRUE"/"FALSE"/空）
     source_file: str
+    # 汎用データから転記する予定・有休（参考表示。差異判定には使わない）
+    sched_in: str = ""
+    sched_out: str = ""
+    sched_break: str = ""
+    yukyu: str = ""
+    am_yukyu: str = ""
+    pm_yukyu: str = ""
 
 
 @dataclass
@@ -449,10 +496,12 @@ def compute_diffs(
     jinjer_index: dict[tuple[str, str], dict],
     name_map: dict[str, str],
     logs: list[LogEntry],
+    extra_cols: dict[str, str] | None = None,
 ) -> list[DiffRow]:
     """突合結果xlsx の各行に対し、4種の差異を生成して返す。"""
     rows: list[DiffRow] = []
     next_id = 1
+    extra_cols = extra_cols or {}
 
     seen_emp_date: set[tuple[str, str]] = set()
 
@@ -476,6 +525,23 @@ def compute_diffs(
         if jrow is not None:
             finalized = str(jrow.get(JINJER_HEADERS["finalized"]) or "").strip()
 
+        # 汎用データから予定・有休を転記（同一 emp/date のすべての差異行に併記する参考情報）。
+        # 列が解決できない / jinjer 行が無いときは空欄。
+        def _extra(canonical: str) -> str:
+            if jrow is None:
+                return ""
+            header = extra_cols.get(canonical)
+            return clean_cell(jrow.get(header)) if header else ""
+
+        extra = {
+            "sched_in": _extra("出勤予定"),
+            "sched_out": _extra("退勤予定"),
+            "sched_break": _extra("休憩予定"),
+            "yukyu": _extra("有休"),
+            "am_yukyu": _extra("AM有休"),
+            "pm_yukyu": _extra("PM有休"),
+        }
+
         # ----- 出勤差異 -----
         k_in = clean_cell(krow.get("勤務表_出勤"))
         j_in = clean_cell(krow.get("jinjer_出勤"))
@@ -490,6 +556,7 @@ def compute_diffs(
                 auto_fix_value=k_in,
                 finalized=finalized,
                 source_file=source_file,
+                **extra,
             ))
             next_id += 1
         elif diff_in is None and k_in and not j_in:
@@ -502,6 +569,7 @@ def compute_diffs(
                 auto_fix_value=k_in,
                 finalized=finalized,
                 source_file=source_file,
+                **extra,
             ))
             next_id += 1
 
@@ -519,6 +587,7 @@ def compute_diffs(
                 auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
                 finalized=finalized,
                 source_file=source_file,
+                **extra,
             ))
             next_id += 1
         elif diff_out is None and k_out and not j_out:
@@ -531,6 +600,7 @@ def compute_diffs(
                 auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
                 finalized=finalized,
                 source_file=source_file,
+                **extra,
             ))
             next_id += 1
 
@@ -547,6 +617,7 @@ def compute_diffs(
                     auto_fix_value="",  # 休憩は自動反映しない
                     finalized=finalized,
                     source_file=source_file,
+                    **extra,
                 ))
                 next_id += 1
 
@@ -564,6 +635,7 @@ def compute_diffs(
                     auto_fix_value="",  # 総労働時間は自動反映しない
                     finalized=finalized,
                     source_file=source_file,
+                    **extra,
                 ))
                 next_id += 1
             else:
@@ -744,6 +816,12 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "従業員ID": drow.emp_id,
             "氏名": drow.name,
             "対象日付": drow.target_date,
+            "出勤予定": drow.sched_in,
+            "退勤予定": drow.sched_out,
+            "休憩予定": drow.sched_break,
+            "有休": drow.yukyu,
+            "AM有休": drow.am_yukyu,
+            "PM有休": drow.pm_yukyu,
             "差異種別": drow.kind,
             "請求勤怠値": drow.kintai_value,
             "jinjer値": drow.jinjer_value,
@@ -753,7 +831,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "自動修正提案値": drow.auto_fix_value,
             "人間判断": "",        # プルダウンで入力
             "判断メモ": "",
-            "手入力修正値": "",    # 出勤/退勤の提案値を人間が上書きしたい場合のみ
+            "打刻修正": "",        # 出勤/退勤の提案値を人間が上書きしたい場合のみ
             "手入力休憩1": "",     # 休憩差異を承認して汎用データに反映する場合のみ
             "手入力復帰1": "",
             "手入力休憩時間": "",
@@ -785,10 +863,11 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     # 列幅（列名で指定。列順を変えても崩れない）
     width_map = {
         "行ID": 6, "従業員ID": 12, "氏名": 16, "対象日付": 12,
+        "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "有休": 8, "AM有休": 8, "PM有休": 8,
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
         "警告レベル": 10, "警告理由": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
-        "手入力修正値": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
+        "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
         "実績確定状況": 12, "元突合結果ファイル": 32,
     }
     for i, header in enumerate(DIFF_COLUMNS, start=1):
@@ -870,7 +949,17 @@ def run_quick_compare(
     result.name_map_size = len(name_map)
     log_func(f"[info] 氏名→ID マップ {len(name_map)} 件 / jinjer index {len(jinjer_index)} 件")
 
-    diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs)
+    # 汎用データから転記する予定・有休 列を解決（見つからない列は空欄転記＋ログ）
+    extra_cols = resolve_jinjer_extra_columns(jinjer_df.columns)
+    missing_extra = [k for k in JINJER_EXTRA_COLUMNS if k not in extra_cols]
+    if missing_extra:
+        logs.append(LogEntry(
+            "INFO",
+            f"汎用データに次の列が見つからないため空欄で転記します: {', '.join(missing_extra)}",
+        ))
+    log_func(f"[info] 予定/有休 転記列の解決: {extra_cols}")
+
+    diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs, extra_cols)
     result.diff_count = len(diff_rows)
     log_func(f"[info] 差異・警告 合計 {len(diff_rows)} 件")
 
@@ -901,12 +990,20 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _unquote_path(s: str) -> str:
+    """前後の空白と、前後が同じクォートで囲まれているときだけ1組を除去する。"""
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
+
+
 def main() -> int:
     args = parse_args()
     result = run_quick_compare(
-        kintai_dir=Path(args.kintai_dir),
-        jinjer_dir=Path(args.jinjer_dir),
-        output_path=Path(args.output),
+        kintai_dir=Path(_unquote_path(args.kintai_dir)),
+        jinjer_dir=Path(_unquote_path(args.jinjer_dir)),
+        output_path=Path(_unquote_path(args.output)),
         month_label=args.month,
     )
     return 0 if result.ok else 1

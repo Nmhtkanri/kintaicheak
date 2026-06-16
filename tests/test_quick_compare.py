@@ -14,6 +14,7 @@ from quick_compare import (  # noqa: E402
     LogEntry,
     compute_diffs,
     normalize_kintai_result_columns,
+    resolve_jinjer_extra_columns,
     to_jinjer_overnight_punch_out,
 )
 
@@ -118,7 +119,84 @@ def test_compute_diffs_converts_overnight_punch_out_to_jinjer_format():
 
 
 def test_diff_columns_include_manual_review_fields():
-    assert "手入力修正値" in DIFF_COLUMNS
+    # 「手入力修正値」は「打刻修正」に改名済み
+    assert "打刻修正" in DIFF_COLUMNS
+    assert "手入力修正値" not in DIFF_COLUMNS
     assert "手入力休憩1" in DIFF_COLUMNS
     assert "手入力復帰1" in DIFF_COLUMNS
     assert "手入力休憩時間" in DIFF_COLUMNS
+
+
+def test_diff_columns_include_schedule_and_leave_fields():
+    for col in ("出勤予定", "退勤予定", "休憩予定", "有休", "AM有休", "PM有休"):
+        assert col in DIFF_COLUMNS
+
+
+def test_resolve_jinjer_extra_columns_exact_and_partial():
+    cols = [
+        "名前", "*従業員ID", "*年月日",
+        "出勤予定時刻", "退勤予定時刻", "休憩予定時間",
+        "有休", "AM有休", "PM有休",
+    ]
+    resolved = resolve_jinjer_extra_columns(cols)
+    assert resolved["出勤予定"] == "出勤予定時刻"
+    assert resolved["退勤予定"] == "退勤予定時刻"
+    assert resolved["休憩予定"] == "休憩予定時間"
+    assert resolved["有休"] == "有休"
+    assert resolved["AM有休"] == "AM有休"
+    assert resolved["PM有休"] == "PM有休"
+
+
+def test_resolve_jinjer_extra_columns_leave_is_exact_only():
+    # 「有休」列が無く AM有休/PM有休 だけある場合、「有休」を部分一致で誤ヒットさせない
+    cols = ["名前", "AM有休", "PM有休"]
+    resolved = resolve_jinjer_extra_columns(cols)
+    assert "有休" not in resolved
+    assert resolved.get("AM有休") == "AM有休"
+    assert resolved.get("PM有休") == "PM有休"
+
+
+def test_resolve_jinjer_extra_columns_missing_returns_no_key():
+    resolved = resolve_jinjer_extra_columns(["名前", "*従業員ID", "*年月日"])
+    assert resolved == {}
+
+
+def test_compute_diffs_transcribes_schedule_and_leave():
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:00",
+        "jinjer_出勤": "",
+        "出勤差分(分)": None,
+        "勤務表_退勤": "18:00",
+        "jinjer_退勤": "",
+        "退勤差分(分)": None,
+        "_source_file": "勤怠突合結果.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    jrow = _jinjer_row(**{
+        "出勤予定時刻": "9:00",
+        "退勤予定時刻": "18:00",
+        "休憩予定時間": "1:00",
+        "有休": "",
+        "AM有休": "1",
+        "PM有休": "",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): jrow},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+        extra_cols,
+    )
+
+    assert rows, "差異行が生成されること"
+    r = rows[0]
+    assert r.sched_in == "9:00"
+    assert r.sched_out == "18:00"
+    assert r.sched_break == "1:00"
+    assert r.am_yukyu == "1"
+    assert r.yukyu == ""
+    assert r.pm_yukyu == ""
