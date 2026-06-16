@@ -192,7 +192,22 @@ def test_unique_surname_sheet_name_matches_jinjer_employee():
 def test_normalize_name():
     assert normalize_name("山田　太郎") == "山田太郎"
     assert normalize_name(" 田中 次郎 ") == "田中次郎"
-    assert normalize_name("ＡＢＣ") == "ABC"
+    # ローマ字は大文字小文字を畳む（ＡＢＣ→NFKC→ABC→casefold→abc）
+    assert normalize_name("ＡＢＣ") == "abc"
+    # 表記ゆれのあるローマ字氏名が同じキーに正規化される
+    assert normalize_name("MAHARJAN RAMITA") == normalize_name("Maharjan, Ramita")
+
+
+def test_match_romaji_name_is_case_insensitive():
+    """ローマ字氏名は大文字小文字が違っても突合できる。"""
+    jinjer = make_df([("MAHARJAN RAMITA", date(2026, 5, 1), time(9, 0), time(17, 30))], "jinjer")
+    sheet = make_df([("Maharjan Ramita", date(2026, 5, 1), time(9, 0), time(17, 30))], "勤務表")
+
+    result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
+
+    assert unsubmitted == []
+    assert len(result) == 1
+    assert result.iloc[0]["判定"] == "OK"
 
 
 def test_overnight_jinjer_row_matches_split_sap_rows():

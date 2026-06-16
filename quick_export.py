@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -64,7 +65,7 @@ JUDGMENTS = {JUDGE_APPROVE, JUDGE_REJECT, JUDGE_HOLD}
 # 本来これらの列には時刻・数値・メモが入るため、判断キーワードが入っていたら
 # 「人間判断」列の入力ミスとみなして回収する（先頭ほど優先）。
 MISPLACED_JUDGE_COLS = [
-    "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
+    "打刻修正", "手入力修正値", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
     "自動修正提案値", "判断メモ",
 ]
 
@@ -144,6 +145,36 @@ def iso_to_jinjer_date(date_iso: str) -> str:
     """'2026-05-12' → '2026/5/12'（jinjer の 0パディングなし形式）"""
     d = datetime.strptime(date_iso, "%Y-%m-%d").date()
     return f"{d.year}/{d.month}/{d.day}"
+
+
+_HHMM_RE = re.compile(r"^(\d{1,3}):(\d{2})")
+
+
+def _hhmm_to_minutes(value: Any) -> int | None:
+    """'H:MM' / 'HH:MM'（24時超表記含む）を分に変換。不正値は None。"""
+    if value is None:
+        return None
+    m = _HHMM_RE.match(str(value).strip())
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def to_overnight_punch_out(punch_in: Any, punch_out: str) -> str:
+    """退勤が翌朝に跨ぐ場合、jinjer インポート用の 24時超表記へ変換する。
+
+    出勤 > 退勤（夜勤で翌日にずれ込み）のときだけ退勤に 24h を足す（08:15→32:15）。
+    すでに 24時超表記なら out >= in となり再変換しない（冪等）。出退勤の判定が
+    できないときは元の退勤値をそのまま返す。
+    """
+    if not punch_out:
+        return punch_out
+    in_min = _hhmm_to_minutes(punch_in)
+    out_min = _hhmm_to_minutes(punch_out)
+    if in_min is None or out_min is None or out_min >= in_min:
+        return punch_out
+    adjusted = out_min + 24 * 60
+    return f"{adjusted // 60:02d}:{adjusted % 60:02d}"
 
 
 def clean_excel_text(value: Any) -> str:
@@ -235,7 +266,8 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
         date_iso = normalize_date_iso(row.get("対象日付"))
         kind = str(row.get("差異種別") or "").strip()
         auto_fix = _field("自動修正提案値")
-        manual_fix = _field("手入力修正値")
+        # 列名は「打刻修正」（新）。旧フォーマットの「手入力修正値」も後方互換で読む。
+        manual_fix = _field("打刻修正") or _field("手入力修正値")
         manual_break_start = _field("手入力休憩1")
         manual_break_end = _field("手入力復帰1")
         manual_break_total = _field("手入力休憩時間")
@@ -467,7 +499,11 @@ def apply_approved_rows(
             rows[idx][punch_in_col] = app.manual_fix_value or app.auto_fix_value
             stats.overwritten_punch_in += 1
         elif app.kind == DIFF_KIND_PUNCH_OUT:
-            rows[idx][punch_out_col] = app.manual_fix_value or app.auto_fix_value
+            new_out = app.manual_fix_value or app.auto_fix_value
+            # 夜勤で翌朝退勤の場合、jinjer は 24時超表記でないとインポートできないため
+            # 現在の出勤1と突き合わせて 08:15→32:15 のように補正する（冪等・安全網）。
+            new_out = to_overnight_punch_out(rows[idx][punch_in_col], new_out)
+            rows[idx][punch_out_col] = new_out
             stats.overwritten_punch_out += 1
 
         # 参考集計: 上書き対象が実績確定済だった件数
@@ -623,12 +659,20 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _unquote_path(s: str) -> str:
+    """前後の空白と、前後が同じクォートで囲まれているときだけ1組を除去する。"""
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
+
+
 def main() -> int:
     args = parse_args()
     result = run_quick_export(
-        diff_xlsx=Path(args.diff),
-        jinjer_dir=Path(args.jinjer_dir),
-        output_path=Path(args.output),
+        diff_xlsx=Path(_unquote_path(args.diff)),
+        jinjer_dir=Path(_unquote_path(args.jinjer_dir)),
+        output_path=Path(_unquote_path(args.output)),
         dry_run=not args.execute,
     )
     return 0 if result.ok else 1

@@ -14,6 +14,9 @@ def normalize_name(name):
     name = name.replace("\u3000", " ")  # 全角スペース→半角スペース
     name = re.sub(r'[,\u3001\uff0c]', '', name)  # カンマ類を除去
     name = re.sub(r'\s+', '', name)    # スペース全除去
+    # ローマ字氏名の表記ゆれ（MAHARJAN / Maharjan 等）を吸収するため大文字小文字を畳む。
+    # 漢字・かなには影響しない。
+    name = name.casefold()
     return name
 
 

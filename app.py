@@ -822,8 +822,8 @@ def route_quick_compare():
       - month      : YYYY-MM
       - output_filename : 任意、未指定なら自動生成
     """
-    kintai_dir_str = (request.form.get("kintai_dir") or "").strip()
-    jinjer_dir_str = (request.form.get("jinjer_dir") or "").strip()
+    kintai_dir_str = _clean_path_input(request.form.get("kintai_dir"))
+    jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
     month_label = (request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
 
@@ -906,7 +906,7 @@ def route_quick_export():
       - execute         : "1" なら本実行、未指定/0 は dry-run
     """
     diff_file = request.files.get("diff_file")
-    jinjer_dir_str = (request.form.get("jinjer_dir") or "").strip()
+    jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
     output_filename = (request.form.get("output_filename") or "").strip()
     execute_flag = request.form.get("execute") == "1"
     dry_run = not execute_flag
@@ -1011,6 +1011,19 @@ def _safe_remove(path):
             os.remove(path)
     except Exception:
         pass
+
+
+def _clean_path_input(s):
+    """前後の空白と、貼り付け時に付く前後のダブル/シングルクォートを除去する。
+
+    Windows の「パスのコピー」は `"Z:\\...\\汎用データ.csv"` のように前後に
+    ダブルクォートが付く。そのまま Path に渡すと存在しないパス扱いになるため、
+    前後が同じクォートで囲まれているときだけ1組剥がす（パス中の文字は壊さない）。
+    """
+    s = (s or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
 
 
 def _ensure_extension(filename, extension):

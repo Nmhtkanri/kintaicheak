@@ -106,7 +106,31 @@ def test_run_quick_export_prefers_manual_fix_value_for_punch(tmp_path):
         "対象日付": "2026-04-01",
         "差異種別": "退勤",
         "自動修正提案値": "18:10",
-        "手入力修正値": "18:15",
+        "打刻修正": "18:15",
+        "人間判断": "承認",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert _read_output_row(output_path)["退勤1"] == "18:15"
+
+
+def test_run_quick_export_reads_legacy_tenyuryoku_column(tmp_path):
+    """旧フォーマット（列名「手入力修正値」）の差異一覧も後方互換で読める。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1,
+        "従業員ID": "2018057",
+        "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01",
+        "差異種別": "退勤",
+        "自動修正提案値": "18:10",
+        "手入力修正値": "18:15",  # 旧列名（改名前の記入済みファイル）
         "人間判断": "承認",
     }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
 
@@ -150,6 +174,84 @@ def test_run_quick_export_recovers_judgment_in_wrong_column(tmp_path):
     assert row["出勤1"] != "承認"
 
 
+def _write_jinjer_csv_overnight(path):
+    with open(path, "w", encoding="cp932", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(HEADERS)
+        # 夜勤: 出勤 21:00 あり、退勤は空（請求勤怠で補う）
+        writer.writerow(["上原 奏吾", "2018057", "2026/4/1", "21:00", "", "", "", "0:00", "TRUE"])
+
+
+def test_run_quick_export_converts_overnight_punch_out(tmp_path):
+    """夜勤の退勤提案値（32:15）がそのまま退勤1へ入る。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv_overnight(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1,
+        "従業員ID": "2018057",
+        "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01",
+        "差異種別": "退勤",
+        "自動修正提案値": "32:15",
+        "人間判断": "承認",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert _read_output_row(output_path)["退勤1"] == "32:15"
+
+
+def test_run_quick_export_fixes_overnight_manual_punch_out(tmp_path):
+    """手入力で 08:15 と入れても、出勤1=21:00 と突き合わせて 32:15 へ補正される。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv_overnight(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1,
+        "従業員ID": "2018057",
+        "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01",
+        "差異種別": "退勤",
+        "自動修正提案値": "",
+        "打刻修正": "08:15",
+        "人間判断": "承認",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert _read_output_row(output_path)["退勤1"] == "32:15"
+
+
+def test_run_quick_export_keeps_normal_punch_out(tmp_path):
+    """通常勤務（出勤 9:00 / 退勤 18:00）は 24時超変換しない。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1,
+        "従業員ID": "2018057",
+        "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01",
+        "差異種別": "退勤",
+        "自動修正提案値": "18:30",
+        "人間判断": "承認",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert _read_output_row(output_path)["退勤1"] == "18:30"
+
+
 def test_run_quick_export_ignores_judgment_keyword_as_time(tmp_path):
     """判断キーワードが入力欄に紛れても、時刻として書き込まれない。"""
     diff_path = tmp_path / "diff.xlsx"
@@ -164,7 +266,7 @@ def test_run_quick_export_ignores_judgment_keyword_as_time(tmp_path):
         "対象日付": "2026-04-01",
         "差異種別": "退勤",
         "自動修正提案値": "18:10",
-        "手入力修正値": "承認",  # 誤入力。退勤1 には 18:10 が入るべき
+        "打刻修正": "承認",  # 誤入力。退勤1 には 18:10 が入るべき
         "人間判断": "承認",      # 判断は正しい列にもある
     }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
 
