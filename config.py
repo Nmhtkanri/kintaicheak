@@ -50,7 +50,9 @@ class Config:
     # → 将来モデルが提供終了になっても .env を書き換えるだけでよく、exe 再ビルド不要。
     # 履歴: claude-sonnet-4-20250514 (Sonnet 4) は 2026-06-15 に提供終了 → claude-sonnet-4-6 へ。
     ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    ANTHROPIC_MAX_TOKENS = 4096
+    # 全員分のシフト表(例: 21名×30日)を1回で返すと 4096 では出力が途中で切れて壊れる。
+    # 余裕を持たせる。.env の ANTHROPIC_MAX_TOKENS で上書き可能。
+    ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "16000"))
 
     # シフト記号モード（jinjer 雛形マッチング用 CSV のパス）
     # 設定されている場合のみ、未マッチ記号から「新規雛形 CSV」を自動生成する
