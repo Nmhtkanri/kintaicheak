@@ -46,7 +46,9 @@ class Config:
     DEFAULT_THRESHOLD_MINUTES = 10
 
     # Claude API
-    ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+    # NOTE: claude-sonnet-4-20250514 (Sonnet 4) は 2026-06-15 に提供終了。
+    #       後継のドロップイン置換は claude-sonnet-4-6 (Sonnet 4.6)。
+    ANTHROPIC_MODEL = "claude-sonnet-4-6"
     ANTHROPIC_MAX_TOKENS = 4096
 
     # シフト記号モード（jinjer 雛形マッチング用 CSV のパス）
