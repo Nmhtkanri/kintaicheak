@@ -288,10 +288,12 @@ def upload():
                     saved_timesheet_paths = new_paths
                     total = len(saved_timesheet_paths)
 
+            # モードに応じた表示名（スケジュールアップロード時は「スケジュール」）
+            parse_noun = "スケジュール" if mode == "csv_export" else "請求勤怠"
             parse_failures = []
             for idx, (ts_path, ts_filename) in enumerate(saved_timesheet_paths, start=1):
                 yield _sse_event("progress", {
-                    "message": f"請求勤怠を解析中... ({idx}/{total}: {ts_filename})"
+                    "message": f"{parse_noun}を解析中... ({idx}/{total}: {ts_filename})"
                 })
                 try:
                     parsed = parse_timesheet_smart(ts_path)
@@ -341,7 +343,7 @@ def upload():
             if not direct_dfs and not code_sheets:
                 detail = " / ".join(parse_failures) if parse_failures else "詳細理由を取得できませんでした"
                 yield _sse_event("error", {
-                    "message": f"請求勤怠の解析に成功したファイルがありませんでした。詳細: {detail}"
+                    "message": f"{parse_noun}の解析に成功したファイルがありませんでした。詳細: {detail}"
                 })
                 return
 

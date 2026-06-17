@@ -809,6 +809,57 @@ body {
     border-color: #2c5aa0;
     box-shadow: 0 0 0 2px rgba(44, 90, 160, 0.15);
 }
+
+/* 日別シフト編集（確認画面・従業員ごと） */
+.legend-shift-toggle { white-space: nowrap; background: #5d6d7e; }
+.legend-employee-detail > td {
+    background: #f5f8fc;
+    padding: 8px 12px 12px;
+    border-bottom: 1px solid #e3e8ee;
+}
+.legend-shift-editor { font-size: 13px; }
+.legend-shift-hint { color: #6c757d; font-size: 12px; margin-bottom: 6px; }
+.legend-shift-rows {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    margin-bottom: 8px;
+}
+.legend-shift-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: #fff;
+    border: 1px solid #d6deea;
+    border-radius: 6px;
+    padding: 3px 4px 3px 6px;
+}
+.legend-shift-row input.legend-shift-date {
+    width: 116px;
+    padding: 3px 5px;
+    border: 1px solid #ccd5e0;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: inherit;
+}
+.legend-shift-row input.legend-shift-code {
+    width: 48px;
+    padding: 3px 5px;
+    border: 1px solid #ccd5e0;
+    border-radius: 3px;
+    font-size: 13px;
+    text-align: center;
+    font-family: inherit;
+}
+.legend-shift-row input:focus {
+    outline: none;
+    border-color: #2c5aa0;
+    background: #fff8e1;
+}
+.legend-shift-row .btn-mini {
+    padding: 2px 6px;
+    font-size: 11px;
+}
 .legend-employee-shift-count {
     color: #5d6d7e;
     font-size: 12px;

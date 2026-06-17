@@ -529,7 +529,7 @@ function renderEmployeesEditor(sheet, sheetIdx) {
 
     const employees = sheet.employees || [];
     employees.forEach((emp, empIdx) => {
-        tbody.appendChild(renderEmployeeRow(emp, empIdx));
+        appendEmployeeRows(tbody, emp, empIdx);
     });
 
     if (employees.length === 0) {
@@ -571,9 +571,8 @@ function addEmployeeToSheet(sheet) {
     sheet.employees.push(newEmp);
 
     const newIdx = sheet.employees.length - 1;
-    const row = renderEmployeeRow(newEmp, newIdx);
+    const row = appendEmployeeRows(empTbody, newEmp, newIdx);
     row.dataset.isNew = '1';
-    empTbody.appendChild(row);
 
     const inp = row.querySelector('input[data-field="employee_name"]');
     if (inp) inp.focus();
@@ -583,10 +582,14 @@ function addEmployeeToSheet(sheet) {
     if (meta) meta.textContent = `従業員 ${sheet.employees.length}人`;
 }
 
+// 従業員1人につき「本行(氏名・件数・削除)」＋「詳細行(日別シフト編集)」の2行を返す。
+// 詳細行は本行の直下に並べ、本行の _detailRow から参照できるようにする。
 function renderEmployeeRow(emp, empIdx) {
     const tr = document.createElement('tr');
+    tr.className = 'legend-employee-row';
     tr.dataset.empIdx = empIdx;
 
+    // 氏名
     const nameTd = document.createElement('td');
     const nameInp = document.createElement('input');
     nameInp.type = 'text';
@@ -599,23 +602,125 @@ function renderEmployeeRow(emp, empIdx) {
     nameTd.appendChild(nameInp);
     tr.appendChild(nameTd);
 
-    const cntTd = document.createElement('td');
-    const shiftCount = (emp && emp.shifts) ? emp.shifts.length : 0;
-    cntTd.textContent = `${shiftCount} 日分`;
-    cntTd.className = 'legend-employee-shift-count';
-    tr.appendChild(cntTd);
+    // 詳細行（日別シフト編集）を先に作る
+    const detail = document.createElement('tr');
+    detail.className = 'legend-employee-detail';
+    detail.dataset.empIdx = empIdx;
+    detail.style.display = 'none';
+    const detailTd = document.createElement('td');
+    detailTd.colSpan = 3;
+    const editor = buildShiftEditor((emp && emp.shifts) ? emp.shifts : []);
+    detailTd.appendChild(editor);
+    detail.appendChild(detailTd);
+    tr._detailRow = detail;
 
+    // シフト件数 ＋ 編集トグル
+    const cntTd = document.createElement('td');
+    cntTd.className = 'legend-employee-shift-count';
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'btn-mini legend-shift-toggle';
+    const updateToggleLabel = () => {
+        const n = editor.querySelectorAll('.legend-shift-row').length;
+        const open = detail.style.display !== 'none';
+        toggleBtn.textContent = `🗓 ${n}日分を${open ? '閉じる' : '編集'}`;
+    };
+    toggleBtn.addEventListener('click', () => {
+        detail.style.display = (detail.style.display === 'none') ? '' : 'none';
+        updateToggleLabel();
+    });
+    editor._updateCount = updateToggleLabel;  // 行の追加/削除時に件数表示を更新
+    cntTd.appendChild(toggleBtn);
+    tr.appendChild(cntTd);
+    updateToggleLabel();
+
+    // 削除（本行＋詳細行をまとめて除外）
     const delTd = document.createElement('td');
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'btn-mini btn-mini-danger';
     delBtn.textContent = '🗑';
     delBtn.title = 'この従業員を除外';
-    delBtn.addEventListener('click', () => tr.remove());
+    delBtn.addEventListener('click', () => {
+        if (tr._detailRow) tr._detailRow.remove();
+        tr.remove();
+    });
     delTd.appendChild(delBtn);
     tr.appendChild(delTd);
 
-    return tr;
+    return { main: tr, detail: detail };
+}
+
+// 日別シフト編集エリア（日付＋記号の行を並べる）
+function buildShiftEditor(shifts) {
+    const box = document.createElement('div');
+    box.className = 'legend-shift-editor';
+
+    const hint = document.createElement('div');
+    hint.className = 'legend-shift-hint';
+    hint.textContent = '日付と記号を直接修正できます。誤読・空欄の記号はここで直してください（記号は凡例の記号を入力）。';
+    box.appendChild(hint);
+
+    const rows = document.createElement('div');
+    rows.className = 'legend-shift-rows';
+    (shifts || []).forEach(s => rows.appendChild(buildShiftRow(s)));
+    box.appendChild(rows);
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'btn-mini btn-mini-add';
+    addBtn.textContent = '＋ 日を追加';
+    addBtn.addEventListener('click', () => {
+        rows.appendChild(buildShiftRow({ date: '', code: '', comment: null }));
+        if (box._updateCount) box._updateCount();
+    });
+    box.appendChild(addBtn);
+
+    return box;
+}
+
+function buildShiftRow(shift) {
+    const row = document.createElement('div');
+    row.className = 'legend-shift-row';
+    if (shift && shift.comment) row.dataset.comment = shift.comment;
+
+    const dInp = document.createElement('input');
+    dInp.type = 'text';
+    dInp.className = 'legend-shift-date';
+    dInp.dataset.shiftField = 'date';
+    dInp.placeholder = 'YYYY-MM-DD';
+    if (shift && shift.date) dInp.value = shift.date;
+    row.appendChild(dInp);
+
+    const cInp = document.createElement('input');
+    cInp.type = 'text';
+    cInp.className = 'legend-shift-code';
+    cInp.dataset.shiftField = 'code';
+    cInp.placeholder = '記号';
+    if (shift && shift.code != null) cInp.value = shift.code;
+    row.appendChild(cInp);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn-mini btn-mini-danger';
+    del.textContent = '🗑';
+    del.title = 'この日を削除';
+    del.addEventListener('click', () => {
+        const box = row.closest('.legend-shift-editor');
+        row.remove();
+        if (box && box._updateCount) box._updateCount();
+    });
+    row.appendChild(del);
+
+    return row;
+}
+
+// 本行＋詳細行を tbody に追加し、本行を返す（focus / dataset 用）
+function appendEmployeeRows(tbody, emp, empIdx) {
+    const { main, detail } = renderEmployeeRow(emp, empIdx);
+    tbody.appendChild(main);
+    tbody.appendChild(detail);
+    return main;
 }
 
 function renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap) {
@@ -700,6 +805,25 @@ function makeInput(value, field, placeholder = '') {
     return inp;
 }
 
+// 詳細行(日別シフト編集)から {date, code, comment} のリストを読み取る
+function readShiftsFromDetail(detailRow) {
+    const shifts = [];
+    if (!detailRow) return shifts;
+    detailRow.querySelectorAll('.legend-shift-row').forEach(rowEl => {
+        const dInp = rowEl.querySelector('[data-shift-field="date"]');
+        const cInp = rowEl.querySelector('[data-shift-field="code"]');
+        const date = dInp ? dInp.value.trim() : '';
+        const code = cInp ? (cInp.value || '').trim() : '';
+        if (!date && !code) return;  // 空行は無視
+        shifts.push({
+            date: date,
+            code: code,
+            comment: rowEl.dataset.comment || null,
+        });
+    });
+    return shifts;
+}
+
 function collectLegendFromUI() {
     const sheets = [];
     legendSheetsContainer.querySelectorAll('.legend-sheet').forEach(sheetEl => {
@@ -724,30 +848,33 @@ function collectLegendFromUI() {
             });
         }
 
-        // 従業員：UI で編集された氏名で原データの name を上書きする
-        // 「＋ 従業員を追加」で UI から手動追加された行は original.employees に存在しないので、
-        // その場合は新規として扱う（shifts は空）。
+        // 従業員：UI で編集された氏名・日別シフトを採用する。
+        // 日別シフト(日付＋記号)は詳細行(_detailRow)から読み、誤読・空欄の手修正を反映する。
+        // 「＋ 従業員を追加」で UI から手動追加された行は original.employees に存在しないので新規扱い。
         const employees = [];
         const empTable = sheetEl.querySelector('.legend-employees-table');
         if (empTable) {
             empTable.querySelectorAll('tbody tr').forEach(tr => {
                 if (tr.classList.contains('legend-employees-empty')) return;
+                if (tr.classList.contains('legend-employee-detail')) return;  // 詳細行はスキップ
                 const nameInp = tr.querySelector('input[data-field="employee_name"]');
                 if (!nameInp) return;
                 const editedName = nameInp.value.trim();
                 const empIdx = parseInt(tr.dataset.empIdx, 10);
                 const originalEmp = (original.employees || [])[empIdx];
+                // 日別シフトは UI（詳細行）で編集された値を採用
+                const shifts = readShiftsFromDetail(tr._detailRow);
                 if (originalEmp) {
                     employees.push({
                         name: editedName || originalEmp.name || '不明',
-                        shifts: originalEmp.shifts || [],
+                        shifts: shifts,
                     });
                 } else {
                     // UI で新規追加された従業員（画像から抽出できなかったケースなど）
                     if (!editedName) return;
                     employees.push({
                         name: editedName,
-                        shifts: [],
+                        shifts: shifts,
                     });
                 }
             });
