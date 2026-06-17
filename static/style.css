@@ -563,6 +563,19 @@ body {
     background: #fff3cd;
     color: #856404;
 }
+.legend-template-select {
+    max-width: 230px;
+    padding: 3px 5px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: inherit;
+    background: #fff;
+}
+.legend-template-select:focus {
+    outline: none;
+    border-color: #2980b9;
+}
 .legend-actions {
     padding: 8px 14px;
     background: #f8f9fa;

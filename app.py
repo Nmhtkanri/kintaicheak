@@ -20,6 +20,8 @@ from services.excel_exporter import export_to_excel
 from services.jinjer_template_matcher import (
     match_legend_to_templates,
     generate_new_templates_csv,
+    load_jinjer_templates,
+    _tpl_get,
 )
 from services.jinjer_api_client import (
     fetch_employee_id_map,
@@ -375,10 +377,25 @@ def upload():
                         sheet["legend"], template_csv
                     )
 
+                # プルダウン用の jinjer 雛形一覧（名称・時刻つき）。記号→雛形を手動選択できる。
+                available_templates = []
+                for t in load_jinjer_templates(template_csv):
+                    tid = _tpl_get(t, "＊スケジュール雛形ID")
+                    if not tid:
+                        continue
+                    available_templates.append({
+                        "id": tid,
+                        "name": _tpl_get(t, "＊スケジュール雛形名") or tid,
+                        "abbr": _tpl_get(t, "略称(3文字以内)"),
+                        "start": _tpl_get(t, "＊出勤時間(0:00~47:59)"),
+                        "end": _tpl_get(t, "＊退勤時間(0:00~47:59)"),
+                    })
+
                 yield _sse_event("code_review_needed", {
                     "session_id": session_id,
                     "mode": mode,
                     "code_sheets": code_sheets,
+                    "available_templates": available_templates,
                 })
                 return
 

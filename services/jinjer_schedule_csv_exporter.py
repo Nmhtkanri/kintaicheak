@@ -221,6 +221,11 @@ def build_legend_to_template_name(
         code = str(entry.get("code") or "").strip()
         if not code:
             continue
+        # UI のプルダウンで雛形を明示選択した場合は、時刻マッチより優先してそのIDを使う
+        chosen_id = str(entry.get("template_id") or "").strip()
+        if chosen_id:
+            code_to_name[code] = chosen_id
+            continue
         start_raw = entry.get("start_time")
         end_raw = entry.get("end_time")
         label = entry.get("label") or code

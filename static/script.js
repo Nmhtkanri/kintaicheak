@@ -84,6 +84,7 @@ let progressStep = 0;
 let pendingSessionId = null;
 let pendingCodeSheets = [];
 let pendingMode = 'match';  // match | csv_export
+let pendingTemplates = [];  // jinjer スケジュール雛形の一覧（プルダウン用）
 
 // =============================================================================
 // モード切替UI
@@ -236,6 +237,7 @@ function processSSEPart(part) {
         pendingSessionId = data.session_id;
         pendingCodeSheets = data.code_sheets || [];
         pendingMode = data.mode || pendingMode || 'match';
+        pendingTemplates = data.available_templates || [];
         openLegendModal(pendingCodeSheets);
         stopProcessing(false);
     } else if (eventType === 'done') {
@@ -768,18 +770,25 @@ function renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap) {
 
     const tplTd = document.createElement('td');
     const matched = tmMatchedMap[entry.code];
-    if (matched) {
+    if (entry.is_off) {
+        const lbl = document.createElement('span');
+        lbl.className = 'legend-template-tag';
+        lbl.textContent = '休扱い';
+        tplTd.appendChild(lbl);
+    } else if (pendingTemplates && pendingTemplates.length) {
+        // jinjer 雛形をプルダウンで選択（初期値＝自動マッチ）。選んだ雛形IDがCSVに入る。
+        tplTd.appendChild(buildTemplateSelect(entry, matched));
+    } else {
+        // 雛形マスタが読めない場合は従来のタグ表示
         const tag = document.createElement('span');
-        tag.className = 'legend-template-tag';
-        tag.textContent = `No${matched.template_no} ${matched.template_name}`;
-        tag.title = `既存雛形にマッチ: ${matched.template_name}`;
-        tplTd.appendChild(tag);
-    } else if (!entry.is_off && entry.start_time) {
-        const tag = document.createElement('span');
-        tag.className = 'legend-template-tag unmatched';
-        tag.textContent = '新規雛形候補';
-        tag.title = '既存雛形にマッチしない → 新規雛形 CSV に追加されます';
-        tplTd.appendChild(tag);
+        if (matched) {
+            tag.className = 'legend-template-tag';
+            tag.textContent = `No${matched.template_no} ${matched.template_name}`;
+        } else if (entry.start_time) {
+            tag.className = 'legend-template-tag unmatched';
+            tag.textContent = '新規雛形候補';
+        }
+        if (tag.textContent) tplTd.appendChild(tag);
     }
     tr.appendChild(tplTd);
 
@@ -803,6 +812,42 @@ function makeInput(value, field, placeholder = '') {
     inp.dataset.field = field;
     if (placeholder) inp.placeholder = placeholder;
     return inp;
+}
+
+// "09:00:00" → "09:00"（時刻表示用に秒を落とす）
+function fmtTplTime(s) {
+    if (!s) return '';
+    const parts = String(s).split(':');
+    return (parts.length >= 2) ? `${parts[0]}:${parts[1]}` : String(s);
+}
+
+// jinjer 雛形選択プルダウンを作る。選択値（雛形ID）が CSV の各セルに入る。
+// 初期選択: 凡例エントリの template_id > 自動マッチ結果 > （自動マッチ）
+function buildTemplateSelect(entry, matched) {
+    const sel = document.createElement('select');
+    sel.className = 'legend-template-select';
+    sel.dataset.field = 'template_id';
+
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = '（自動マッチ）';
+    sel.appendChild(auto);
+
+    pendingTemplates.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = (t.id != null) ? String(t.id) : '';
+        const times = (t.start || t.end) ? `（${fmtTplTime(t.start)}〜${fmtTplTime(t.end)}）` : '';
+        opt.textContent = `${t.name || t.id}${times}`;
+        sel.appendChild(opt);
+    });
+
+    let initial = (entry && entry.template_id != null && entry.template_id !== '')
+        ? String(entry.template_id) : '';
+    if (!initial && matched && matched.template_id != null) {
+        initial = String(matched.template_id);
+    }
+    sel.value = (initial && pendingTemplates.some(t => String(t.id) === initial)) ? initial : '';
+    return sel;
 }
 
 // 詳細行(日別シフト編集)から {date, code, comment} のリストを読み取る
@@ -836,7 +881,7 @@ function collectLegendFromUI() {
         const legendTable = sheetEl.querySelector('.legend-table');
         if (legendTable) {
             legendTable.querySelectorAll('tbody tr').forEach(tr => {
-                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false };
+                const obj = { code: '', label: '', start_time: '', end_time: '', break_minutes: 0, is_off: false, template_id: '' };
                 tr.querySelectorAll('input').forEach(inp => {
                     const f = inp.dataset.field;
                     if (!f) return;
@@ -844,6 +889,9 @@ function collectLegendFromUI() {
                     else if (f === 'break_minutes') obj[f] = parseInt(inp.value, 10) || 0;
                     else obj[f] = inp.value.trim();
                 });
+                // 選択した jinjer 雛形ID（プルダウン）。空＝自動マッチ。
+                const tplSel = tr.querySelector('select[data-field="template_id"]');
+                if (tplSel) obj.template_id = tplSel.value || '';
                 if (obj.code) legend.push(obj);
             });
         }
