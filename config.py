@@ -46,9 +46,10 @@ class Config:
     DEFAULT_THRESHOLD_MINUTES = 10
 
     # Claude API
-    # NOTE: claude-sonnet-4-20250514 (Sonnet 4) は 2026-06-15 に提供終了。
-    #       後継のドロップイン置換は claude-sonnet-4-6 (Sonnet 4.6)。
-    ANTHROPIC_MODEL = "claude-sonnet-4-6"
+    # モデルは .env の ANTHROPIC_MODEL で上書き可能（未設定ならデフォルト値）。
+    # → 将来モデルが提供終了になっても .env を書き換えるだけでよく、exe 再ビルド不要。
+    # 履歴: claude-sonnet-4-20250514 (Sonnet 4) は 2026-06-15 に提供終了 → claude-sonnet-4-6 へ。
+    ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     ANTHROPIC_MAX_TOKENS = 4096
 
     # シフト記号モード（jinjer 雛形マッチング用 CSV のパス）
