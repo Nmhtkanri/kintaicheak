@@ -73,6 +73,8 @@ DIFF_COLUMNS = [
     "氏名", "対象日付", "差異種別",
     # すぐ見る（差異の中身）
     "請求勤怠値", "jinjer値", "差分(分)", "警告レベル",
+    # トリアージ区分（要確認/自動採用/自動OK）
+    "トリアージ区分",
     # 判断の根拠（人間判断の左にまとめる）
     "打刻時コメント",       # 汎用データ#96「打刻時コメント」より（出勤:/退勤: 両方）
     "打刻修正時コメント",   # 申請データCSVの「理由」より
@@ -139,6 +141,16 @@ KINTAI_CHECKER_ROOT = Path(__file__).resolve().parent
 if str(KINTAI_CHECKER_ROOT) not in sys.path:
     sys.path.insert(0, str(KINTAI_CHECKER_ROOT))
 
+# トリアージ（要確認/自動採用/自動OK の分類）
+from services.triage import (  # noqa: E402
+    classify as triage_classify,
+    TRIAGE_NEEDS_CHECK,
+    TRIAGE_AUTO_KINTAI,
+    TRIAGE_AUTO_OK,
+    TRIAGE_INFO_ONLY,
+    TRIAGE_ORDER,
+)
+
 
 # ----------------------------------------------------------------------
 # データクラス
@@ -173,6 +185,9 @@ class DiffRow:
     punch_comment: str = ""
     # 打刻修正時コメント（打刻修正申請の従業員コメント等。同一 emp/date の全差異行に併記）
     jinjer_stamp_comment: str = ""
+    # トリアージ区分（要確認/自動採用/自動OK）と既定の人間判断
+    triage: str = ""
+    judge_default: str = ""
 
 
 @dataclass
@@ -804,6 +819,18 @@ def compute_diffs(
                     ))
                     next_id += 1
 
+    # トリアージ: 各差異行を 要確認/自動採用/自動OK に分類し、既定の人間判断を付ける
+    for r in rows:
+        r.triage, r.judge_default = triage_classify(
+            kind=r.kind,
+            warn_level=r.warn_level,
+            punch_comment=r.punch_comment,
+            stamp_comment=r.jinjer_stamp_comment,
+            kintai_value=r.kintai_value,
+            holiday_name1=r.holiday_name1,
+            holiday_name1_type=r.holiday_name1_type,
+        )
+
     return rows
 
 
@@ -919,9 +946,23 @@ LEVEL_FILL = {
     LEVEL_WARN: PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
     LEVEL_INFO: PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
 }
+# トリアージ区分の色（要確認を目立たせ、自動は淡色に）
+TRIAGE_FILL = {
+    TRIAGE_NEEDS_CHECK: PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+    TRIAGE_AUTO_OK: PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid"),
+    TRIAGE_AUTO_KINTAI: PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"),
+    TRIAGE_INFO_ONLY: PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"),
+}
 
 
 def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry], month_label: str) -> None:
+    # トリアージ区分で並べ替え（要確認を上へ。同区分内は元の順序を保持＝安定ソート）
+    diff_rows = sorted(diff_rows, key=lambda r: TRIAGE_ORDER.get(r.triage, 9))
+    needs_cnt = sum(1 for r in diff_rows if r.triage == TRIAGE_NEEDS_CHECK)
+    auto_ok_cnt = sum(1 for r in diff_rows if r.triage == TRIAGE_AUTO_OK)
+    auto_kintai_cnt = sum(1 for r in diff_rows if r.triage == TRIAGE_AUTO_KINTAI)
+    info_only_cnt = sum(1 for r in diff_rows if r.triage == TRIAGE_INFO_ONLY)
+
     wb = Workbook()
     # サマリ
     ws_sum = wb.active
@@ -929,6 +970,10 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     summary_data = [
         ("対象月", month_label),
         ("総差異件数", len(diff_rows)),
+        ("★要確認 件数（人が見る）", needs_cnt),
+        ("自動OK(jinjer勤怠) 件数", auto_ok_cnt),
+        ("自動採用(請求勤怠) 件数", auto_kintai_cnt),
+        ("参考のみ 件数（判断不要）", info_only_cnt),
         ("出勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_IN)),
         ("退勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_OUT)),
         ("休憩警告件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_BREAK)),
@@ -936,10 +981,6 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         ("DANGER 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_DANGER)),
         ("WARN 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_WARN)),
         ("INFO 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_INFO)),
-        ("人間判断: 未判断", len(diff_rows)),
-        ("人間判断: 請求勤怠を正", 0),
-        ("人間判断: jinjer勤怠を正", 0),
-        ("人間判断: 保留", 0),
         ("生成日時", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     ]
     for r_idx, (label, value) in enumerate(summary_data, start=1):
@@ -981,11 +1022,12 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "jinjer値": drow.jinjer_value,
             "差分(分)": drow.diff_minutes,
             "警告レベル": drow.warn_level,
+            "トリアージ区分": drow.triage,
             "警告理由": drow.warn_reason,
             "打刻時コメント": drow.punch_comment,
             "打刻修正時コメント": drow.jinjer_stamp_comment,
             "自動修正提案値": drow.auto_fix_value,
-            "人間判断": "",        # プルダウンで入力
+            "人間判断": drow.judge_default,   # トリアージの既定値を事前入力（要確認は空欄）
             "判断メモ": "",
             "打刻修正": "",        # 出勤/退勤の提案値を人間が上書きしたい場合のみ
             "手入力休憩1": "",     # 休憩差異を承認して汎用データに反映する場合のみ
@@ -1001,6 +1043,10 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         fill = LEVEL_FILL.get(drow.warn_level)
         if fill:
             ws.cell(row=r_idx, column=DIFF_COLUMNS.index("警告レベル") + 1).fill = fill
+        # トリアージ区分列に色塗り（要確認を目立たせる）
+        tfill = TRIAGE_FILL.get(drow.triage)
+        if tfill:
+            ws.cell(row=r_idx, column=DIFF_COLUMNS.index("トリアージ区分") + 1).fill = tfill
 
     # データ検証プルダウン: 人間判断
     judge_col_letter = get_column_letter(DIFF_COLUMNS.index("人間判断") + 1)
@@ -1022,7 +1068,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "有休": 8, "AM有休": 8, "PM有休": 8,
         "休日休暇名1": 14, "休日休暇名1：種別": 12,
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
-        "警告レベル": 10, "警告理由": 40, "自動修正提案値": 14,
+        "警告レベル": 10, "トリアージ区分": 14, "警告理由": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
         "打刻時コメント": 40, "打刻修正時コメント": 40,
         "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,

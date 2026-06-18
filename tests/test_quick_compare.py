@@ -327,6 +327,36 @@ def test_clean_punch_comment():
     assert clean_punch_comment(None) == ""
 
 
+def test_triage_column_present_and_placed():
+    """トリアージ区分は警告レベルとコメント列の間に置く。"""
+    assert "トリアージ区分" in DIFF_COLUMNS
+    assert DIFF_COLUMNS.index("警告レベル") < DIFF_COLUMNS.index("トリアージ区分")
+    assert DIFF_COLUMNS.index("トリアージ区分") < DIFF_COLUMNS.index("打刻時コメント")
+
+
+def test_compute_diffs_sets_triage_default():
+    """コメント無し・小差分の出勤差異 → 自動採用(請求勤怠) が既定セットされる。"""
+    from services.triage import TRIAGE_AUTO_KINTAI
+
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾", "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:05", "jinjer_出勤": "9:00", "出勤差分(分)": 5,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): _jinjer_row()},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+    )
+    punch = [r for r in rows if r.kind == DIFF_KIND_PUNCH_IN]
+    assert punch
+    assert punch[0].triage == TRIAGE_AUTO_KINTAI
+    assert punch[0].judge_default == "請求勤怠"
+
+
 def test_load_stamp_correction_reasons(tmp_path):
     """申請データCSVの「理由」を (従業員ID,日付ISO)→コメント に読み込む。理由空は除外。"""
     import csv as _csv
