@@ -252,6 +252,10 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     # 氏名正規化
     jinjer_df = jinjer_df.copy()
     timesheet_df = timesheet_df.copy()
+    # 請求勤怠ファイル記載の正味労働時間（分）。パーサーが付けない経路（シフト記号等）でも
+    # 後段で参照できるよう、無ければ None 列を補完しておく。
+    if "総労働時間(分)" not in timesheet_df.columns:
+        timesheet_df["総労働時間(分)"] = None
     jinjer_df["氏名_normalized"] = jinjer_df["氏名"].apply(normalize_name)
     timesheet_df["氏名_normalized"] = timesheet_df["氏名"].apply(normalize_name)
     jinjer_name_keys = set(jinjer_df["氏名_normalized"].unique())
@@ -357,6 +361,7 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         "出勤時刻": "勤務表_出勤時刻",
         "退勤時刻": "勤務表_退勤時刻",
         "コメント": "勤務表_コメント",
+        "総労働時間(分)": "勤務表_実働(分)",
     })
 
     jinjer_renamed = _split_jinjer_overnight_rows(jinjer_renamed, sheet_renamed)
@@ -412,6 +417,13 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     merged["勤務表_総労働時間"] = merged["勤務表_総労働時間(分)"].apply(format_duration)
     merged["jinjer_総労働時間"] = merged["jinjer_総労働時間(分)"].apply(format_duration)
 
+    # 請求勤怠ファイルに日別の正味労働時間（実働）が記載されていればそれを保持する。
+    # 手順1の「総労働時間」表示は拘束時間(退勤−出勤)のまま据え置き（jinjer側も拘束のため整合）、
+    # 差異一覧(quick_compare)はこの正味列を優先して正味同士で突合する。
+    if "勤務表_実働(分)" not in merged.columns:
+        merged["勤務表_実働(分)"] = None
+    merged["勤務表_実働時間"] = merged["勤務表_実働(分)"].apply(format_duration)
+
     # 判定
     results = merged.apply(lambda r: judge(r, threshold_minutes), axis=1)
     merged["判定"] = [r[0] for r in results]
@@ -429,6 +441,7 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         "勤務表_総労働時間",
         "jinjer_総労働時間",
         "総労働差分(分)",
+        "勤務表_実働時間",
         "判定",
         "詳細",
         "jinjer_コメント",

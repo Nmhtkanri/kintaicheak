@@ -66,6 +66,7 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
         "請求勤怠_出勤", "jinjer_出勤", "出勤差分(分)",
         "請求勤怠_退勤", "jinjer_退勤", "退勤差分(分)",
         "請求勤怠_総労働", "jinjer_総労働", "総労働差分(分)",
+        "請求勤怠_実働",
         "判定", "詳細",
         "jinjer_コメント", "請求勤怠_コメント"
     ]
@@ -82,6 +83,7 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
         "請求勤怠_総労働": "勤務表_総労働時間",
         "jinjer_総労働": "jinjer_総労働時間",
         "総労働差分(分)": "総労働差分(分)",
+        "請求勤怠_実働": "勤務表_実働時間",
         "判定": "判定",
         "詳細": "詳細",
         "jinjer_コメント": "jinjer_コメント",

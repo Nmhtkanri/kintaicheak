@@ -234,6 +234,8 @@ def _normalize_records(claude_result, source_label="勤務表"):
                 "退勤時刻": end,
                 "コメント": comment,
                 "データソース": source_label,
+                # AI解析は時刻のみ抽出。正味労働は matcher で拘束時間にフォールバック。
+                "総労働時間(分)": None,
             })
 
     if isinstance(claude_result, list):
@@ -242,7 +244,7 @@ def _normalize_records(claude_result, source_label="勤務表"):
     else:
         process_entry(claude_result)
 
-    return pd.DataFrame(records, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    return pd.DataFrame(records, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
 
 
 def _parse_time_str(value):
@@ -350,6 +352,76 @@ def _parse_hour_minute_cells(hour_value, minute_value):
         return dt_time(hour % 24, minute)
     except ValueError:
         return None
+
+
+def _decimal_hours_to_minutes(value):
+    """小数時間（"7.5" / 7.5 / "7:30"）を分に変換する。空・0以下・不正は None。
+
+    請求勤怠ファイルに日別の正味労働時間（NMHTのP列「実働時間」、
+    Fieldglassの「エントリ日の労働時間」等）が小数時間で記載されているのを拾う。
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(value).strip()
+    if not s or s in ("nan", "None", "NaT", "-"):
+        return None
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s)  # "7:30" 表記も許容
+    if m:
+        minutes = int(m.group(1)) * 60 + int(m.group(2))
+        return minutes if minutes > 0 else None
+    try:
+        hours = float(s)
+    except (TypeError, ValueError):
+        return None
+    minutes = round(hours * 60)
+    return minutes if minutes > 0 else None
+
+
+def _hhmm_to_minutes(value):
+    """HH:MM 文字列を分に変換する（休憩時間など）。空・不正は 0。"""
+    if value is None:
+        return 0
+    try:
+        if pd.isna(value):
+            return 0
+    except (TypeError, ValueError):
+        pass
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(value).strip())
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    return 0
+
+
+def _net_minutes_from_times(start, end, break_minutes=0):
+    """datetime.time の出退勤と休憩(分)から正味労働分を返す。
+
+    日跨ぎは翌日退勤として扱う。算出不能・0以下は None（呼び出し側で
+    フォールバックさせる）。
+    """
+    if start is None or end is None:
+        return None
+    start_min = start.hour * 60 + start.minute
+    end_min = end.hour * 60 + end.minute
+    if end_min < start_min:
+        end_min += 24 * 60
+    net = end_min - start_min - max(0, break_minutes or 0)
+    return net if net > 0 else None
+
+
+def _fieldglass_duration_to_minutes(value):
+    """Fieldglass PDF の "8h 30m" を分に変換する。"-"/空/0h0m は None。"""
+    if not value or value == "-":
+        return None
+    m = re.fullmatch(r"(\d+)h\s+(\d+)m", str(value).strip())
+    if not m:
+        return None
+    minutes = int(m.group(1)) * 60 + int(m.group(2))
+    return minutes if minutes > 0 else None
 
 
 def _read_text_auto_encoding(filepath):
@@ -476,6 +548,7 @@ def _parse_itone_dispatch_timesheet_file(filepath):
             if comment is not None:
                 comment = str(comment).strip() or None
 
+            # 実働時間列の所在が未確定のため None（matcher 側で拘束時間にフォールバック）
             rows.append({
                 "氏名": employee_name,
                 "日付": work_date,
@@ -483,12 +556,13 @@ def _parse_itone_dispatch_timesheet_file(filepath):
                 "退勤時刻": end,
                 "コメント": comment,
                 "データソース": "勤務表",
+                "総労働時間(分)": None,
             })
 
         if not rows:
             return None
 
-        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
     except Exception:
         logger.exception("ITone派遣労働者勤務報告書の解析に失敗しました: %s", filepath)
         return None
@@ -563,6 +637,9 @@ def _parse_nmht_work_time_report_file(filepath):
             if comment is not None:
                 comment = str(comment).strip() or None
 
+            # P列(16)=「実働時間」（休憩控除後の正味、小数時間表記 例:"7.00"）
+            total_min = _decimal_hours_to_minutes(ws.cell(row_idx, 16).value)
+
             rows.append({
                 "氏名": employee_name,
                 "日付": work_date,
@@ -570,12 +647,13 @@ def _parse_nmht_work_time_report_file(filepath):
                 "退勤時刻": end,
                 "コメント": comment,
                 "データソース": "勤務表",
+                "総労働時間(分)": total_min,
             })
 
         if not rows:
             return None
 
-        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
     except Exception:
         logger.exception("NMHT勤務時間報告書の解析に失敗しました: %s", filepath)
         return None
@@ -595,6 +673,9 @@ def _sap_timesheet_df_from_table(df):
     if not required.issubset(set(df.columns)):
         return None
 
+    # 「エントリ日の労働時間 (ブレークダウンなし)」= 日別の正味労働時間（小数時間）
+    total_col = next((c for c in df.columns if "エントリ日の労働時間" in c), None)
+
     rows = []
     for _, row in df.iterrows():
         name = row.get("スタッフ")
@@ -607,6 +688,8 @@ def _sap_timesheet_df_from_table(df):
         if work_date is None or (start is None and end is None):
             continue
 
+        total_min = _decimal_hours_to_minutes(row.get(total_col)) if total_col else None
+
         rows.append({
             "氏名": str(name).strip(),
             "日付": work_date,
@@ -614,12 +697,13 @@ def _sap_timesheet_df_from_table(df):
             "退勤時刻": end,
             "コメント": None,
             "データソース": "勤務表",
+            "総労働時間(分)": total_min,
         })
 
     if not rows:
         return None
 
-    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
 
 
 def _parse_sap_timesheet_file(filepath):
@@ -655,7 +739,7 @@ def _parse_sap_timesheet_file(filepath):
         return None
 
     result = pd.concat(frames, ignore_index=True)
-    return result[["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"]]
+    return result[["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"]]
 
 
 def _parse_estaffing_timesheet_text(filepath):
@@ -692,6 +776,7 @@ def _parse_estaffing_timesheet_text(filepath):
         if len(fields) > 7 and str(fields[7]).strip():
             comment = str(fields[7]).strip()
 
+        # テキスト版は休憩列が無いため正味は不明（matcher で拘束時間にフォールバック）
         rows.append({
             "氏名": current_name,
             "日付": work_date,
@@ -699,12 +784,13 @@ def _parse_estaffing_timesheet_text(filepath):
             "退勤時刻": end,
             "コメント": comment,
             "データソース": "勤務表",
+            "総労働時間(分)": None,
         })
 
     if not rows:
         return None
 
-    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
 
 
 def _estaffing_csv_df_from_table(df):
@@ -732,6 +818,9 @@ def _estaffing_csv_df_from_table(df):
         if raw_comment is not None and str(raw_comment).strip() not in ("", "nan", "None"):
             comment = str(raw_comment).strip()
 
+        # 正味労働 = (終了 − 開始) − 休憩時間(HH:MM)。e-staffing は総労働列が無いため計算。
+        total_min = _net_minutes_from_times(start, end, _hhmm_to_minutes(row.get("休憩時間")))
+
         rows.append({
             "氏名": str(name).strip(),
             "日付": work_date,
@@ -739,12 +828,13 @@ def _estaffing_csv_df_from_table(df):
             "退勤時刻": end,
             "コメント": comment,
             "データソース": "勤務表",
+            "総労働時間(分)": total_min,
         })
 
     if not rows:
         return None
 
-    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
 
 
 def _parse_estaffing_timesheet_csv(filepath):
@@ -944,6 +1034,7 @@ def _parse_fieldglass_pdf_timesheet(filepath):
             if _is_zero_fieldglass_duration(total_value):
                 continue
 
+            # Total 列（"8h 30m"）= 日別の正味労働時間
             rows.append({
                 "氏名": name,
                 "日付": work_date,
@@ -951,12 +1042,13 @@ def _parse_fieldglass_pdf_timesheet(filepath):
                 "退勤時刻": end,
                 "コメント": None,
                 "データソース": "勤務表",
+                "総労働時間(分)": _fieldglass_duration_to_minutes(total_value),
             })
 
     if not rows:
         return None
 
-    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
 
 
 def _parse_known_timesheet_file(filepath):

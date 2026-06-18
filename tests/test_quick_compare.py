@@ -10,9 +10,11 @@ from quick_compare import (  # noqa: E402
     DIFF_COLUMNS,
     DIFF_KIND_PUNCH_IN,
     DIFF_KIND_PUNCH_OUT,
+    DIFF_KIND_TOTAL,
     JINJER_HEADERS,
     LogEntry,
     compute_diffs,
+    kintai_total_minutes,
     normalize_kintai_result_columns,
     resolve_jinjer_extra_columns,
     to_jinjer_overnight_punch_out,
@@ -200,3 +202,53 @@ def test_compute_diffs_transcribes_schedule_and_leave():
     assert r.am_yukyu == "1"
     assert r.yukyu == ""
     assert r.pm_yukyu == ""
+
+
+def test_kintai_total_minutes_prefers_actual_work():
+    """請求勤怠の正味労働(勤務表_実働時間)が拘束時間より優先される。"""
+    row = pd.Series({
+        "勤務表_実働時間": "7:00",     # 正味（休憩控除後）
+        "勤務表_総労働時間": "9:00",   # 拘束（退勤−出勤）
+        "勤務表_出勤": "9:00",
+        "勤務表_退勤": "18:00",
+    })
+    minutes, hhmm = kintai_total_minutes(row)
+    assert minutes == 420
+    assert hhmm == "7:00"
+
+
+def test_kintai_total_minutes_fallback_when_actual_blank():
+    """実働列が空なら従来の拘束時間にフォールバックする（後方互換）。"""
+    row = pd.Series({"勤務表_実働時間": "", "勤務表_総労働時間": "9:00"})
+    minutes, _ = kintai_total_minutes(row)
+    assert minutes == 540
+
+
+def test_compute_diffs_total_compares_net_vs_net():
+    """総労働差異は請求勤怠の正味(実働) vs jinjer 総労働 で突合される。
+
+    拘束時間9:00ではなく実働8:00で比較されるため、jinjer総労働8:00とは差異なし。
+    """
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:00", "出勤差分(分)": 0,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+        "勤務表_実働時間": "8:00",  # 正味（休憩1h控除後）
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["total_work"]: "8:00",
+        JINJER_HEADERS["break_total"]: "1:00",
+        JINJER_HEADERS["punch_in_1"]: "9:00",
+        JINJER_HEADERS["punch_out_1"]: "18:00",
+    })
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): jrow},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+    )
+    total_rows = [r for r in rows if r.kind == DIFF_KIND_TOTAL]
+    assert total_rows == []  # 実働8:00 = jinjer総労働8:00 → 差異なし
