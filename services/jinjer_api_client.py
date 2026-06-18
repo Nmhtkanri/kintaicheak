@@ -216,6 +216,97 @@ class JinjerClient:
         logger.info("jinjer 従業員一覧取得: %d 件", len(all_employees))
         return all_employees
 
+    # ------------------------------------------------------------------
+    # 日次勤怠の打刻コメント（打刻修正申請の理由など）
+    # ------------------------------------------------------------------
+    def get_stamp_comments(
+        self, employee_ids: list[str], month: str
+    ) -> dict[tuple[str, str], list[dict]]:
+        """指定従業員・対象月の「打刻に付いた非空コメント」を取得する。
+
+        `/v1/employees/attendances`（1名×1月ずつ）の各 `stamps[]` から、
+        `comment` が空でないものだけを拾う。打刻修正申請の従業員コメント
+        （`stamp_method=="打刻修正申請"`）や管理者修正の理由、打刻時コメントが入る。
+
+        Args:
+            employee_ids: 従業員ID（文字列）のリスト
+            month: 対象月 ``"YYYY-MM"``
+
+        Returns:
+            ``{(employee_id, "YYYY-MM-DD"): [{"type","method","comment"}, ...]}``。
+            非空コメントが無い従業員・日付はキーごと含めない。
+            同一打刻が重複して返る既知問題に備え ``(date, type, stamped_at, comment)``
+            でユニーク化する。1名でも取得失敗したら、その従業員はスキップして続行。
+        """
+        headers = self._auth_headers()
+        url = f"{self.base_url}/v1/employees/attendances"
+        result: dict[tuple[str, str], list[dict]] = {}
+        seen: set[tuple] = set()
+
+        unique_ids = []
+        _seen_id = set()
+        for emp_id in employee_ids:
+            s = str(emp_id or "").strip()
+            if s and s not in _seen_id:
+                _seen_id.add(s)
+                unique_ids.append(s)
+
+        for idx, emp_id in enumerate(unique_ids):
+            params = {"employee-id": emp_id, "month": month}
+            attendances = None
+            for attempt in range(1, 4):
+                try:
+                    r = requests.get(url, headers=headers, params=params, timeout=self.timeout)
+                except requests.RequestException as e:
+                    logger.warning("打刻コメント取得 通信失敗 emp=%s: %s", emp_id, e)
+                    break
+                if r.status_code == 200:
+                    attendances = (r.json().get("data") or {}).get("attendances", []) or []
+                    break
+                if r.status_code == 429:
+                    _time.sleep(2 * attempt)
+                    continue
+                if r.status_code == 404:
+                    attendances = []
+                    break
+                logger.warning("打刻コメント取得 失敗 emp=%s status=%s", emp_id, r.status_code)
+                break
+
+            for day in attendances or []:
+                date_str = str(day.get("date") or "").strip()
+                if not date_str:
+                    continue
+                for st in day.get("stamps", []) or []:
+                    comment = str(st.get("comment") or "").strip()
+                    if not comment:
+                        continue
+                    stype = str((st.get("stamp_type") or {}).get("name") or "").strip()
+                    method = str(st.get("stamp_method") or "").strip()
+                    stamped_at = str(st.get("stamped_at") or "").strip()
+                    dedup_key = (emp_id, date_str, stype, stamped_at, comment)
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    result.setdefault((emp_id, date_str), []).append(
+                        {"type": stype, "method": method, "comment": comment}
+                    )
+
+            if idx + 1 < len(unique_ids):
+                _time.sleep(0.2)  # 軽いペーシング
+
+        logger.info("jinjer 打刻コメント取得: %d (emp,date) 件", len(result))
+        return result
+
+
+def fetch_stamp_comments(employee_ids: list[str], month: str) -> dict[tuple[str, str], list[dict]]:
+    """API を叩いて打刻コメントの辞書を返す薄いラッパ。
+
+    Raises:
+        JinjerAPIError: 認証失敗時のみ（個別従業員の取得失敗はスキップして続行する）。
+    """
+    client = JinjerClient()
+    return client.get_stamp_comments(employee_ids, month)
+
 
 # ----------------------------------------------------------------------
 # 氏名 → ID マッピング

@@ -14,6 +14,7 @@ from quick_compare import (  # noqa: E402
     JINJER_HEADERS,
     LogEntry,
     compute_diffs,
+    format_stamp_comments,
     kintai_total_minutes,
     normalize_kintai_result_columns,
     resolve_jinjer_extra_columns,
@@ -252,3 +253,47 @@ def test_compute_diffs_total_compares_net_vs_net():
     )
     total_rows = [r for r in rows if r.kind == DIFF_KIND_TOTAL]
     assert total_rows == []  # 実働8:00 = jinjer総労働8:00 → 差異なし
+
+
+def test_format_stamp_comments():
+    """打刻コメント list → 種別[方法] コメント / ... の整形。"""
+    items = [
+        {"type": "出勤", "method": "打刻修正申請", "comment": "KDX出社"},
+        {"type": "退勤", "method": "PC", "comment": "私用のため早退"},
+    ]
+    assert format_stamp_comments(items) == "出勤[打刻修正申請] KDX出社 / 退勤[PC] 私用のため早退"
+    assert format_stamp_comments([]) == ""
+    assert format_stamp_comments([{"comment": "", "type": "出勤", "method": "PC"}]) == ""
+
+
+def test_compute_diffs_attaches_stamp_comment():
+    """打刻修正申請の従業員コメントが当日の差異行に併記される。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:30", "出勤差分(分)": 30,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    stamp_comments = {
+        ("2018057", "2026-04-01"): [
+            {"type": "出勤", "method": "打刻修正申請", "comment": "KDX出社"},
+        ],
+    }
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): _jinjer_row()},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+        None,
+        stamp_comments,
+    )
+    punch_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_IN]
+    assert punch_rows
+    assert punch_rows[0].jinjer_stamp_comment == "出勤[打刻修正申請] KDX出社"
+
+
+def test_jinjer_stamp_comment_column_present():
+    """差異一覧の列定義に打刻コメント列が含まれる。"""
+    assert "jinjer打刻コメント" in DIFF_COLUMNS

@@ -69,6 +69,7 @@ DIFF_COLUMNS = [
     "出勤予定", "退勤予定", "休憩予定", "有休", "AM有休", "PM有休",
     "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
     "警告レベル", "警告理由",
+    "jinjer打刻コメント",  # 打刻修正申請の従業員コメント等（attendances API より）
     "自動修正提案値",
     "人間判断", "判断メモ",
     "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
@@ -151,6 +152,8 @@ class DiffRow:
     yukyu: str = ""
     am_yukyu: str = ""
     pm_yukyu: str = ""
+    # jinjer 打刻コメント（打刻修正申請の従業員コメント等。同一 emp/date の全差異行に併記）
+    jinjer_stamp_comment: str = ""
 
 
 @dataclass
@@ -496,17 +499,40 @@ def to_int_diff(value: Any) -> int | None:
         return None
 
 
+def format_stamp_comments(items: list[dict]) -> str:
+    """打刻コメント list（{type,method,comment}）を1セルぶんの文字列に整形する。
+
+    例: "出勤[打刻修正申請] KDX出社 / 退勤[PC] 私用のため早退"
+    """
+    parts = []
+    for it in items or []:
+        comment = str(it.get("comment") or "").strip()
+        if not comment:
+            continue
+        stype = str(it.get("type") or "").strip()
+        method = str(it.get("method") or "").strip()
+        label = "".join([stype, f"[{method}]" if method else ""])
+        parts.append(f"{label} {comment}".strip() if label else comment)
+    return " / ".join(parts)
+
+
 def compute_diffs(
     kintai_df: pd.DataFrame,
     jinjer_index: dict[tuple[str, str], dict],
     name_map: dict[str, str],
     logs: list[LogEntry],
     extra_cols: dict[str, str] | None = None,
+    stamp_comments: dict[tuple[str, str], list[dict]] | None = None,
 ) -> list[DiffRow]:
-    """突合結果xlsx の各行に対し、4種の差異を生成して返す。"""
+    """突合結果xlsx の各行に対し、4種の差異を生成して返す。
+
+    stamp_comments: ``{(従業員ID, 日付ISO): [{type,method,comment}, ...]}``。
+    打刻修正申請の従業員コメント等を、同一 emp/date の各差異行に併記する。
+    """
     rows: list[DiffRow] = []
     next_id = 1
     extra_cols = extra_cols or {}
+    stamp_comments = stamp_comments or {}
 
     seen_emp_date: set[tuple[str, str]] = set()
 
@@ -545,6 +571,7 @@ def compute_diffs(
             "yukyu": _extra("有休"),
             "am_yukyu": _extra("AM有休"),
             "pm_yukyu": _extra("PM有休"),
+            "jinjer_stamp_comment": format_stamp_comments(stamp_comments.get((emp_id, date_iso))),
         }
 
         # ----- 出勤差異 -----
@@ -655,6 +682,7 @@ def compute_diffs(
                         auto_fix_value="",  # 総労働時間は自動反映しない
                         finalized=finalized,
                         source_file=source_file,
+                        **extra,
                     ))
                     next_id += 1
 
@@ -833,6 +861,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "差分(分)": drow.diff_minutes,
             "警告レベル": drow.warn_level,
             "警告理由": drow.warn_reason,
+            "jinjer打刻コメント": drow.jinjer_stamp_comment,
             "自動修正提案値": drow.auto_fix_value,
             "人間判断": "",        # プルダウンで入力
             "判断メモ": "",
@@ -870,7 +899,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         "行ID": 6, "従業員ID": 12, "氏名": 16, "対象日付": 12,
         "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "有休": 8, "AM有休": 8, "PM有休": 8,
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
-        "警告レベル": 10, "警告理由": 40, "自動修正提案値": 14,
+        "警告レベル": 10, "警告理由": 40, "jinjer打刻コメント": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
         "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
         "実績確定状況": 12, "元突合結果ファイル": 32,
@@ -964,7 +993,28 @@ def run_quick_compare(
         ))
     log_func(f"[info] 予定/有休 転記列の解決: {extra_cols}")
 
-    diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs, extra_cols)
+    # jinjer 打刻コメント（打刻修正申請の従業員コメント等）を attendances API から取得。
+    # 取得できなくても差異一覧は生成する（コメント欄が空になるだけ）。
+    stamp_comments: dict[tuple[str, str], list[dict]] = {}
+    checked_emp_ids = sorted({
+        eid for n in kintai_df["氏名"].dropna().unique()
+        if (eid := resolve_emp_id(str(n).strip(), name_map))
+    })
+    if checked_emp_ids and re.fullmatch(r"\d{4}-\d{2}", str(month_label or "").strip()):
+        try:
+            from services.jinjer_api_client import fetch_stamp_comments
+            stamp_comments = fetch_stamp_comments(checked_emp_ids, str(month_label).strip())
+            log_func(f"[info] jinjer 打刻コメント取得: {len(stamp_comments)} (emp,date) 件")
+        except Exception as e:  # 認証失敗・通信不可など。差異一覧は続行する。
+            logs.append(LogEntry("WARN", f"jinjer 打刻コメント取得に失敗（コメント欄は空で続行）: {e}"))
+            log_func(f"[warn] jinjer 打刻コメント取得に失敗: {e}")
+    else:
+        logs.append(LogEntry(
+            "INFO",
+            f"打刻コメント取得をスキップ（対象月={month_label} / 対象ID数={len(checked_emp_ids)}）",
+        ))
+
+    diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs, extra_cols, stamp_comments)
     result.diff_count = len(diff_rows)
     log_func(f"[info] 差異・警告 合計 {len(diff_rows)} 件")
 
