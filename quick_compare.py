@@ -64,22 +64,26 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 # 判断値: 「請求勤怠」=請求勤怠を正としてjinjerへ書き戻す / 「jinjer勤怠」=jinjerを正（書き戻さない） / 「保留」。
 # 手入力欄（任意・上級者向け）は右側へ寄せる。
 # ※ quick_export 側は列名で読むため、列順を変えても後方互換は保たれる。
+# 横スクロールを減らすため「判断に必要な列」を左へ集約する。
+# 識別3列(氏名/対象日付/差異種別)はウィンドウ枠固定。コメント2列は判断材料なので人間判断の左へ。
+# 手入力・参考(予定/休日休暇/ID/トレーサビリティ)は右へ寄せる。
+# ※ quick_export は列名で読むため、列順を変えても後方互換は保たれる。
 DIFF_COLUMNS = [
-    "行ID", "従業員ID", "氏名", "対象日付",
-    # 汎用データから転記する予定・休日休暇（その日の前提情報。参考表示のみ）
-    # ※「有休/AM有休/PM有休」は汎用データ194列に該当列が無く常に空のため出力しない。
-    #   休暇情報は「休日休暇名1 / 休日休暇名1：種別」で表示する。
-    "出勤予定", "退勤予定", "休憩予定",
-    "休日休暇名1", "休日休暇名1：種別",
-    "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
-    "警告レベル", "警告理由",
-    "自動修正提案値",
+    # 識別（ウィンドウ枠固定）
+    "氏名", "対象日付", "差異種別",
+    # すぐ見る（差異の中身）
+    "請求勤怠値", "jinjer値", "差分(分)", "警告レベル",
+    # 判断の根拠（人間判断の左にまとめる）
+    "打刻時コメント",       # 汎用データ#96「打刻時コメント」より（出勤:/退勤: 両方）
+    "打刻修正時コメント",   # 申請データCSVの「理由」より
+    "警告理由",
+    # 判断（入力）
     "人間判断", "判断メモ",
-    # 打刻修正申請の従業員コメント等（attendances API より）。打刻修正の手入力欄の隣に置く。
-    "打刻修正時コメント",
-    "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
-    "実績確定状況",  # 参考表示のみ。警告レベル判定には使わない
-    "元突合結果ファイル",
+    # 反映（手入力・普段使わない）
+    "自動修正提案値", "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
+    # 参考（右端・普段見ない）。予定/休日休暇/実績確定/ID/トレーサビリティ
+    "出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別",
+    "実績確定状況", "従業員ID", "行ID", "元突合結果ファイル",
 ]
 
 # 汎用データから転記する予定・有休 列のキャノニカル名 → (候補ヘッダー, 完全一致のみか)
@@ -94,6 +98,8 @@ JINJER_EXTRA_COLUMNS: dict[str, tuple[list[str], bool]] = {
     # 休日休暇名1 は「休日休暇名1：種別」の部分文字列なので完全一致のみ（誤ヒット防止）。
     "休日休暇名1": (["休日休暇名1"], True),
     "休日休暇名1：種別": (["休日休暇名1：種別"], True),
+    # 打刻時コメント（汎用データ#96）。"出勤: ○○ , 退勤: ○○" 形式で出勤退勤両方を含む。
+    "打刻時コメント": (["打刻時コメント"], True),
 }
 
 
@@ -163,6 +169,8 @@ class DiffRow:
     # 汎用データの休日休暇名1 / 休日休暇名1：種別（参考表示）
     holiday_name1: str = ""
     holiday_name1_type: str = ""
+    # 打刻時コメント（汎用データ#96。出勤:/退勤: 両方を含む。判断材料）
+    punch_comment: str = ""
     # 打刻修正時コメント（打刻修正申請の従業員コメント等。同一 emp/date の全差異行に併記）
     jinjer_stamp_comment: str = ""
 
@@ -583,6 +591,29 @@ def to_int_diff(value: Any) -> int | None:
         return None
 
 
+def clean_punch_comment(value: Any) -> str:
+    """汎用データ「打刻時コメント」(#96) の値を整形する。
+
+    形式は "出勤: X , 退勤: Y" で、中身が無いと "出勤:  , 退勤:  ," のようなゴミ文字列に
+    なるため、中身のあるラベルだけ残す。何も無ければ空文字を返す。
+    """
+    s = clean_cell(value)
+    if not s:
+        return ""
+    parts = []
+    found_label = False
+    for m in re.finditer(r"(出勤|退勤)\s*[:：]\s*([^,]*)", s):
+        found_label = True
+        body = m.group(2).strip()
+        if body:
+            parts.append(f"{m.group(1)}: {body}")
+    if parts:
+        return " / ".join(parts)
+    if found_label:
+        return ""  # ラベルはあるが中身なし → ゴミなので空
+    return s  # 想定外フォーマットはそのまま
+
+
 def format_stamp_comments(items: list[dict]) -> str:
     """打刻コメント list（{type,method,comment}）を1セルぶんの文字列に整形する。
 
@@ -657,6 +688,7 @@ def compute_diffs(
             "pm_yukyu": _extra("PM有休"),
             "holiday_name1": _extra("休日休暇名1"),
             "holiday_name1_type": _extra("休日休暇名1：種別"),
+            "punch_comment": clean_punch_comment(_extra("打刻時コメント")),
             "jinjer_stamp_comment": format_stamp_comments(stamp_comments.get((emp_id, date_iso))),
         }
 
@@ -926,7 +958,8 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center")
     ws.auto_filter.ref = f"A1:{get_column_letter(len(DIFF_COLUMNS))}1"
-    ws.freeze_panes = "A2"
+    # 識別3列(氏名/対象日付/差異種別=A〜C)とヘッダー行を固定。右に行っても誰の行か見失わない。
+    ws.freeze_panes = "D2"
 
     # データ行（列名→値の対応で書き込み、列順の変更に強くする）
     for r_idx, drow in enumerate(diff_rows, start=2):
@@ -949,6 +982,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "差分(分)": drow.diff_minutes,
             "警告レベル": drow.warn_level,
             "警告理由": drow.warn_reason,
+            "打刻時コメント": drow.punch_comment,
             "打刻修正時コメント": drow.jinjer_stamp_comment,
             "自動修正提案値": drow.auto_fix_value,
             "人間判断": "",        # プルダウンで入力
@@ -990,7 +1024,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
         "警告レベル": 10, "警告理由": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
-        "打刻修正時コメント": 40,
+        "打刻時コメント": 40, "打刻修正時コメント": 40,
         "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
         "実績確定状況": 12, "元突合結果ファイル": 32,
     }
