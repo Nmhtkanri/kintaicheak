@@ -66,8 +66,10 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 # ※ quick_export 側は列名で読むため、列順を変えても後方互換は保たれる。
 DIFF_COLUMNS = [
     "行ID", "従業員ID", "氏名", "対象日付",
-    # 汎用データから転記する予定・有休・休日休暇（その日の前提情報。参考表示のみ）
-    "出勤予定", "退勤予定", "休憩予定", "有休", "AM有休", "PM有休",
+    # 汎用データから転記する予定・休日休暇（その日の前提情報。参考表示のみ）
+    # ※「有休/AM有休/PM有休」は汎用データ194列に該当列が無く常に空のため出力しない。
+    #   休暇情報は「休日休暇名1 / 休日休暇名1：種別」で表示する。
+    "出勤予定", "退勤予定", "休憩予定",
     "休日休暇名1", "休日休暇名1：種別",
     "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
     "警告レベル", "警告理由",
@@ -361,6 +363,79 @@ def _input_files(path: Path, patterns: list[str]) -> list[Path]:
     for pattern in patterns:
         files.extend(sorted(path.glob(pattern)))
     return files
+
+
+def _parse_jp_date(value: Any) -> str | None:
+    """'2026年05月07日' / 'YYYY-MM-DD' / 'YYYY/M/D' を 'YYYY-MM-DD' に正規化。"""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    m = re.match(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+        except ValueError:
+            return None
+    return normalize_date_iso(value)
+
+
+def load_stamp_correction_reasons(
+    path: Path, logs: list[LogEntry]
+) -> dict[tuple[str, str], list[dict]]:
+    """jinjer「申請データ（打刻修正申請）」CSV を読み、(従業員ID, 日付ISO)→[{type,method,comment}] を返す。
+
+    打刻修正申請の「理由」列が従業員コメント。理由が空の申請は除外する。
+    同一(emp,date)に複数申請があれば全て保持し、フォーマット時に結合する。
+    """
+    result: dict[tuple[str, str], list[dict]] = {}
+    if not path.exists():
+        logs.append(LogEntry("WARN", f"申請データCSVが見つかりません: {path}"))
+        return result
+
+    total = 0
+    for f in _input_files(path, ["*.csv"]):
+        if f.name.startswith("~$"):
+            continue
+        df = None
+        for enc in ("cp932", "utf-8-sig", "utf-8"):
+            try:
+                df = pd.read_csv(f, encoding=enc, dtype=object)
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                logs.append(LogEntry("WARN", f"申請データCSV読込失敗: {f.name}: {e}"))
+                df = None
+                break
+        if df is None:
+            continue
+
+        cols = {str(c).strip(): c for c in df.columns}
+        emp_col, date_col, reason_col = cols.get("従業員ID"), cols.get("日付"), cols.get("理由")
+        status_col = cols.get("ステータス")
+        if not (emp_col and date_col and reason_col):
+            logs.append(LogEntry(
+                "WARN", f"申請データCSVに必要列(従業員ID/日付/理由)がありません: {f.name}"))
+            continue
+
+        for _, row in df.iterrows():
+            reason = str(row.get(reason_col) or "").strip()
+            if not reason or reason.lower() == "nan":
+                continue
+            emp_id = str(row.get(emp_col) or "").strip()
+            date_iso = _parse_jp_date(row.get(date_col))
+            if not emp_id or not date_iso:
+                continue
+            status = str(row.get(status_col) or "").strip() if status_col else ""
+            comment = f"{reason}（{status}）" if status and status.lower() != "nan" else reason
+            result.setdefault((emp_id, date_iso), []).append(
+                {"type": "", "method": "", "comment": comment}
+            )
+            total += 1
+
+    logs.append(LogEntry(
+        "INFO", f"申請データCSVから打刻修正理由 {total} 件（{len(result)} (emp,date)）を読込"))
+    return result
 
 
 def load_kintai_results(kintai_dir: Path, logs: list[LogEntry]) -> pd.DataFrame:
@@ -964,8 +1039,14 @@ def run_quick_compare(
     output_path: Path,
     month_label: str,
     log_func=print,
+    application_csv: Path | None = None,
 ) -> CompareResult:
-    """突合結果xlsx + jinjer CSV → 差異一覧xlsx を生成する。CLI と Web UI から共用。"""
+    """突合結果xlsx + jinjer CSV → 差異一覧xlsx を生成する。CLI と Web UI から共用。
+
+    application_csv: jinjer「申請データ（打刻修正申請）」CSV のパス（任意）。
+    指定すると「打刻修正時コメント」列にその「理由」を併記する。未指定なら attendances API
+    の打刻コメントにフォールバックする。
+    """
     logs: list[LogEntry] = []
     result = CompareResult(ok=False, output_path=output_path, logs=logs)
 
@@ -1008,26 +1089,30 @@ def run_quick_compare(
         ))
     log_func(f"[info] 予定/有休 転記列の解決: {extra_cols}")
 
-    # jinjer 打刻コメント（打刻修正申請の従業員コメント等）を attendances API から取得。
-    # 取得できなくても差異一覧は生成する（コメント欄が空になるだけ）。
+    # 「打刻修正時コメント」列の元データ。申請データCSVが指定されていればその「理由」を最優先。
+    # 未指定なら attendances API の打刻コメントにフォールバック。いずれも取得できなくても続行。
     stamp_comments: dict[tuple[str, str], list[dict]] = {}
-    checked_emp_ids = sorted({
-        eid for n in kintai_df["氏名"].dropna().unique()
-        if (eid := resolve_emp_id(str(n).strip(), name_map))
-    })
-    if checked_emp_ids and re.fullmatch(r"\d{4}-\d{2}", str(month_label or "").strip()):
-        try:
-            from services.jinjer_api_client import fetch_stamp_comments
-            stamp_comments = fetch_stamp_comments(checked_emp_ids, str(month_label).strip())
-            log_func(f"[info] jinjer 打刻コメント取得: {len(stamp_comments)} (emp,date) 件")
-        except Exception as e:  # 認証失敗・通信不可など。差異一覧は続行する。
-            logs.append(LogEntry("WARN", f"jinjer 打刻コメント取得に失敗（コメント欄は空で続行）: {e}"))
-            log_func(f"[warn] jinjer 打刻コメント取得に失敗: {e}")
+    if application_csv is not None:
+        stamp_comments = load_stamp_correction_reasons(application_csv, logs)
+        log_func(f"[info] 申請データCSVから打刻修正理由: {len(stamp_comments)} (emp,date) 件")
     else:
-        logs.append(LogEntry(
-            "INFO",
-            f"打刻コメント取得をスキップ（対象月={month_label} / 対象ID数={len(checked_emp_ids)}）",
-        ))
+        checked_emp_ids = sorted({
+            eid for n in kintai_df["氏名"].dropna().unique()
+            if (eid := resolve_emp_id(str(n).strip(), name_map))
+        })
+        if checked_emp_ids and re.fullmatch(r"\d{4}-\d{2}", str(month_label or "").strip()):
+            try:
+                from services.jinjer_api_client import fetch_stamp_comments
+                stamp_comments = fetch_stamp_comments(checked_emp_ids, str(month_label).strip())
+                log_func(f"[info] jinjer 打刻コメント取得(API): {len(stamp_comments)} (emp,date) 件")
+            except Exception as e:  # 認証失敗・通信不可など。差異一覧は続行する。
+                logs.append(LogEntry("WARN", f"jinjer 打刻コメント取得に失敗（コメント欄は空で続行）: {e}"))
+                log_func(f"[warn] jinjer 打刻コメント取得に失敗: {e}")
+        else:
+            logs.append(LogEntry(
+                "INFO",
+                f"打刻コメント取得をスキップ（申請データCSV未指定 / 対象月={month_label} / 対象ID数={len(checked_emp_ids)}）",
+            ))
 
     diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs, extra_cols, stamp_comments)
     result.diff_count = len(diff_rows)
@@ -1056,6 +1141,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--month", required=True, help="対象月 YYYY-MM (例: 2026-05)")
     p.add_argument("--kintai-dir", required=True, help="突合結果xlsx 格納フォルダ")
     p.add_argument("--jinjer-dir", required=True, help="jinjer 汎用データCSV 格納フォルダ")
+    p.add_argument("--application-csv", default="", help="jinjer 申請データ(打刻修正申請) CSV（任意）")
     p.add_argument("--output", required=True, help="出力 xlsx パス")
     return p.parse_args()
 
@@ -1070,11 +1156,13 @@ def _unquote_path(s: str) -> str:
 
 def main() -> int:
     args = parse_args()
+    app_csv = _unquote_path(args.application_csv)
     result = run_quick_compare(
         kintai_dir=Path(_unquote_path(args.kintai_dir)),
         jinjer_dir=Path(_unquote_path(args.jinjer_dir)),
         output_path=Path(_unquote_path(args.output)),
         month_label=args.month,
+        application_csv=Path(app_csv) if app_csv else None,
     )
     return 0 if result.ok else 1
 

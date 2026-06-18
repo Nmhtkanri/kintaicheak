@@ -279,6 +279,12 @@
                        style="width:100%; padding:6px 10px; margin-top:4px">
                 <div class="hint" style="margin-top:4px">手順1で使った勤怠CSVではなく、jinjerから出した汎用データCSVを指定します。</div>
             </label>
+            <label>
+                jinjer 申請データ（打刻修正申請）CSV（任意・ファイルまたは保存フォルダ）:
+                <input type="text" id="qc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">指定すると「打刻修正時コメント」列に申請理由を併記します。jinjer管理画面 → データ出力 →「申請データ（打刻修正申請）」でDLしたCSVです。空欄でもOK。</div>
+            </label>
             <label style="display:inline-flex; align-items:center; gap:6px">
                 対象月:
                 <input type="text" id="qc-month" placeholder="2026-05"
@@ -403,6 +409,7 @@
         const fd = new FormData();
         fd.append('kintai_dir', document.getElementById('qc-kintai-dir').value);
         fd.append('jinjer_dir', document.getElementById('qc-jinjer-dir').value);
+        fd.append('application_csv', document.getElementById('qc-application-csv').value);
         fd.append('month', document.getElementById('qc-month').value);
         fd.append('output_filename', document.getElementById('qc-output-filename').value);
 

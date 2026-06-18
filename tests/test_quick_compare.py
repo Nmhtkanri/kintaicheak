@@ -16,6 +16,7 @@ from quick_compare import (  # noqa: E402
     compute_diffs,
     format_stamp_comments,
     kintai_total_minutes,
+    load_stamp_correction_reasons,
     normalize_kintai_result_columns,
     resolve_jinjer_extra_columns,
     to_jinjer_overnight_punch_out,
@@ -131,8 +132,11 @@ def test_diff_columns_include_manual_review_fields():
 
 
 def test_diff_columns_include_schedule_and_leave_fields():
-    for col in ("出勤予定", "退勤予定", "休憩予定", "有休", "AM有休", "PM有休"):
+    for col in ("出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別"):
         assert col in DIFF_COLUMNS
+    # 有休/AM有休/PM有休 は汎用データ194列に該当列が無く常に空のため出力しない
+    for col in ("有休", "AM有休", "PM有休"):
+        assert col not in DIFF_COLUMNS
 
 
 def test_resolve_jinjer_extra_columns_exact_and_partial():
@@ -299,6 +303,34 @@ def test_stamp_comment_column_named_and_placed_next_to_input():
     assert "打刻修正時コメント" in DIFF_COLUMNS
     assert "jinjer打刻コメント" not in DIFF_COLUMNS
     assert DIFF_COLUMNS.index("打刻修正時コメント") + 1 == DIFF_COLUMNS.index("打刻修正")
+
+
+def test_load_stamp_correction_reasons(tmp_path):
+    """申請データCSVの「理由」を (従業員ID,日付ISO)→コメント に読み込む。理由空は除外。"""
+    import csv as _csv
+    from pathlib import Path
+
+    p = tmp_path / "app.csv"
+    with open(p, "w", encoding="cp932", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow([
+            "No.", "従業員ID", "従業員名", "所属グループ", "打刻グループ名", "日付",
+            "申請種別", "申請前", "申請内容", "理由", "ステータス", "承認者コメント",
+            "申請日時", "対応日時",
+        ])
+        w.writerow(["1", "2018012", "加藤 昌", "本部", "T2課", "2026年05月07日",
+                    "打刻修正申請", "なし", "出退勤 15:30~18:30", "午前休", "申請中", "", "", ""])
+        w.writerow(["2", "2018012", "加藤 昌", "本部", "T2課", "2026年05月16日",
+                    "打刻修正申請", "なし", "出退勤 09:00~17:30", "研修", "承認済", "", "", ""])
+        w.writerow(["3", "2018012", "加藤 昌", "本部", "T2課", "2026年05月18日",
+                    "打刻修正申請", "なし", "出退勤", "", "申請中", "", "", ""])  # 理由空→除外
+
+    logs: list[LogEntry] = []
+    d = load_stamp_correction_reasons(Path(p), logs)
+    assert d[("2018012", "2026-05-07")][0]["comment"] == "午前休（申請中）"
+    assert d[("2018012", "2026-05-16")][0]["comment"] == "研修（承認済）"
+    assert ("2018012", "2026-05-18") not in d
+    assert format_stamp_comments(d[("2018012", "2026-05-07")]) == "午前休（申請中）"
 
 
 def test_holiday_columns_transcribed_from_jinjer():

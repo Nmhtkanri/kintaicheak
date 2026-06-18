@@ -843,6 +843,7 @@ def route_quick_compare():
     """
     kintai_dir_str = _clean_path_input(request.form.get("kintai_dir"))
     jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
+    application_csv_str = _clean_path_input(request.form.get("application_csv"))
     month_label = (request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
 
@@ -856,6 +857,7 @@ def route_quick_compare():
 
     kintai_dir = _Path(kintai_dir_str) if kintai_dir_str else None
     jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
+    application_csv = _Path(application_csv_str) if application_csv_str else None
     if kintai_dir and not kintai_dir.exists():
         errors.append(f"勤怠突合結果xlsxまたはフォルダが見つかりません: {kintai_dir}")
     elif kintai_dir and kintai_dir.is_file() and kintai_dir.suffix.lower() != ".xlsx":
@@ -864,6 +866,9 @@ def route_quick_compare():
         errors.append(f"jinjer 汎用データCSVまたはフォルダが見つかりません: {jinjer_dir}")
     elif jinjer_dir and jinjer_dir.is_file() and jinjer_dir.suffix.lower() not in [".csv", ".xlsx"]:
         errors.append(f"jinjer 汎用データは .csv または .xlsx ファイルを指定してください: {jinjer_dir}")
+    # 申請データCSVは任意。指定された場合のみ存在チェック。
+    if application_csv and not application_csv.exists():
+        errors.append(f"申請データCSVまたはフォルダが見つかりません: {application_csv}")
 
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
@@ -887,6 +892,7 @@ def route_quick_compare():
             output_path=output_path,
             month_label=month_label,
             log_func=_log,
+            application_csv=application_csv,
         )
     except Exception as e:
         logger.exception("quick_compare failed")
