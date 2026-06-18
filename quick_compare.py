@@ -60,18 +60,21 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 
 # ===== 出力xlsx 列定義 =====
 # 「人間判断」を「自動修正提案値」の直後に置く。判断列を提案値のすぐ隣にすることで、
-# ユーザーが手入力欄（時刻を入れる列）へ承認/却下/保留を誤入力するのを防ぐ。
+# ユーザーが手入力欄（時刻を入れる列）へ 請求勤怠/jinjer勤怠/保留 を誤入力するのを防ぐ。
+# 判断値: 「請求勤怠」=請求勤怠を正としてjinjerへ書き戻す / 「jinjer勤怠」=jinjerを正（書き戻さない） / 「保留」。
 # 手入力欄（任意・上級者向け）は右側へ寄せる。
 # ※ quick_export 側は列名で読むため、列順を変えても後方互換は保たれる。
 DIFF_COLUMNS = [
     "行ID", "従業員ID", "氏名", "対象日付",
-    # 汎用データから転記する予定・有休（その日の前提情報。参考表示のみ）
+    # 汎用データから転記する予定・有休・休日休暇（その日の前提情報。参考表示のみ）
     "出勤予定", "退勤予定", "休憩予定", "有休", "AM有休", "PM有休",
+    "休日休暇名1", "休日休暇名1：種別",
     "差異種別", "請求勤怠値", "jinjer値", "差分(分)",
     "警告レベル", "警告理由",
-    "jinjer打刻コメント",  # 打刻修正申請の従業員コメント等（attendances API より）
     "自動修正提案値",
     "人間判断", "判断メモ",
+    # 打刻修正申請の従業員コメント等（attendances API より）。打刻修正の手入力欄の隣に置く。
+    "打刻修正時コメント",
     "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
     "実績確定状況",  # 参考表示のみ。警告レベル判定には使わない
     "元突合結果ファイル",
@@ -86,6 +89,9 @@ JINJER_EXTRA_COLUMNS: dict[str, tuple[list[str], bool]] = {
     "有休": (["有休"], True),
     "AM有休": (["AM有休"], True),
     "PM有休": (["PM有休"], True),
+    # 休日休暇名1 は「休日休暇名1：種別」の部分文字列なので完全一致のみ（誤ヒット防止）。
+    "休日休暇名1": (["休日休暇名1"], True),
+    "休日休暇名1：種別": (["休日休暇名1：種別"], True),
 }
 
 
@@ -152,7 +158,10 @@ class DiffRow:
     yukyu: str = ""
     am_yukyu: str = ""
     pm_yukyu: str = ""
-    # jinjer 打刻コメント（打刻修正申請の従業員コメント等。同一 emp/date の全差異行に併記）
+    # 汎用データの休日休暇名1 / 休日休暇名1：種別（参考表示）
+    holiday_name1: str = ""
+    holiday_name1_type: str = ""
+    # 打刻修正時コメント（打刻修正申請の従業員コメント等。同一 emp/date の全差異行に併記）
     jinjer_stamp_comment: str = ""
 
 
@@ -571,6 +580,8 @@ def compute_diffs(
             "yukyu": _extra("有休"),
             "am_yukyu": _extra("AM有休"),
             "pm_yukyu": _extra("PM有休"),
+            "holiday_name1": _extra("休日休暇名1"),
+            "holiday_name1_type": _extra("休日休暇名1：種別"),
             "jinjer_stamp_comment": format_stamp_comments(stamp_comments.get((emp_id, date_iso))),
         }
 
@@ -819,8 +830,8 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         ("WARN 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_WARN)),
         ("INFO 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_INFO)),
         ("人間判断: 未判断", len(diff_rows)),
-        ("人間判断: 承認", 0),
-        ("人間判断: 却下", 0),
+        ("人間判断: 請求勤怠を正", 0),
+        ("人間判断: jinjer勤怠を正", 0),
         ("人間判断: 保留", 0),
         ("生成日時", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     ]
@@ -855,13 +866,15 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "有休": drow.yukyu,
             "AM有休": drow.am_yukyu,
             "PM有休": drow.pm_yukyu,
+            "休日休暇名1": drow.holiday_name1,
+            "休日休暇名1：種別": drow.holiday_name1_type,
             "差異種別": drow.kind,
             "請求勤怠値": drow.kintai_value,
             "jinjer値": drow.jinjer_value,
             "差分(分)": drow.diff_minutes,
             "警告レベル": drow.warn_level,
             "警告理由": drow.warn_reason,
-            "jinjer打刻コメント": drow.jinjer_stamp_comment,
+            "打刻修正時コメント": drow.jinjer_stamp_comment,
             "自動修正提案値": drow.auto_fix_value,
             "人間判断": "",        # プルダウンで入力
             "判断メモ": "",
@@ -885,11 +898,11 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     if diff_rows:
         dv = DataValidation(
             type="list",
-            formula1='"承認,却下,保留"',
+            formula1='"請求勤怠,jinjer勤怠,保留"',
             allow_blank=True,
             showErrorMessage=True,
             errorTitle="不正な値",
-            error="承認 / 却下 / 保留 のいずれかを選択してください",
+            error="請求勤怠 / jinjer勤怠 / 保留 のいずれかを選択してください",
         )
         ws.add_data_validation(dv)
         dv.add(f"{judge_col_letter}2:{judge_col_letter}{1 + len(diff_rows)}")
@@ -898,9 +911,11 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     width_map = {
         "行ID": 6, "従業員ID": 12, "氏名": 16, "対象日付": 12,
         "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "有休": 8, "AM有休": 8, "PM有休": 8,
+        "休日休暇名1": 14, "休日休暇名1：種別": 12,
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
-        "警告レベル": 10, "警告理由": 40, "jinjer打刻コメント": 40, "自動修正提案値": 14,
+        "警告レベル": 10, "警告理由": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
+        "打刻修正時コメント": 40,
         "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
         "実績確定状況": 12, "元突合結果ファイル": 32,
     }

@@ -56,12 +56,18 @@ DIFF_KIND_PUNCH_OUT = "退勤"
 DIFF_KIND_BREAK = "休憩"
 DIFF_KIND_TOTAL = "総労働時間"
 
-JUDGE_APPROVE = "承認"
-JUDGE_REJECT = "却下"
+# 人間判断の値。新ラベル: 「請求勤怠」=請求勤怠を正としてjinjerへ書き戻す（旧「承認」）/
+# 「jinjer勤怠」=jinjerを正（書き戻さない・旧「却下」）/「保留」。
+# すでに「承認/却下」で入力済みの差異一覧も読めるよう、旧ラベルも後方互換で受理する。
+JUDGE_APPROVE = "請求勤怠"
+JUDGE_REJECT = "jinjer勤怠"
 JUDGE_HOLD = "保留"
-JUDGMENTS = {JUDGE_APPROVE, JUDGE_REJECT, JUDGE_HOLD}
+APPROVE_LABELS = {JUDGE_APPROVE, "承認"}      # 請求勤怠を正 → 書き戻す
+REJECT_LABELS = {JUDGE_REJECT, "却下"}        # jinjer勤怠を正 → 書き戻さない
+HOLD_LABELS = {JUDGE_HOLD}
+JUDGMENTS = APPROVE_LABELS | REJECT_LABELS | HOLD_LABELS
 
-# 「人間判断」を入力すべきなのに、誤って判断（承認/却下/保留）が書き込まれやすい列。
+# 「人間判断」を入力すべきなのに、誤って判断（請求勤怠/jinjer勤怠/保留）が書き込まれやすい列。
 # 本来これらの列には時刻・数値・メモが入るため、判断キーワードが入っていたら
 # 「人間判断」列の入力ミスとみなして回収する（先頭ほど優先）。
 MISPLACED_JUDGE_COLS = [
@@ -242,12 +248,12 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
                     stats.misplaced_by_col[col] = stats.misplaced_by_col.get(col, 0) + 1
                     break
 
-        if judge == JUDGE_APPROVE:
+        if judge in APPROVE_LABELS:
             stats.approved += 1
-        elif judge == JUDGE_REJECT:
+        elif judge in REJECT_LABELS:
             stats.rejected += 1
             continue
-        elif judge == JUDGE_HOLD:
+        elif judge in HOLD_LABELS:
             stats.held += 1
             continue
         else:
@@ -313,7 +319,7 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
         )
         stats.warnings.insert(
             0,
-            f"⚠️ 判断（承認/却下/保留）が「人間判断」列ではなく {detail} に入力されていました。"
+            f"⚠️ 判断（請求勤怠/jinjer勤怠/保留）が「人間判断」列ではなく {detail} に入力されていました。"
             f"合計 {stats.recovered_misplaced} 件を自動で回収して処理しました。"
             "次回は必ず「人間判断」列（プルダウンのある列）に入力してください。",
         )
@@ -530,11 +536,11 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     mode = "[dry-run]" if dry_run else "[execute]"
     print()
     print(f"{mode} ===== 差異一覧の判断状況 =====")
-    print(f"  総差異件数 : {stats.total_diff_rows}")
-    print(f"  承認       : {stats.approved}")
-    print(f"  却下       : {stats.rejected}")
-    print(f"  保留       : {stats.held}")
-    print(f"  未判断     : {stats.pending}")
+    print(f"  総差異件数      : {stats.total_diff_rows}")
+    print(f"  請求勤怠を正(書戻): {stats.approved}")
+    print(f"  jinjer勤怠を正    : {stats.rejected}")
+    print(f"  保留            : {stats.held}")
+    print(f"  未判断          : {stats.pending}")
     if stats.recovered_misplaced:
         detail = "、".join(f"{col}={cnt}" for col, cnt in stats.misplaced_by_col.items())
         print(f"  ※ 判断の列ミスを回収: {stats.recovered_misplaced} 件 ({detail})")

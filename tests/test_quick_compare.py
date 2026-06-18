@@ -294,6 +294,36 @@ def test_compute_diffs_attaches_stamp_comment():
     assert punch_rows[0].jinjer_stamp_comment == "出勤[打刻修正申請] KDX出社"
 
 
-def test_jinjer_stamp_comment_column_present():
-    """差異一覧の列定義に打刻コメント列が含まれる。"""
-    assert "jinjer打刻コメント" in DIFF_COLUMNS
+def test_stamp_comment_column_named_and_placed_next_to_input():
+    """打刻コメント列は『打刻修正時コメント』という名前で、手入力『打刻修正』列の隣に置く。"""
+    assert "打刻修正時コメント" in DIFF_COLUMNS
+    assert "jinjer打刻コメント" not in DIFF_COLUMNS
+    assert DIFF_COLUMNS.index("打刻修正時コメント") + 1 == DIFF_COLUMNS.index("打刻修正")
+
+
+def test_holiday_columns_transcribed_from_jinjer():
+    """汎用データの 休日休暇名1 / 休日休暇名1：種別 が差異行へ転記される。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:30", "出勤差分(分)": 30,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    jrow = _jinjer_row(**{"休日休暇名1": "有給休暇", "休日休暇名1：種別": "1"})
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    assert extra_cols.get("休日休暇名1") == "休日休暇名1"
+    assert extra_cols.get("休日休暇名1：種別") == "休日休暇名1：種別"
+
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): jrow},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+        extra_cols,
+    )
+    punch_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_IN]
+    assert punch_rows
+    assert punch_rows[0].holiday_name1 == "有給休暇"
+    assert punch_rows[0].holiday_name1_type == "1"

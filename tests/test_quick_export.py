@@ -274,3 +274,44 @@ def test_run_quick_export_ignores_judgment_keyword_as_time(tmp_path):
 
     assert result.ok
     assert _read_output_row(output_path)["退勤1"] == "18:10"
+
+
+def test_run_quick_export_label_seikyuukintai_overwrites(tmp_path):
+    """新ラベル「請求勤怠」=請求勤怠を正 → jinjer へ書き戻す。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01", "差異種別": "出勤",
+        "自動修正提案値": "8:30", "人間判断": "請求勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert _read_output_row(output_path)["出勤1"] == "8:30"
+    assert result.stats.approved == 1
+
+
+def test_run_quick_export_label_jinjer_keeps_jinjer(tmp_path):
+    """新ラベル「jinjer勤怠」=jinjerを正 → 書き戻さない。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01", "差異種別": "出勤",
+        "自動修正提案値": "8:30", "人間判断": "jinjer勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert _read_output_row(output_path)["出勤1"] == "9:00"  # 書き戻さない
+    assert result.stats.approved == 0
+    assert result.stats.rejected == 1
