@@ -30,6 +30,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import CellIsRule
 
 
 # ===== jinjer CSV の列マップ（1-indexed、ヘッダー名で照合する想定だが定数として控えておく） =====
@@ -1044,7 +1045,21 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             error="請求勤怠 / jinjer勤怠 / 保留 のいずれかを選択してください",
         )
         ws.add_data_validation(dv)
-        dv.add(f"{judge_col_letter}2:{judge_col_letter}{1 + len(diff_rows)}")
+        judge_range = f"{judge_col_letter}2:{judge_col_letter}{1 + len(diff_rows)}"
+        dv.add(judge_range)
+
+        # 人間判断の選択値に応じてセル色を変える（条件付き書式。選んだ瞬間に反映される）
+        # 保留 → 背景赤・太字白 ／ jinjer勤怠 → 背景黄・太字黒
+        ws.conditional_formatting.add(judge_range, CellIsRule(
+            operator="equal", formula=['"保留"'],
+            fill=PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid"),
+            font=Font(bold=True, color="FFFFFF"),
+        ))
+        ws.conditional_formatting.add(judge_range, CellIsRule(
+            operator="equal", formula=['"jinjer勤怠"'],
+            fill=PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"),
+            font=Font(bold=True, color="000000"),
+        ))
 
     # 列幅（列名で指定。列順を変えても崩れない）
     width_map = {

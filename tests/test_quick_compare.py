@@ -342,6 +342,35 @@ def test_schedule_leave_columns_left_of_judgment():
         assert DIFF_COLUMNS.index(col) < DIFF_COLUMNS.index("人間判断")
 
 
+def test_human_judgment_conditional_formatting(tmp_path):
+    """人間判断の値に応じた条件付き書式（保留/jinjer勤怠）が差異一覧に入る。"""
+    import html
+    import zipfile
+    from quick_compare import write_excel, DiffRow
+
+    drow = DiffRow(
+        row_id=1, emp_id="1001", name="山田 太郎", target_date="2026-05-01", kind="出勤",
+        kintai_value="9:00", jinjer_value="9:30", diff_minutes="30",
+        warn_level="INFO", warn_reason="", auto_fix_value="9:00",
+        finalized="", source_file="x.xlsx",
+    )
+    out = tmp_path / "d.xlsx"
+    write_excel(out, [drow], [], "2026-05")
+
+    with zipfile.ZipFile(out) as z:
+        sheets = " ".join(
+            z.read(n).decode("utf-8") for n in z.namelist()
+            if n.startswith("xl/worksheets/sheet")
+        )
+    assert "conditionalFormatting" in sheets
+    # openpyxl は数式内の日本語を数値文字参照にエスケープするので unescape して判定
+    decoded = html.unescape(sheets)
+    assert '"保留"' in decoded
+    assert '"jinjer勤怠"' in decoded
+    # cellIs ルールが2件（保留 / jinjer勤怠）入っている
+    assert decoded.count('type="cellIs"') >= 2
+
+
 def test_compute_diffs_sets_triage_default():
     """コメント無し・小差分の出勤差異 → 自動採用(請求勤怠) が既定セットされる。"""
     from services.triage import TRIAGE_AUTO_KINTAI
