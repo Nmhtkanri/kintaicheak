@@ -328,10 +328,18 @@ def test_clean_punch_comment():
 
 
 def test_triage_column_present_and_placed():
-    """トリアージ区分は警告レベルとコメント列の間に置く。"""
-    assert "トリアージ区分" in DIFF_COLUMNS
-    assert DIFF_COLUMNS.index("警告レベル") < DIFF_COLUMNS.index("トリアージ区分")
-    assert DIFF_COLUMNS.index("トリアージ区分") < DIFF_COLUMNS.index("打刻時コメント")
+    """確認区分（旧トリアージ区分）は差分とコメント列の間に置く。警告レベル列は廃止。"""
+    assert "確認区分" in DIFF_COLUMNS
+    assert "トリアージ区分" not in DIFF_COLUMNS
+    assert "警告レベル" not in DIFF_COLUMNS
+    assert DIFF_COLUMNS.index("差分(分)") < DIFF_COLUMNS.index("確認区分")
+    assert DIFF_COLUMNS.index("確認区分") < DIFF_COLUMNS.index("打刻時コメント")
+
+
+def test_schedule_leave_columns_left_of_judgment():
+    """有休も判断材料なので、予定/休日休暇は人間判断より左に置く。"""
+    for col in ("出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別"):
+        assert DIFF_COLUMNS.index(col) < DIFF_COLUMNS.index("人間判断")
 
 
 def test_compute_diffs_sets_triage_default():

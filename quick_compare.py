@@ -72,19 +72,19 @@ DIFF_COLUMNS = [
     # 識別（ウィンドウ枠固定）
     "氏名", "対象日付", "差異種別",
     # すぐ見る（差異の中身）
-    "請求勤怠値", "jinjer値", "差分(分)", "警告レベル",
-    # トリアージ区分（要確認/自動採用/自動OK）
-    "トリアージ区分",
-    # 判断の根拠（人間判断の左にまとめる）
+    "請求勤怠値", "jinjer値", "差分(分)",
+    # 確認区分（要確認/自動採用/自動OK/参考のみ）。深刻さは色＋警告理由で表す（警告レベル列は廃止）
+    "確認区分",
+    # 判断の根拠（人間判断の左にまとめる）。有休も判断材料なので予定/休日休暇もここに置く。
     "打刻時コメント",       # 汎用データ#96「打刻時コメント」より（出勤:/退勤: 両方）
     "打刻修正時コメント",   # 申請データCSVの「理由」より
     "警告理由",
+    "出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別",
     # 判断（入力）
     "人間判断", "判断メモ",
     # 反映（手入力・普段使わない）
     "自動修正提案値", "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
-    # 参考（右端・普段見ない）。予定/休日休暇/実績確定/ID/トレーサビリティ
-    "出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別",
+    # 参考（右端・普段見ない）。実績確定/ID/トレーサビリティ
     "実績確定状況", "従業員ID", "行ID", "元突合結果ファイル",
 ]
 
@@ -769,23 +769,9 @@ def compute_diffs(
             ))
             next_id += 1
 
-        # ----- 休憩警告 / 総労働時間差異 -----
+        # ----- 総労働時間差異 -----
+        # 「休憩」の突合は廃止（総労働時間が正味で突合されるため不要）。
         if jrow is not None:
-            break_warn = classify_break(jrow)
-            if break_warn:
-                level, reason, j_break = break_warn
-                rows.append(DiffRow(
-                    row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
-                    kind=DIFF_KIND_BREAK,
-                    kintai_value="-", jinjer_value=j_break, diff_minutes="",
-                    warn_level=level, warn_reason=reason,
-                    auto_fix_value="",  # 休憩は自動反映しない
-                    finalized=finalized,
-                    source_file=source_file,
-                    **extra,
-                ))
-                next_id += 1
-
             k_total_min, k_total = kintai_total_minutes(krow)
             j_total = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
             j_total_min = parse_hhmm(j_total)
@@ -976,8 +962,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         ("参考のみ 件数（判断不要）", info_only_cnt),
         ("出勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_IN)),
         ("退勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_OUT)),
-        ("休憩警告件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_BREAK)),
-        ("総労働時間警告件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_TOTAL)),
+        ("総労働時間差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_TOTAL)),
         ("DANGER 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_DANGER)),
         ("WARN 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_WARN)),
         ("INFO 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_INFO)),
@@ -1021,8 +1006,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "請求勤怠値": drow.kintai_value,
             "jinjer値": drow.jinjer_value,
             "差分(分)": drow.diff_minutes,
-            "警告レベル": drow.warn_level,
-            "トリアージ区分": drow.triage,
+            "確認区分": drow.triage,
             "警告理由": drow.warn_reason,
             "打刻時コメント": drow.punch_comment,
             "打刻修正時コメント": drow.jinjer_stamp_comment,
@@ -1039,14 +1023,14 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         for c_idx, header in enumerate(DIFF_COLUMNS, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=row_values.get(header, ""))
             cell.alignment = Alignment(vertical="center")
-        # 警告レベル列に色塗り
+        # 深刻さ（DANGER/WARN/INFO）は「警告理由」セルの色で表す（警告レベル列は廃止）
         fill = LEVEL_FILL.get(drow.warn_level)
         if fill:
-            ws.cell(row=r_idx, column=DIFF_COLUMNS.index("警告レベル") + 1).fill = fill
-        # トリアージ区分列に色塗り（要確認を目立たせる）
+            ws.cell(row=r_idx, column=DIFF_COLUMNS.index("警告理由") + 1).fill = fill
+        # 確認区分セルに色塗り（要確認を目立たせる）
         tfill = TRIAGE_FILL.get(drow.triage)
         if tfill:
-            ws.cell(row=r_idx, column=DIFF_COLUMNS.index("トリアージ区分") + 1).fill = tfill
+            ws.cell(row=r_idx, column=DIFF_COLUMNS.index("確認区分") + 1).fill = tfill
 
     # データ検証プルダウン: 人間判断
     judge_col_letter = get_column_letter(DIFF_COLUMNS.index("人間判断") + 1)
@@ -1068,7 +1052,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "有休": 8, "AM有休": 8, "PM有休": 8,
         "休日休暇名1": 14, "休日休暇名1：種別": 12,
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
-        "警告レベル": 10, "トリアージ区分": 14, "警告理由": 40, "自動修正提案値": 14,
+        "確認区分": 14, "警告理由": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
         "打刻時コメント": 40, "打刻修正時コメント": 40,
         "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,

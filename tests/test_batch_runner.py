@@ -57,7 +57,7 @@ def test_run_batch_compare_end_to_end(tmp_path):
     assert out.exists()
     # 差異一覧シートに出勤差異が出る
     df = pd.read_excel(out, sheet_name="差異一覧", dtype=object)
-    assert "トリアージ区分" in df.columns
+    assert "確認区分" in df.columns
     assert (df["差異種別"] == "出勤").any()
     # 未処理・未マッチシートが追記されている
     xl = pd.ExcelFile(out)
