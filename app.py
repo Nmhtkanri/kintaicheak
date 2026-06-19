@@ -38,6 +38,7 @@ from services.multi_year_shift_parser import parse_structured_files
 from pathlib import Path as _Path
 from quick_compare import run_quick_compare
 from quick_export import run_quick_export
+from services.batch_runner import run_batch_compare
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -916,6 +917,91 @@ def route_quick_compare():
     }
     if not result.ok:
         payload["errors"] = [result.error] if result.error else ["差異一覧生成に失敗しました"]
+        return jsonify(payload), 500
+    return jsonify(payload)
+
+
+@app.route("/batch_compare", methods=["POST"])
+def route_batch_compare():
+    """請求勤怠フォルダ + jinjer 汎用データ + 申請データ → 突合→差異一覧 を一括生成（機能3）
+
+    フォーム:
+      - timesheet_dir   : 請求勤怠フォルダ（または単一ファイル）の絶対パス
+      - jinjer_dir      : jinjer 汎用データCSV（ファイル or フォルダ）
+      - application_csv : jinjer 申請データ（打刻修正申請）CSV（任意）
+      - month           : YYYY-MM
+      - output_filename : 任意
+    手順1(突合)を内部で実行し、手順2(差異一覧＋トリアージ)まで一括で行う。
+    """
+    timesheet_dir_str = _clean_path_input(request.form.get("timesheet_dir"))
+    jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
+    application_csv_str = _clean_path_input(request.form.get("application_csv"))
+    month_label = (request.form.get("month") or "").strip()
+    output_filename = (request.form.get("output_filename") or "").strip()
+
+    errors = []
+    if not timesheet_dir_str:
+        errors.append("請求勤怠フォルダ（またはファイル）のパスを入力してください")
+    if not jinjer_dir_str:
+        errors.append("jinjer 汎用データCSV（またはフォルダ）のパスを入力してください")
+    if not month_label:
+        errors.append("対象月（YYYY-MM）を入力してください")
+
+    timesheet_dir = _Path(timesheet_dir_str) if timesheet_dir_str else None
+    jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
+    application_csv = _Path(application_csv_str) if application_csv_str else None
+    if timesheet_dir and not timesheet_dir.exists():
+        errors.append(f"請求勤怠フォルダ/ファイルが見つかりません: {timesheet_dir}")
+    if jinjer_dir and not jinjer_dir.exists():
+        errors.append(f"jinjer 汎用データが見つかりません: {jinjer_dir}")
+    if application_csv and not application_csv.exists():
+        errors.append(f"申請データCSVが見つかりません: {application_csv}")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    if not output_filename:
+        ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"差異一覧_{month_label}_{ts}.xlsx"
+    output_filename = _ensure_extension(os.path.basename(output_filename), ".xlsx")
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result, skipped, unsubmitted = run_batch_compare(
+            timesheet_dir=timesheet_dir,
+            jinjer_dir=jinjer_dir,
+            output_path=output_path,
+            month_label=month_label,
+            application_csv=application_csv,
+            log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("batch_compare failed")
+        return jsonify({"success": False, "errors": [str(e)], "log": log_lines}), 500
+
+    payload = {
+        "success": result.ok,
+        "download_url": f"/download/{output_filename}" if result.ok else None,
+        "output_filename": output_filename,
+        "stats": {
+            "diff_count": result.diff_count,
+            "danger_count": result.danger_count,
+            "warn_count": result.warn_count,
+            "info_count": result.info_count,
+            "skipped_count": len(skipped),
+            "unsubmitted_count": len(unsubmitted),
+        },
+        "skipped": [{"file": n, "reason": r} for n, r in skipped[:50]],
+        "unsubmitted": unsubmitted[:100],
+        "logs": [{"severity": e.severity, "message": e.message, "source": e.source} for e in result.logs],
+        "console": log_lines,
+    }
+    if not result.ok:
+        payload["errors"] = [result.error] if result.error else ["一括生成に失敗しました"]
         return jsonify(payload), 500
     return jsonify(payload)
 

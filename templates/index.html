@@ -254,6 +254,66 @@
     </div>
 
     <!-- ============================================================ -->
+    <!-- 一括モード — batch_compare（手順1+2を一発）                    -->
+    <!-- ============================================================ -->
+    <div class="workflow-card" id="batch-compare-card" style="border:2px solid #2E75B6">
+        <div class="step-header">
+            <div>
+                <div class="step-number" style="background:#2E75B6">⚡</div>
+                <div class="step-copy">
+                    <div class="section-title">おすすめ：請求勤怠フォルダから差異一覧を一発生成（手順1＋2を自動）</div>
+                    <p class="hint">グループの請求勤怠フォルダ・jinjer汎用データ・申請データ・対象月を指定すると、突合（手順1）と差異一覧＋トリアージ（手順2）をまとめて実行します。ファイルを1枚ずつアップロードする必要はありません。グループ単位で実行してください（グループはまたがない）。</p>
+                </div>
+            </div>
+        </div>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label>
+                請求勤怠フォルダ（または単一ファイル）:
+                <input type="text" id="bc-timesheet-dir" placeholder="例: Y:\給与明細\R8年\6月\請求勤怠データ\SAP_Fieldglass"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">フォルダ内（サブフォルダ含む）の請求勤怠を自動で形式判定して解析します（PDF等はAIで読むため少し時間がかかります）。</div>
+            </label>
+            <label>
+                jinjer 汎用データCSV（ファイルまたは保存フォルダ）:
+                <input type="text" id="bc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\6月\jinjer勤怠データ\…汎用データ.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">突合の打刻照合にも、差異一覧の集計列にも、この1本を使います（手順1用の別CSVは不要）。</div>
+            </label>
+            <label>
+                jinjer 申請データ（打刻修正申請）CSV（任意）:
+                <input type="text" id="bc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">指定すると「打刻修正時コメント」列に申請理由を併記します。空欄でもOK。</div>
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px">
+                対象月:
+                <input type="text" id="bc-month" placeholder="2026-05" style="width:140px; padding:6px 10px">
+            </label>
+            <label>
+                出力ファイル名(任意・.xlsxは自動で付きます):
+                <input type="text" id="bc-output-filename" placeholder="差異一覧_2026-05.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <div style="margin-top:6px">
+                <button type="button" class="btn btn-primary" id="bc-run-btn">⚡ 一発で差異一覧を生成</button>
+                <span id="bc-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="bc-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card card-ng"><div class="card-label">DANGER</div><div class="card-value" id="bc-cnt-danger">0</div></div>
+                <div class="summary-card card-caution"><div class="card-label">WARN</div><div class="card-value" id="bc-cnt-warn">0</div></div>
+                <div class="summary-card"><div class="card-label">総差異</div><div class="card-value" id="bc-cnt-total">0</div></div>
+                <div class="summary-card"><div class="card-label">未提出</div><div class="card-value" id="bc-cnt-unsub">0</div></div>
+                <div class="summary-card"><div class="card-label">解析不可</div><div class="card-value" id="bc-cnt-skip">0</div></div>
+            </div>
+            <a id="bc-download-link" href="#" class="btn btn-download" style="display:none">📥 差異一覧xlsxをダウンロード</a>
+            <pre id="bc-console" style="margin-top:8px; max-height:220px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+        </div>
+        <div id="bc-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <!-- ============================================================ -->
     <!-- 月次集約モード — quick_compare / quick_export                  -->
     <!-- ============================================================ -->
     <div class="workflow-card" id="monthly-compare-card">
@@ -440,6 +500,52 @@
             qcRunBtn.disabled = false;
         }
     });
+
+    // ----- batch_compare（手順1+2 一括）-----
+    const bcRunBtn = document.getElementById('bc-run-btn');
+    if (bcRunBtn) {
+        bcRunBtn.addEventListener('click', async () => {
+            hideError('bc-error-area');
+            document.getElementById('bc-result-area').style.display = 'none';
+            document.getElementById('bc-status').textContent = '処理中...（請求勤怠の解析・突合・差異一覧。件数により数分かかります）';
+            bcRunBtn.disabled = true;
+
+            const fd = new FormData();
+            fd.append('timesheet_dir', document.getElementById('bc-timesheet-dir').value);
+            fd.append('jinjer_dir', document.getElementById('bc-jinjer-dir').value);
+            fd.append('application_csv', document.getElementById('bc-application-csv').value);
+            fd.append('month', document.getElementById('bc-month').value);
+            fd.append('output_filename', document.getElementById('bc-output-filename').value);
+
+            try {
+                const res = await fetch('/batch_compare', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success){
+                    showError('bc-error-area', data.errors || ['処理に失敗しました']);
+                    document.getElementById('bc-status').textContent = '';
+                    return;
+                }
+                document.getElementById('bc-cnt-danger').textContent = data.stats.danger_count;
+                document.getElementById('bc-cnt-warn').textContent = data.stats.warn_count;
+                document.getElementById('bc-cnt-total').textContent = data.stats.diff_count;
+                document.getElementById('bc-cnt-unsub').textContent = data.stats.unsubmitted_count;
+                document.getElementById('bc-cnt-skip').textContent = data.stats.skipped_count;
+                const dl = document.getElementById('bc-download-link');
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+                const consoleEl = document.getElementById('bc-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                document.getElementById('bc-result-area').style.display = 'block';
+                document.getElementById('bc-status').textContent = '完了';
+            } catch (e) {
+                showError('bc-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('bc-status').textContent = '';
+            } finally {
+                bcRunBtn.disabled = false;
+            }
+        });
+    }
 
     // ----- quick_export -----
     async function runQuickExport(execute){
