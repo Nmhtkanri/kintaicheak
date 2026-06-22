@@ -176,6 +176,7 @@ def run_batch_compare(
             month_label=month_label,
             log_func=log_func,
             application_csv=Path(application_csv) if application_csv else None,
+            threshold_minutes=threshold_minutes,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

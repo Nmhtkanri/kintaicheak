@@ -55,9 +55,12 @@ LEVEL_INFO = "INFO"
 
 # ===== 警告閾値（後で調整可能） =====
 PUNCH_DIFF_WARN_MIN = 120  # 出勤/退勤差分が 120分以上で WARN
-LONG_WORK_HOURS = 10       # 総労働時間 10h 超で WARN
+# ※ 長時間労働(>10h)の注意喚起は廃止（勤怠チェック時には行わない）。
+#    差分が無い総労働は他の差分なし行と同じく行を生成しない。
 SHORT_BREAK_AT_LONG_WORK = 6  # 勤務 6h 超で休憩 0:00 なら DANGER（労基法的に必要）
 OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
+# 自動修正提案値（採用ラベル）の既定しきい値（分）。差分勤怠チェッカーで選択した範囲。
+DEFAULT_RECOMMEND_THRESHOLD_MIN = 10
 
 # ===== 出力xlsx 列定義 =====
 # 「人間判断」を「自動修正提案値」の直後に置く。判断列を提案値のすぐ隣にすることで、
@@ -70,8 +73,8 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 # 手入力・参考(予定/休日休暇/ID/トレーサビリティ)は右へ寄せる。
 # ※ quick_export は列名で読むため、列順を変えても後方互換は保たれる。
 DIFF_COLUMNS = [
-    # 識別（ウィンドウ枠固定）
-    "氏名", "対象日付", "差異種別",
+    # 識別（ウィンドウ枠固定）。従業員IDを先頭(A列)へ。
+    "従業員ID", "氏名", "対象日付", "差異種別",
     # すぐ見る（差異の中身）
     "請求勤怠値", "jinjer値", "差分(分)",
     # 確認区分（要確認/自動採用/自動OK/参考のみ）。深刻さは色＋警告理由で表す（警告レベル列は廃止）
@@ -80,13 +83,13 @@ DIFF_COLUMNS = [
     "打刻時コメント",       # 汎用データ#96「打刻時コメント」より（出勤:/退勤: 両方）
     "打刻修正時コメント",   # 申請データCSVの「理由」より
     "警告理由",
-    "出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別",
+    "出勤予定", "退勤予定", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別",
     # 判断（入力）
     "人間判断", "判断メモ",
-    # 反映（手入力・普段使わない）
+    # 反映（手入力・普段使わない）。自動修正提案値は採用ラベル（請求勤怠/jinjer勤怠）。
     "自動修正提案値", "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
-    # 参考（右端・普段見ない）。実績確定/ID/トレーサビリティ
-    "実績確定状況", "従業員ID", "行ID", "元突合結果ファイル",
+    # 参考（右端・普段見ない）。
+    "実績確定状況",
 ]
 
 # 汎用データから転記する予定・有休 列のキャノニカル名 → (候補ヘッダー, 完全一致のみか)
@@ -95,6 +98,7 @@ JINJER_EXTRA_COLUMNS: dict[str, tuple[list[str], bool]] = {
     "出勤予定": (["出勤予定時刻", "出勤予定"], False),
     "退勤予定": (["退勤予定時刻", "退勤予定"], False),
     "休憩予定": (["休憩予定時間", "休憩予定"], False),
+    "復帰予定": (["復帰予定時刻1", "復帰予定時刻", "復帰予定"], False),
     "有休": (["有休"], True),
     "AM有休": (["AM有休"], True),
     "PM有休": (["PM有休"], True),
@@ -150,7 +154,23 @@ from services.triage import (  # noqa: E402
     TRIAGE_AUTO_OK,
     TRIAGE_INFO_ONLY,
     TRIAGE_ORDER,
+    JUDGE_KINTAI,
+    JUDGE_JINJER,
 )
+
+
+def recommend_judge_label(kind: str, diff_minutes: str, threshold_minutes: int) -> str:
+    """自動修正提案値（採用ラベル）を決める。
+
+    出退勤の数値差分が許容しきい値（差分勤怠チェッカーで選択した範囲）以内なら
+    請求勤怠（=請求勤怠を採用）、超過なら jinjer勤怠。
+    総労働・休憩・差分なし（数値化できない）は jinjer勤怠（変更なし）。
+    """
+    if kind in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT):
+        d = to_int_diff(diff_minutes)
+        if d is not None:
+            return JUDGE_KINTAI if abs(d) <= threshold_minutes else JUDGE_JINJER
+    return JUDGE_JINJER
 
 
 # ----------------------------------------------------------------------
@@ -176,6 +196,7 @@ class DiffRow:
     sched_in: str = ""
     sched_out: str = ""
     sched_break: str = ""
+    sched_break_end: str = ""  # 復帰予定（汎用データ「復帰予定時刻1」）
     yukyu: str = ""
     am_yukyu: str = ""
     pm_yukyu: str = ""
@@ -189,6 +210,9 @@ class DiffRow:
     # トリアージ区分（要確認/自動採用/自動OK）と既定の人間判断
     triage: str = ""
     judge_default: str = ""
+    # 自動修正提案値（採用ラベル）。差分が許容しきい値内→請求勤怠 / 超過→jinjer勤怠 /
+    # 総労働・休憩・差分なし→jinjer勤怠。
+    recommend_judge: str = ""
 
 
 @dataclass
@@ -654,6 +678,7 @@ def compute_diffs(
     logs: list[LogEntry],
     extra_cols: dict[str, str] | None = None,
     stamp_comments: dict[tuple[str, str], list[dict]] | None = None,
+    threshold_minutes: int = DEFAULT_RECOMMEND_THRESHOLD_MIN,
 ) -> list[DiffRow]:
     """突合結果xlsx の各行に対し、4種の差異を生成して返す。
 
@@ -699,6 +724,7 @@ def compute_diffs(
             "sched_in": _extra("出勤予定"),
             "sched_out": _extra("退勤予定"),
             "sched_break": _extra("休憩予定"),
+            "sched_break_end": _extra("復帰予定"),
             "yukyu": _extra("有休"),
             "am_yukyu": _extra("AM有休"),
             "pm_yukyu": _extra("PM有休"),
@@ -817,6 +843,8 @@ def compute_diffs(
             holiday_name1=r.holiday_name1,
             holiday_name1_type=r.holiday_name1_type,
         )
+        # 自動修正提案値（採用ラベル）。差分が許容しきい値内→請求勤怠 / 超過→jinjer勤怠。
+        r.recommend_judge = recommend_judge_label(r.kind, r.diff_minutes, threshold_minutes)
 
     return rows
 
@@ -874,6 +902,9 @@ def classify_break(jrow: dict) -> tuple[str, str, str] | None:
 def classify_total_work(jrow: dict) -> tuple[str, str, str] | None:
     """jinjer 側の総労働時間に問題があるか判定。
     戻り値: (level, reason, jinjer_total_str) or None
+
+    ※ 長時間労働(>10h)の注意喚起は廃止。差分が無い総労働は行を生成しない。
+       ここでは集計不整合（出勤打刻あり/総労働0:00）のみを検出する。
     """
     j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
     j_punch_in = str(jrow.get(JINJER_HEADERS["punch_in_1"]) or "").strip()
@@ -885,12 +916,7 @@ def classify_total_work(jrow: dict) -> tuple[str, str, str] | None:
     if j_total_min is None:
         return None
 
-    # ① 長時間労働
-    if j_total_min > LONG_WORK_HOURS * 60:
-        level = LEVEL_WARN
-        reasons.append(f"総労働 {format_minutes_as_hhmm(j_total_min)} (>{LONG_WORK_HOURS}h)")
-
-    # ② 出勤打刻あり / 総労働 0:00 → 計算不能警告
+    # 出勤打刻あり / 総労働 0:00 → 計算不能警告（集計不整合）
     if j_total_min == 0 and j_punch_in:
         level = LEVEL_DANGER
         reasons.append("出勤打刻あり/総労働 0:00 (集計不整合)")
@@ -911,12 +937,10 @@ def classify_total_work_diff(diff_minutes: int, jrow: dict) -> tuple[str, str]:
     j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
     j_punch_in = str(jrow.get(JINJER_HEADERS["punch_in_1"]) or "").strip()
     j_total_min = parse_hhmm(j_total_str)
+    # 長時間労働(>10h)の昇格は廃止。集計不整合のみ DANGER に昇格する。
     if j_total_min == 0 and j_punch_in:
         level = LEVEL_DANGER
         reasons.append("出勤打刻あり/総労働 0:00 (集計不整合)")
-    elif j_total_min is not None and j_total_min > LONG_WORK_HOURS * 60 and level == LEVEL_INFO:
-        level = LEVEL_WARN
-        reasons.append(f"総労働 {format_minutes_as_hhmm(j_total_min)} (>{LONG_WORK_HOURS}h)")
 
     return level, " / ".join(reasons)
 
@@ -985,19 +1009,19 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center")
     ws.auto_filter.ref = f"A1:{get_column_letter(len(DIFF_COLUMNS))}1"
-    # 識別3列(氏名/対象日付/差異種別=A〜C)とヘッダー行を固定。右に行っても誰の行か見失わない。
-    ws.freeze_panes = "D2"
+    # 識別4列(従業員ID/氏名/対象日付/差異種別=A〜D)とヘッダー行を固定。右に行っても誰の行か見失わない。
+    ws.freeze_panes = "E2"
 
     # データ行（列名→値の対応で書き込み、列順の変更に強くする）
     for r_idx, drow in enumerate(diff_rows, start=2):
         row_values = {
-            "行ID": drow.row_id,
             "従業員ID": drow.emp_id,
             "氏名": drow.name,
             "対象日付": drow.target_date,
             "出勤予定": drow.sched_in,
             "退勤予定": drow.sched_out,
             "休憩予定": drow.sched_break,
+            "復帰予定": drow.sched_break_end,
             "有休": drow.yukyu,
             "AM有休": drow.am_yukyu,
             "PM有休": drow.pm_yukyu,
@@ -1011,7 +1035,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "警告理由": drow.warn_reason,
             "打刻時コメント": drow.punch_comment,
             "打刻修正時コメント": drow.jinjer_stamp_comment,
-            "自動修正提案値": drow.auto_fix_value,
+            "自動修正提案値": drow.recommend_judge,  # 採用ラベル（請求勤怠/jinjer勤怠）
             "人間判断": drow.judge_default,   # トリアージの既定値を事前入力（要確認は空欄）
             "判断メモ": "",
             "打刻修正": "",        # 出勤/退勤の提案値を人間が上書きしたい場合のみ
@@ -1019,7 +1043,6 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "手入力復帰1": "",
             "手入力休憩時間": "",
             "実績確定状況": drow.finalized,  # 参考表示
-            "元突合結果ファイル": drow.source_file,
         }
         for c_idx, header in enumerate(DIFF_COLUMNS, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=row_values.get(header, ""))
@@ -1063,15 +1086,16 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
 
     # 列幅（列名で指定。列順を変えても崩れない）
     width_map = {
-        "行ID": 6, "従業員ID": 12, "氏名": 16, "対象日付": 12,
-        "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "有休": 8, "AM有休": 8, "PM有休": 8,
+        "従業員ID": 12, "氏名": 16, "対象日付": 12,
+        "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "復帰予定": 10,
+        "有休": 8, "AM有休": 8, "PM有休": 8,
         "休日休暇名1": 14, "休日休暇名1：種別": 12,
         "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
         "確認区分": 14, "警告理由": 40, "自動修正提案値": 14,
         "人間判断": 12, "判断メモ": 28,
         "打刻時コメント": 40, "打刻修正時コメント": 40,
         "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
-        "実績確定状況": 12, "元突合結果ファイル": 32,
+        "実績確定状況": 12,
     }
     for i, header in enumerate(DIFF_COLUMNS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width_map.get(header, 14)
@@ -1119,12 +1143,16 @@ def run_quick_compare(
     month_label: str,
     log_func=print,
     application_csv: Path | None = None,
+    threshold_minutes: int = DEFAULT_RECOMMEND_THRESHOLD_MIN,
 ) -> CompareResult:
     """突合結果xlsx + jinjer CSV → 差異一覧xlsx を生成する。CLI と Web UI から共用。
 
     application_csv: jinjer「申請データ（打刻修正申請）」CSV のパス（任意）。
     指定すると「打刻修正時コメント」列にその「理由」を併記する。未指定なら attendances API
     の打刻コメントにフォールバックする。
+
+    threshold_minutes: 自動修正提案値（採用ラベル）の許容しきい値。出退勤の差分が
+    この分数以内なら「請求勤怠」、超過なら「jinjer勤怠」を提案する（差分勤怠チェッカーの選択範囲）。
     """
     logs: list[LogEntry] = []
     result = CompareResult(ok=False, output_path=output_path, logs=logs)
@@ -1193,7 +1221,10 @@ def run_quick_compare(
                 f"打刻コメント取得をスキップ（申請データCSV未指定 / 対象月={month_label} / 対象ID数={len(checked_emp_ids)}）",
             ))
 
-    diff_rows = compute_diffs(kintai_df, jinjer_index, name_map, logs, extra_cols, stamp_comments)
+    diff_rows = compute_diffs(
+        kintai_df, jinjer_index, name_map, logs, extra_cols, stamp_comments,
+        threshold_minutes=threshold_minutes,
+    )
     result.diff_count = len(diff_rows)
     log_func(f"[info] 差異・警告 合計 {len(diff_rows)} 件")
 

@@ -13,11 +13,13 @@ from quick_compare import (  # noqa: E402
     DIFF_KIND_TOTAL,
     JINJER_HEADERS,
     LogEntry,
+    classify_total_work,
     compute_diffs,
     format_stamp_comments,
     kintai_total_minutes,
     load_stamp_correction_reasons,
     normalize_kintai_result_columns,
+    recommend_judge_label,
     resolve_jinjer_extra_columns,
     to_jinjer_overnight_punch_out,
 )
@@ -132,7 +134,7 @@ def test_diff_columns_include_manual_review_fields():
 
 
 def test_diff_columns_include_schedule_and_leave_fields():
-    for col in ("出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別"):
+    for col in ("出勤予定", "退勤予定", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別"):
         assert col in DIFF_COLUMNS
     # 有休/AM有休/PM有休 は汎用データ194列に該当列が無く常に空のため出力しない
     for col in ("有休", "AM有休", "PM有休"):
@@ -184,7 +186,8 @@ def test_compute_diffs_transcribes_schedule_and_leave():
     jrow = _jinjer_row(**{
         "出勤予定時刻": "9:00",
         "退勤予定時刻": "18:00",
-        "休憩予定時間": "1:00",
+        "休憩予定時刻1": "12:00",
+        "復帰予定時刻1": "13:00",
         "有休": "",
         "AM有休": "1",
         "PM有休": "",
@@ -203,7 +206,8 @@ def test_compute_diffs_transcribes_schedule_and_leave():
     r = rows[0]
     assert r.sched_in == "9:00"
     assert r.sched_out == "18:00"
-    assert r.sched_break == "1:00"
+    assert r.sched_break == "12:00"     # 休憩予定時刻1（部分一致）
+    assert r.sched_break_end == "13:00"  # 復帰予定時刻1（新規）
     assert r.am_yukyu == "1"
     assert r.yukyu == ""
     assert r.pm_yukyu == ""
@@ -310,11 +314,15 @@ def test_comment_columns_left_of_judgment_and_adjacent():
 
 
 def test_diff_columns_layout_identity_first():
-    """横スクロール対策: 識別3列(氏名/対象日付/差異種別)が先頭。手入力・IDは右へ。"""
-    assert DIFF_COLUMNS[:3] == ["氏名", "対象日付", "差異種別"]
-    # 従業員ID・行ID・打刻修正(手入力)は人間判断より右
-    for col in ("従業員ID", "行ID", "打刻修正"):
-        assert DIFF_COLUMNS.index(col) > DIFF_COLUMNS.index("人間判断")
+    """横スクロール対策: 識別4列(従業員ID/氏名/対象日付/差異種別)が先頭。手入力は右へ。"""
+    assert DIFF_COLUMNS[:4] == ["従業員ID", "氏名", "対象日付", "差異種別"]
+    # 従業員IDは先頭(A列)へ移動済み
+    assert DIFF_COLUMNS.index("従業員ID") == 0
+    # 打刻修正(手入力)は人間判断より右
+    assert DIFF_COLUMNS.index("打刻修正") > DIFF_COLUMNS.index("人間判断")
+    # 行ID・元突合結果ファイルは削除済み
+    assert "行ID" not in DIFF_COLUMNS
+    assert "元突合結果ファイル" not in DIFF_COLUMNS
 
 
 def test_clean_punch_comment():
@@ -338,8 +346,10 @@ def test_triage_column_present_and_placed():
 
 def test_schedule_leave_columns_left_of_judgment():
     """有休も判断材料なので、予定/休日休暇は人間判断より左に置く。"""
-    for col in ("出勤予定", "退勤予定", "休憩予定", "休日休暇名1", "休日休暇名1：種別"):
+    for col in ("出勤予定", "退勤予定", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別"):
         assert DIFF_COLUMNS.index(col) < DIFF_COLUMNS.index("人間判断")
+    # 復帰予定は 休憩予定 と 休日休暇名1 の間に挿入
+    assert DIFF_COLUMNS.index("休憩予定") < DIFF_COLUMNS.index("復帰予定") < DIFF_COLUMNS.index("休日休暇名1")
 
 
 def test_human_judgment_conditional_formatting(tmp_path):
@@ -369,6 +379,82 @@ def test_human_judgment_conditional_formatting(tmp_path):
     assert '"jinjer勤怠"' in decoded
     # cellIs ルールが2件（保留 / jinjer勤怠）入っている
     assert decoded.count('type="cellIs"') >= 2
+
+
+def test_recommend_judge_label_threshold():
+    """自動修正提案値（採用ラベル）: 出退勤差分がしきい値内→請求勤怠 / 超過→jinjer勤怠。"""
+    # 出退勤の差分がしきい値(10)以内 → 請求勤怠
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "9", 10) == "請求勤怠"
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "10", 10) == "請求勤怠"
+    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "-10", 10) == "請求勤怠"
+    # しきい値超過 → jinjer勤怠
+    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "11", 10) == "jinjer勤怠"
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "-30", 10) == "jinjer勤怠"
+    # 数値化できない出退勤（jinjer欠落など）→ jinjer勤怠
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "", 10) == "jinjer勤怠"
+    # 総労働・その他 → jinjer勤怠（変更なし）
+    assert recommend_judge_label(DIFF_KIND_TOTAL, "5", 10) == "jinjer勤怠"
+
+
+def test_recommend_judge_label_set_on_rows():
+    """compute_diffs が各差異行に recommend_judge を設定する。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:05", "jinjer_出勤": "9:00", "出勤差分(分)": 5,
+        "勤務表_退勤": "20:00", "jinjer_退勤": "18:00", "退勤差分(分)": 120,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): _jinjer_row(
+            **{JINJER_HEADERS["punch_in_1"]: "9:00", JINJER_HEADERS["punch_out_1"]: "18:00"})},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+        threshold_minutes=10,
+    )
+    in_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_IN)
+    out_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT)
+    assert in_row.recommend_judge == "請求勤怠"   # 差分5分 ≤ 10
+    assert out_row.recommend_judge == "jinjer勤怠"  # 差分120分 > 10
+
+
+def test_long_work_over_10h_no_longer_warns():
+    """>10h の長時間労働注意喚起は廃止。差分なしの総労働行は生成しない。集計不整合は残す。"""
+    # 純粋な >10h（差分なし）→ 警告なし（None）
+    assert classify_total_work(_jinjer_row(**{
+        JINJER_HEADERS["total_work"]: "10:30",
+        JINJER_HEADERS["punch_in_1"]: "9:00",
+    })) is None
+    # 集計不整合（出勤打刻あり / 総労働0:00）は引き続き DANGER
+    res = classify_total_work(_jinjer_row(**{
+        JINJER_HEADERS["total_work"]: "0:00",
+        JINJER_HEADERS["punch_in_1"]: "9:00",
+    }))
+    assert res is not None and res[0] == "DANGER"
+
+    # 請求=jinjer（差分なし）で >10h の行は総労働行を生成しない
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:00", "出勤差分(分)": 0,
+        "勤務表_退勤": "20:30", "jinjer_退勤": "20:30", "退勤差分(分)": 0,
+        "勤務表_実働時間": "10:30",
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): _jinjer_row(**{
+            JINJER_HEADERS["total_work"]: "10:30",
+            JINJER_HEADERS["punch_in_1"]: "9:00",
+            JINJER_HEADERS["punch_out_1"]: "20:30",
+        })},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+    )
+    assert rows == []  # >10h 単独では行を作らない
 
 
 def test_compute_diffs_sets_triage_default():

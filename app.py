@@ -847,6 +847,11 @@ def route_quick_compare():
     application_csv_str = _clean_path_input(request.form.get("application_csv"))
     month_label = (request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
+    # 自動修正提案値（採用ラベル）の許容しきい値。未指定なら既定値。
+    try:
+        threshold = int(request.form.get("threshold", Config.DEFAULT_THRESHOLD_MINUTES))
+    except (TypeError, ValueError):
+        threshold = Config.DEFAULT_THRESHOLD_MINUTES
 
     errors = []
     if not kintai_dir_str:
@@ -894,6 +899,7 @@ def route_quick_compare():
             month_label=month_label,
             log_func=_log,
             application_csv=application_csv,
+            threshold_minutes=threshold,
         )
     except Exception as e:
         logger.exception("quick_compare failed")
@@ -938,6 +944,11 @@ def route_batch_compare():
     application_csv_str = _clean_path_input(request.form.get("application_csv"))
     month_label = (request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
+    # 自動修正提案値（採用ラベル）の許容しきい値。突合と同じしきい値を使う。
+    try:
+        threshold = int(request.form.get("threshold", Config.DEFAULT_THRESHOLD_MINUTES))
+    except (TypeError, ValueError):
+        threshold = Config.DEFAULT_THRESHOLD_MINUTES
 
     errors = []
     if not timesheet_dir_str:
@@ -977,6 +988,7 @@ def route_batch_compare():
             output_path=output_path,
             month_label=month_label,
             application_csv=application_csv,
+            threshold_minutes=threshold,
             log_func=_log,
         )
     except Exception as e:
