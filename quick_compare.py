@@ -140,6 +140,9 @@ DIFF_KIND_PUNCH_IN = "出勤"
 DIFF_KIND_PUNCH_OUT = "退勤"
 DIFF_KIND_BREAK = "休憩"
 DIFF_KIND_TOTAL = "総労働時間"
+# 氏名→従業員ID を解決できず（jinjer 未登録 or 氏名表記の不一致）、請求勤怠側には
+# 勤務がある人。従来は黙ってスキップしていたが、未払い見落とし防止のため要確認行で可視化する。
+DIFF_KIND_UNMATCHED = "jinjer未登録"
 
 # 既存 kintai-checker の services パスを通す（氏名正規化を借りる場合用）
 KINTAI_CHECKER_ROOT = Path(__file__).resolve().parent
@@ -165,7 +168,10 @@ def recommend_judge_label(kind: str, diff_minutes: str, threshold_minutes: int) 
     出退勤の数値差分が許容しきい値（差分勤怠チェッカーで選択した範囲）以内なら
     請求勤怠（=請求勤怠を採用）、超過なら jinjer勤怠。
     総労働・休憩・差分なし（数値化できない）は jinjer勤怠（変更なし）。
+    jinjer未登録は採用ラベルを付けない（書き戻し対象外・人が登録要否を判断する）。
     """
+    if kind == DIFF_KIND_UNMATCHED:
+        return ""
     if kind in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT):
         d = to_int_diff(diff_minutes)
         if d is not None:
@@ -691,6 +697,9 @@ def compute_diffs(
     stamp_comments = stamp_comments or {}
 
     seen_emp_date: set[tuple[str, str]] = set()
+    # 氏名→従業員ID を解決できなかった人を黙って捨てず、請求勤怠側に勤務がある日を
+    # 集計して後で「jinjer未登録」要確認行にまとめる（未払いの静かな見落としを防ぐ）。
+    unresolved: dict[str, dict] = {}
 
     for _, krow in kintai_df.iterrows():
         name = str(krow.get("氏名") or "").strip()
@@ -700,6 +709,15 @@ def compute_diffs(
 
         emp_id = resolve_emp_id(name, name_map)
         if not emp_id:
+            # jinjer 側に氏名が見つからない（未登録 or 氏名表記の不一致）。
+            # 請求勤怠側に実打刻がある日だけ未払い候補として記録する（休/空欄日は無視）。
+            k_in0 = clean_cell(krow.get("勤務表_出勤"))
+            k_out0 = clean_cell(krow.get("勤務表_退勤"))
+            if k_in0 or k_out0:
+                u = unresolved.setdefault(
+                    name, {"dates": [], "source": str(krow.get("_source_file") or "")}
+                )
+                u["dates"].append(date_iso)
             logs.append(LogEntry("WARN", f"氏名 → 従業員ID 解決失敗: {name} ({krow.get('_source_file', '')})"))
             continue
 
@@ -764,6 +782,22 @@ def compute_diffs(
                 **extra,
             ))
             next_id += 1
+        elif diff_in is None and j_in and not k_in:
+            # 逆向きの片側欠落: jinjer に打刻あり / 請求勤怠側に時刻なし。
+            # 請求勤怠が正なら jinjer の打刻は余分なので空で上書きして消す（auto_fix_value=""）。
+            # 既定は要確認(WARN)。全日休暇日のjinjer打刻は triage が「自動OK(jinjer)」へ回す。
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_PUNCH_IN,
+                kintai_value="", jinjer_value=j_in, diff_minutes="",
+                warn_level=LEVEL_WARN,
+                warn_reason="請求勤怠なし / jinjer側に時刻あり",
+                auto_fix_value="",
+                finalized=finalized,
+                source_file=source_file,
+                **extra,
+            ))
+            next_id += 1
 
         # ----- 退勤差異 -----
         k_out = clean_cell(krow.get("勤務表_退勤"))
@@ -790,6 +824,21 @@ def compute_diffs(
                 warn_level=LEVEL_WARN,
                 warn_reason="jinjer退勤なし / 請求勤怠側に時刻あり",
                 auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
+                finalized=finalized,
+                source_file=source_file,
+                **extra,
+            ))
+            next_id += 1
+        elif diff_out is None and j_out and not k_out:
+            # 逆向きの片側欠落: jinjer に打刻あり / 請求勤怠側に時刻なし。
+            # 請求勤怠が正なら jinjer の打刻は余分なので空で上書きして消す（auto_fix_value=""）。
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_PUNCH_OUT,
+                kintai_value="", jinjer_value=j_out, diff_minutes="",
+                warn_level=LEVEL_WARN,
+                warn_reason="請求勤怠なし / jinjer側に時刻あり",
+                auto_fix_value="",
                 finalized=finalized,
                 source_file=source_file,
                 **extra,
@@ -831,6 +880,32 @@ def compute_diffs(
                         **extra,
                     ))
                     next_id += 1
+
+    # 氏名→ID 解決不可だが請求勤怠に勤務がある人を「jinjer未登録」要確認行として可視化する。
+    # 1人につき1行（勤務日数・期間を集約）。派遣等の正当な除外か、給与対象者の抜けかを人が判断する。
+    for uname, info in unresolved.items():
+        dates = sorted(info["dates"])
+        if not dates:
+            continue
+        span = dates[0] if len(dates) == 1 else f"{dates[0]}〜{dates[-1]}"
+        rows.append(DiffRow(
+            row_id=next_id, emp_id="", name=uname, target_date=dates[0],
+            kind=DIFF_KIND_UNMATCHED,
+            kintai_value=f"勤務{len(dates)}日", jinjer_value="", diff_minutes="",
+            warn_level=LEVEL_WARN,
+            warn_reason=(
+                f"jinjer未登録（氏名→従業員ID解決不可）。請求勤怠に勤務{len(dates)}日"
+                f"（{span}）あり＝給与未反映の恐れ。jinjer登録/氏名表記を確認"
+            ),
+            auto_fix_value="",
+            finalized="",
+            source_file=info["source"],
+        ))
+        next_id += 1
+        logs.append(LogEntry(
+            "WARN",
+            f"jinjer未登録の可能性: {uname} 請求勤怠 勤務{len(dates)}日（{span}）→ 差異一覧に要確認行を追加",
+        ))
 
     # トリアージ: 各差異行を 要確認/自動採用/自動OK に分類し、既定の人間判断を付ける
     for r in rows:

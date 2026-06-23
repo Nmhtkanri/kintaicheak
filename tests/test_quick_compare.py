@@ -68,6 +68,132 @@ def test_compute_diffs_creates_punch_rows_when_jinjer_punches_are_blank():
     assert punch_rows[1].warn_reason == "jinjer退勤なし / 請求勤怠側に時刻あり"
 
 
+def test_compute_diffs_creates_punch_rows_when_kintai_is_blank():
+    """逆向きの片側欠落: jinjer に打刻あり / 請求勤怠側に時刻なし → 要確認行を生成。"""
+    from services.triage import TRIAGE_NEEDS_CHECK
+
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "",
+        "jinjer_出勤": "9:00",
+        "出勤差分(分)": None,
+        "勤務表_退勤": "",
+        "jinjer_退勤": "18:00",
+        "退勤差分(分)": None,
+        "_source_file": "勤怠突合結果.xlsx",
+    }])
+    logs: list[LogEntry] = []
+
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): _jinjer_row(
+            **{JINJER_HEADERS["punch_in_1"]: "9:00", JINJER_HEADERS["punch_out_1"]: "18:00"})},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+    )
+
+    punch_rows = [row for row in rows if row.kind in {DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT}]
+    assert [row.kind for row in punch_rows] == [DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT]
+    # jinjer値が表示され、請求勤怠値は空。承認時は空で上書き（jinjer打刻を消す）。
+    assert [row.jinjer_value for row in punch_rows] == ["9:00", "18:00"]
+    assert [row.kintai_value for row in punch_rows] == ["", ""]
+    assert [row.auto_fix_value for row in punch_rows] == ["", ""]
+    assert punch_rows[0].warn_reason == "請求勤怠なし / jinjer側に時刻あり"
+    assert punch_rows[1].warn_reason == "請求勤怠なし / jinjer側に時刻あり"
+    # コメント・休暇なしなら要確認（人が見る）に分類される
+    assert punch_rows[0].triage == TRIAGE_NEEDS_CHECK
+    assert punch_rows[0].judge_default == ""
+
+
+def test_compute_diffs_kintai_blank_fullday_holiday_is_auto_ok():
+    """全日休暇日の jinjer 打刻（請求勤怠なし）は triage が自動OK(jinjer)へ回す。"""
+    from services.triage import TRIAGE_AUTO_OK, JUDGE_JINJER
+
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "", "jinjer_出勤": "9:00", "出勤差分(分)": None,
+        "勤務表_退勤": "", "jinjer_退勤": "18:00", "退勤差分(分)": None,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "9:00", JINJER_HEADERS["punch_out_1"]: "18:00",
+        "休日休暇名1": "有給休暇", "休日休暇名1：種別": "全日",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): jrow},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+        extra_cols,
+    )
+    punch_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_IN]
+    assert punch_rows
+    assert punch_rows[0].triage == TRIAGE_AUTO_OK
+    assert punch_rows[0].judge_default == JUDGE_JINJER
+
+
+def test_compute_diffs_surfaces_jinjer_unregistered_worker():
+    """jinjerに氏名が無い(ID解決不可)が請求勤怠に勤務がある人は、捨てずに
+    「jinjer未登録」要確認行(1人1行)として可視化する。"""
+    from quick_compare import DIFF_KIND_UNMATCHED
+    from services.triage import TRIAGE_NEEDS_CHECK
+
+    kintai_df = pd.DataFrame([
+        {"氏名": "幽霊 太郎", "日付": date(2026, 5, 1),
+         "勤務表_出勤": "9:00", "jinjer_出勤": "", "出勤差分(分)": None,
+         "勤務表_退勤": "18:00", "jinjer_退勤": "", "退勤差分(分)": None,
+         "_source_file": "月給制1.xlsx"},
+        {"氏名": "幽霊 太郎", "日付": date(2026, 5, 2),
+         "勤務表_出勤": "9:00", "jinjer_出勤": "", "出勤差分(分)": None,
+         "勤務表_退勤": "17:30", "jinjer_退勤": "", "退勤差分(分)": None,
+         "_source_file": "月給制1.xlsx"},
+        # 請求勤怠も空の日（休等）は未払い候補にしない＝行に数えない
+        {"氏名": "幽霊 太郎", "日付": date(2026, 5, 3),
+         "勤務表_出勤": "", "jinjer_出勤": "", "出勤差分(分)": None,
+         "勤務表_退勤": "", "jinjer_退勤": "", "退勤差分(分)": None,
+         "_source_file": "月給制1.xlsx"},
+    ])
+    logs: list[LogEntry] = []
+
+    # name_map に「幽霊 太郎」は無い → 解決不可
+    rows = compute_diffs(
+        kintai_df,
+        {},  # jinjer index 空
+        {"別人": "2018999"},
+        logs,
+    )
+
+    unmatched = [r for r in rows if r.kind == DIFF_KIND_UNMATCHED]
+    assert len(unmatched) == 1, "未登録者は1人1行に集約"
+    r = unmatched[0]
+    assert r.name == "幽霊 太郎"
+    assert r.emp_id == ""
+    assert r.kintai_value == "勤務2日"   # 勤務がある日のみ計上（5/3は除外）
+    assert r.triage == TRIAGE_NEEDS_CHECK
+    assert r.judge_default == ""
+    assert r.recommend_judge == ""       # 採用ラベルは付けない
+    assert "jinjer未登録" in r.warn_reason
+
+
+def test_compute_diffs_unresolved_with_no_work_emits_nothing():
+    """ID解決不可でも請求勤怠に勤務が無ければ未登録行は出さない（休のみの人）。"""
+    from quick_compare import DIFF_KIND_UNMATCHED
+    kintai_df = pd.DataFrame([{
+        "氏名": "休 のみ子", "日付": date(2026, 5, 1),
+        "勤務表_出勤": "", "jinjer_出勤": "", "出勤差分(分)": None,
+        "勤務表_退勤": "", "jinjer_退勤": "", "退勤差分(分)": None,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(kintai_df, {}, {"別人": "2018999"}, logs)
+    assert [r for r in rows if r.kind == DIFF_KIND_UNMATCHED] == []
+
+
 def test_normalize_kintai_result_columns_accepts_seikyu_kintai_headers():
     df = pd.DataFrame([{
         "請求勤怠_出勤": "9:00",
