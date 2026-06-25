@@ -39,6 +39,48 @@ logger = logging.getLogger(__name__)
 # 曜日 (Mon=0 ... Sun=6) → 1文字漢字
 WEEKDAY_KANJI = ["月", "火", "水", "木", "金", "土", "日"]
 
+# 全日有休（有 / 有休 など）は休扱い（所/法）にせず jinjer の「一般」雛形(9:00~17:30)を入れる。
+# 半休（AM有休 / PM有休 等）は対象外＝従来通り休扱いのまま。
+FULL_DAY_PAID_LEAVE_CODES = {"有", "有休", "有給", "有給休暇", "年休", "年次有給休暇", "全有"}
+_HALF_DAY_LEAVE_MARKERS = ("AM", "PM", "am", "pm", "ＡＭ", "ＰＭ", "午前", "午後", "半")
+GENERAL_TEMPLATE_NAME = "一般"
+GENERAL_TEMPLATE_START = "9:00"
+GENERAL_TEMPLATE_END = "17:30"
+
+
+def _is_full_day_paid_leave(code: str, label: str = "") -> bool:
+    """全日有休（有 / 有休 など）を表す記号か。
+
+    AM/PM/午前/午後/半 を含む半休はここでは False（従来通り休扱い）。
+    記号・ラベルのどちらかが全日有休と完全一致すれば True。
+    """
+    tokens = [str(code or "").strip(), str(label or "").strip()]
+    joined = "".join(t for t in tokens if t)
+    if any(h in joined for h in _HALF_DAY_LEAVE_MARKERS):
+        return False
+    return any(t in FULL_DAY_PAID_LEAVE_CODES for t in tokens if t)
+
+
+def _resolve_general_template_id(templates: list[dict]) -> str:
+    """jinjer の「一般」(9:00~17:30) 雛形ID を解決する。
+
+    名前が「一般」の雛形を優先し、無ければ 9:00-17:30 の時刻一致でフォールバックする。
+    見つからなければ空文字（→ 有休セルは従来通り休扱いになる）。
+    """
+    if not templates:
+        return ""
+    for t in templates:
+        if str(_tpl_get(t, "＊スケジュール雛形名") or "").strip() == GENERAL_TEMPLATE_NAME:
+            tid = str(_tpl_get(t, "＊スケジュール雛形ID") or "").strip()
+            if tid:
+                return tid
+    tpl = find_matching_template(GENERAL_TEMPLATE_START, GENERAL_TEMPLATE_END, 0, templates)
+    if tpl:
+        tid = str(_tpl_get(tpl, "＊スケジュール雛形ID") or "").strip()
+        if tid:
+            return tid
+    return ""
+
 
 def _build_raw_legend_times(raw_legend) -> dict:
     """{code: (start_raw_str, end_raw_str, break_minutes)} を作る
@@ -285,6 +327,7 @@ def _resolve_cell_value(
     legend_normalized: dict,
     code_to_template_name: dict[str, str],
     off_markers: set[str],
+    general_template_id: str = "",
 ) -> str:
     """1セルの最終的な書き込み値を決定する"""
     weekday = day_obj.weekday()  # Mon=0 ... Sun=6
@@ -295,6 +338,11 @@ def _resolve_cell_value(
     entry = legend_normalized.get(code) if code else None
     if entry:
         label = entry.get("label") or ""
+
+    # 0) 全日有休（有 / 有休） → 一般(9:00~17:30) 雛形ID。
+    #    休扱い(所/法)より優先する。半休(AM/PM)は対象外＝下の休扱いへ流れる。
+    if general_template_id and _is_full_day_paid_leave(code, label):
+        return general_template_id
 
     # 1) 明け休 → "0"
     if _is_ake_code(code, label):
@@ -357,6 +405,8 @@ def export_jinjer_schedule_csv(
     code_to_template_name = build_legend_to_template_name(legend, template_csv_path)
     raw_times = _build_raw_legend_times(legend)
     templates = load_jinjer_templates(template_csv_path) if template_csv_path else []
+    # 全日有休セルに入れる「一般」(9:00~17:30) 雛形ID（無ければ空＝従来通り休扱い）
+    general_template_id = _resolve_general_template_id(templates)
 
     markers = set(DEFAULT_OFF_MARKERS)
     if off_markers:
@@ -452,6 +502,7 @@ def export_jinjer_schedule_csv(
                     legend_normalized,
                     code_to_template_name,
                     markers,
+                    general_template_id,
                 )
                 cells.append(value)
 

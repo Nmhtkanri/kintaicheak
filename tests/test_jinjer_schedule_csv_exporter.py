@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.jinjer_schedule_csv_exporter import (
     _is_ake_code,
+    _is_full_day_paid_leave,
     _off_value_for_weekday,
+    _resolve_general_template_id,
     _resolve_merged_cell_value,
     _resolve_cell_value,
     _sanitize_filename_part,
@@ -465,3 +467,57 @@ def test_export_split_with_empty_group_map_produces_one_misc_file(tmp_path):
     assert result["csv_files"][0]["rows"] == 2
     # 2 名とも ungrouped 扱い
     assert len(result["ungrouped"]) == 2
+
+
+# =============================================================================
+# 全日有休 → 一般(9:00~17:30) 雛形 のテスト
+# =============================================================================
+
+def test_is_full_day_paid_leave():
+    assert _is_full_day_paid_leave("有") is True
+    assert _is_full_day_paid_leave("有休") is True
+    assert _is_full_day_paid_leave("有給") is True
+    assert _is_full_day_paid_leave("", label="有休") is True
+    # 半休は対象外
+    assert _is_full_day_paid_leave("AM有休") is False
+    assert _is_full_day_paid_leave("PM有休") is False
+    assert _is_full_day_paid_leave("午前有") is False
+    assert _is_full_day_paid_leave("半休") is False
+    # 有休でないもの
+    assert _is_full_day_paid_leave("休") is False
+    assert _is_full_day_paid_leave("公") is False
+    assert _is_full_day_paid_leave("A") is False
+
+
+def test_resolve_general_template_id_by_name_and_time():
+    templates = [
+        {"＊スケジュール雛形名": "一般",
+         "＊スケジュール雛形ID": "1",
+         "＊出勤時間(0:00~47:59)": "9:00:00",
+         "＊退勤時間(0:00~47:59)": "17:30:00"},
+    ]
+    assert _resolve_general_template_id(templates) == "1"
+    # 名前が違っても 9:00-17:30 の時刻一致でフォールバック
+    templates2 = [
+        {"＊スケジュール雛形名": "日勤",
+         "＊スケジュール雛形ID": "JT1",
+         "＊出勤時間(0:00~47:59)": "9:00:00",
+         "＊退勤時間(0:00~47:59)": "17:30:00"},
+    ]
+    assert _resolve_general_template_id(templates2) == "JT1"
+    # 該当なし → 空文字
+    assert _resolve_general_template_id([]) == ""
+
+
+def test_resolve_cell_value_full_day_paid_leave():
+    legend = normalize_legend([{"code": "有", "label": "有休", "is_off": True}])
+    # general_template_id があれば 有 は一般雛形IDに化ける（休扱いより優先）
+    val = _resolve_cell_value("有", date(2026, 6, 15), legend, {}, set(["休"]), "1")
+    assert val == "1"
+    # general_template_id が無ければ従来通り休扱い（月曜=所）
+    val_off = _resolve_cell_value("有", date(2026, 6, 15), legend, {}, set(["休"]), "")
+    assert val_off == "所"
+    # 半休は一般にしない（凡例 is_off → 所）
+    legend2 = normalize_legend([{"code": "AM有", "label": "AM有休", "is_off": True}])
+    val_half = _resolve_cell_value("AM有", date(2026, 6, 15), legend2, {}, set(), "1")
+    assert val_half == "所"
