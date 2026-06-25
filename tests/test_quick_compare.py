@@ -14,6 +14,7 @@ from quick_compare import (  # noqa: E402
     JINJER_HEADERS,
     LogEntry,
     classify_total_work,
+    clean_punch_comment,
     compute_diffs,
     format_stamp_comments,
     kintai_total_minutes,
@@ -21,6 +22,7 @@ from quick_compare import (  # noqa: E402
     normalize_kintai_result_columns,
     recommend_judge_label,
     resolve_jinjer_extra_columns,
+    strip_punch_noise_words,
     to_jinjer_overnight_punch_out,
 )
 
@@ -686,3 +688,47 @@ def test_punch_comment_transcribed_from_jinjer():
     punch_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_IN]
     assert punch_rows
     assert punch_rows[0].punch_comment == "出勤: KDX出社のため、10:00時差出勤"
+
+
+# =============================================================================
+# 打刻コメントの定型語除外（打刻忘れ／打刻漏れ／打刻修正）
+# =============================================================================
+
+def test_strip_punch_noise_words_removes_only_keywords():
+    # 語そのものだけなら空に
+    assert strip_punch_noise_words("打刻忘れ") == ""
+    assert strip_punch_noise_words("打刻漏れ") == ""
+    assert strip_punch_noise_words("打刻修正") == ""
+    # 文中の語だけ除去し、残りは保持
+    assert strip_punch_noise_words("打刻忘れ 客先で終日対応") == "客先で終日対応"
+    assert strip_punch_noise_words("客先直行のため打刻修正") == "客先直行のため"
+    # 空・NaN
+    assert strip_punch_noise_words("") == ""
+    assert strip_punch_noise_words(None) == ""
+    assert strip_punch_noise_words("nan") == ""
+
+
+def test_clean_punch_comment_strips_noise_per_side():
+    # 出勤側が定型語のみ → 出勤ラベルは落ち、退勤側の本文は残る
+    out = clean_punch_comment("出勤: 打刻忘れ , 退勤: 私用で早退")
+    assert out == "退勤: 私用で早退"
+    # 退勤側が定型語のみ → 退勤ラベルは落ち、出勤側は残る
+    out2 = clean_punch_comment("出勤: 客先直行 , 退勤: 打刻修正")
+    assert out2 == "出勤: 客先直行"
+    # 両方本文あり（定型語なし）はそのまま
+    out3 = clean_punch_comment("出勤: 直行 , 退勤: 直帰")
+    assert out3 == "出勤: 直行 / 退勤: 直帰"
+
+
+def test_format_stamp_comments_strips_noise():
+    # 除外はコメント本文に対して行う（打刻方法ラベル [打刻修正申請] 等のメタ情報は対象外）。
+    items = [
+        {"type": "出勤", "method": "PC", "comment": "打刻忘れ KDX出社"},
+        {"type": "退勤", "method": "PC", "comment": "打刻修正"},
+    ]
+    out = format_stamp_comments(items)
+    # 1件目: 本文「KDX出社」が残り、定型語は消える
+    assert "KDX出社" in out
+    assert "打刻忘れ" not in out
+    # 2件目: 定型語のみ → その項目ごと消える（退勤の項目が出ない）
+    assert "退勤" not in out

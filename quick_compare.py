@@ -476,6 +476,10 @@ def load_stamp_correction_reasons(
             reason = str(row.get(reason_col) or "").strip()
             if not reason or reason.lower() == "nan":
                 continue
+            # 定型語（打刻忘れ／打刻漏れ／打刻修正）は転記対象から除外。残りが無ければスキップ。
+            reason = strip_punch_noise_words(reason)
+            if not reason:
+                continue
             emp_id = str(row.get(emp_col) or "").strip()
             date_iso = _parse_jp_date(row.get(date_col))
             if not emp_id or not date_iso:
@@ -637,11 +641,38 @@ def to_int_diff(value: Any) -> int | None:
         return None
 
 
+# 差異一覧へ転記する打刻系コメントから除外する定型語。
+# これらの語そのものは判断材料にならない（打刻を忘れた／直した、という事実だけ）ため、
+# 文中にあってもその語だけ取り除き、残った本文は必ず転記する。
+PUNCH_NOISE_WORDS = ("打刻忘れ", "打刻漏れ", "打刻修正")
+
+
+def strip_punch_noise_words(text: Any) -> str:
+    """打刻コメントから定型語（打刻忘れ／打刻漏れ／打刻修正）だけを除去する。
+
+    語を抜いた跡に残る区切り文字・空白を軽く整理し、本文が残ればそれを返す。
+    定型語しか無ければ空文字を返す。
+    """
+    s = str(text or "")
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return ""
+    for w in PUNCH_NOISE_WORDS:
+        s = s.replace(w, "")
+    # 連続した空白を1つに
+    s = re.sub(r"[ \t　]+", " ", s)
+    # 語を抜いた跡に区切りだけが連続して残った箇所を畳む（例: "、 、" → "、"）
+    s = re.sub(r"\s*([、，,/／・])\s*(?=[、，,/／・])", "", s)
+    # 先頭・末尾に残った区切り・空白を除去
+    s = s.strip(" \t　、，,/／・:：-—ー")
+    return s
+
+
 def clean_punch_comment(value: Any) -> str:
     """汎用データ「打刻時コメント」(#96) の値を整形する。
 
     形式は "出勤: X , 退勤: Y" で、中身が無いと "出勤:  , 退勤:  ," のようなゴミ文字列に
     なるため、中身のあるラベルだけ残す。何も無ければ空文字を返す。
+    定型語（打刻忘れ／打刻漏れ／打刻修正）は転記時に各本文から除外する。
     """
     s = clean_cell(value)
     if not s:
@@ -650,14 +681,14 @@ def clean_punch_comment(value: Any) -> str:
     found_label = False
     for m in re.finditer(r"(出勤|退勤)\s*[:：]\s*([^,]*)", s):
         found_label = True
-        body = m.group(2).strip()
+        body = strip_punch_noise_words(m.group(2))
         if body:
             parts.append(f"{m.group(1)}: {body}")
     if parts:
         return " / ".join(parts)
     if found_label:
         return ""  # ラベルはあるが中身なし → ゴミなので空
-    return s  # 想定外フォーマットはそのまま
+    return strip_punch_noise_words(s)  # 想定外フォーマットも定型語だけは除外
 
 
 def format_stamp_comments(items: list[dict]) -> str:
@@ -667,7 +698,8 @@ def format_stamp_comments(items: list[dict]) -> str:
     """
     parts = []
     for it in items or []:
-        comment = str(it.get("comment") or "").strip()
+        # 定型語（打刻忘れ／打刻漏れ／打刻修正）は転記対象から除外。残りが無ければスキップ。
+        comment = strip_punch_noise_words(it.get("comment"))
         if not comment:
             continue
         stype = str(it.get("type") or "").strip()
