@@ -47,6 +47,7 @@ JINJER_COL_PUNCH_OUT = "退勤1"
 JINJER_COL_BREAK_1_START = "休憩1"
 JINJER_COL_BREAK_1_END = "復帰1"
 JINJER_COL_BREAK_TOTAL = "休憩時間"
+JINJER_COL_SCHED_IN = "出勤予定時刻"  # スケジュール（予定）開始時刻。出勤採用時に実打刻へ合わせる
 JINJER_COL_EMP_ID = "*従業員ID"
 JINJER_COL_DATE = "*年月日"
 
@@ -112,6 +113,7 @@ class Stats:
     # 実際の上書き処理結果
     overwritten_punch_in: int = 0
     overwritten_punch_out: int = 0
+    overwritten_sched_in: int = 0  # 出勤採用に合わせてスケジュール開始（出勤予定時刻）も更新した件数
     skipped_break: int = 0  # 承認されたが上書きしなかった
     skipped_total: int = 0
     overwritten_break_start: int = 0
@@ -429,6 +431,7 @@ def apply_approved_rows(
     break_start_col = headers.index(JINJER_COL_BREAK_1_START) if JINJER_COL_BREAK_1_START in headers else None
     break_end_col = headers.index(JINJER_COL_BREAK_1_END) if JINJER_COL_BREAK_1_END in headers else None
     break_total_col = headers.index(JINJER_COL_BREAK_TOTAL) if JINJER_COL_BREAK_TOTAL in headers else None
+    sched_in_col = headers.index(JINJER_COL_SCHED_IN) if JINJER_COL_SCHED_IN in headers else None
 
     # 実績確定状況列があれば、上書きしたうち何件が実績確定済だったかを集計する（参考表示のみ）
     finalized_col = headers.index("実績確定状況") if "実績確定状況" in headers else None
@@ -504,8 +507,14 @@ def apply_approved_rows(
 
         # 上書き（実績確定済かどうかに関わらず、承認されたものは上書きする）
         if app.kind == DIFF_KIND_PUNCH_IN:
-            rows[idx][punch_in_col] = app.manual_fix_value or app.auto_fix_value
+            new_in = app.manual_fix_value or app.auto_fix_value
+            rows[idx][punch_in_col] = new_in
             stats.overwritten_punch_in += 1
+            # 人間判断で採用した就業開始時刻に、スケジュール開始（出勤予定時刻）も合わせる。
+            # 採用値が空（jinjer打刻を消すケース）のときは予定を消さない。
+            if sched_in_col is not None and new_in:
+                rows[idx][sched_in_col] = new_in
+                stats.overwritten_sched_in += 1
         elif app.kind == DIFF_KIND_PUNCH_OUT:
             new_out = app.manual_fix_value or app.auto_fix_value
             # 夜勤で翌朝退勤の場合、jinjer は 24時超表記でないとインポートできないため
@@ -555,6 +564,7 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print()
     print(f"{mode} ===== 実際の上書き結果 =====")
     print(f"  出勤1 上書き         : {stats.overwritten_punch_in}")
+    print(f"  └ 出勤予定時刻も更新 : {stats.overwritten_sched_in}")
     print(f"  退勤1 上書き         : {stats.overwritten_punch_out}")
     print(f"  休憩1 上書き         : {stats.overwritten_break_start}")
     print(f"  復帰1 上書き         : {stats.overwritten_break_end}")

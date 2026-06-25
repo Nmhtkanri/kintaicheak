@@ -315,3 +315,61 @@ def test_run_quick_export_label_jinjer_keeps_jinjer(tmp_path):
     assert _read_output_row(output_path)["出勤1"] == "9:00"  # 書き戻さない
     assert result.stats.approved == 0
     assert result.stats.rejected == 1
+
+
+# =============================================================================
+# 出勤採用時にスケジュール開始（出勤予定時刻）も合わせる
+# =============================================================================
+
+def test_apply_approved_rows_syncs_schedule_start():
+    from quick_export import (
+        apply_approved_rows, build_jinjer_row_index, ApprovedRow, Stats,
+        DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT,
+    )
+
+    headers = ["*従業員ID", "*年月日", "出勤予定時刻", "退勤予定時刻",
+               "出勤1", "退勤1", "休憩1", "復帰1", "休憩時間", "実績確定状況"]
+    rows = [["2020001", "2026/6/2", "9:00", "17:30", "8:50", "17:40", "", "", "", "FALSE"]]
+    idx = build_jinjer_row_index(headers, rows)
+    stats = Stats()
+    approved = [
+        ApprovedRow(emp_id="2020001", target_date_iso="2026-06-02", kind=DIFF_KIND_PUNCH_IN,
+                    auto_fix_value="8:30", manual_fix_value="", manual_break_start="",
+                    manual_break_end="", manual_break_total="", name="テスト",
+                    warn_level="", source_diff_row_id=1),
+        ApprovedRow(emp_id="2020001", target_date_iso="2026-06-02", kind=DIFF_KIND_PUNCH_OUT,
+                    auto_fix_value="17:40", manual_fix_value="", manual_break_start="",
+                    manual_break_end="", manual_break_total="", name="テスト",
+                    warn_level="", source_diff_row_id=2),
+    ]
+    apply_approved_rows(headers, rows, idx, approved, stats)
+
+    # 出勤1 と 出勤予定時刻 の両方が採用値 8:30 に揃う
+    assert rows[0][headers.index("出勤1")] == "8:30"
+    assert rows[0][headers.index("出勤予定時刻")] == "8:30"
+    # 退勤側は予定を触らない
+    assert rows[0][headers.index("退勤予定時刻")] == "17:30"
+    assert stats.overwritten_punch_in == 1
+    assert stats.overwritten_sched_in == 1
+
+
+def test_apply_approved_rows_blank_adoption_keeps_schedule():
+    """採用値が空（jinjer打刻を消すケース）のときは出勤予定時刻を消さない。"""
+    from quick_export import (
+        apply_approved_rows, build_jinjer_row_index, ApprovedRow, Stats,
+        DIFF_KIND_PUNCH_IN,
+    )
+    headers = ["*従業員ID", "*年月日", "出勤予定時刻", "出勤1", "退勤1"]
+    rows = [["2020002", "2026/6/3", "10:00", "9:00", "17:00"]]
+    idx = build_jinjer_row_index(headers, rows)
+    stats = Stats()
+    approved = [
+        ApprovedRow(emp_id="2020002", target_date_iso="2026-06-03", kind=DIFF_KIND_PUNCH_IN,
+                    auto_fix_value="", manual_fix_value="", manual_break_start="",
+                    manual_break_end="", manual_break_total="", name="空採用",
+                    warn_level="", source_diff_row_id=3),
+    ]
+    apply_approved_rows(headers, rows, idx, approved, stats)
+    assert rows[0][headers.index("出勤1")] == ""
+    assert rows[0][headers.index("出勤予定時刻")] == "10:00"  # 予定は維持
+    assert stats.overwritten_sched_in == 0

@@ -1097,6 +1097,7 @@ def route_quick_export():
             "approved_break": stats.approved_break,
             "approved_total": stats.approved_total,
             "overwritten_punch_in": stats.overwritten_punch_in,
+            "overwritten_sched_in": stats.overwritten_sched_in,
             "overwritten_punch_out": stats.overwritten_punch_out,
             "overwritten_break_start": stats.overwritten_break_start,
             "overwritten_break_end": stats.overwritten_break_end,

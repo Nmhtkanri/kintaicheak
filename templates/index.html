@@ -420,7 +420,7 @@
             <div id="qe-mode-label" style="font-weight:bold; margin-bottom:8px"></div>
             <table style="border-collapse:collapse; font-size:13px">
                 <tr><td style="padding:2px 8px">承認 / 却下 / 保留 / 未判断:</td><td><span id="qe-judges"></span></td></tr>
-                <tr><td style="padding:2px 8px">出勤1 上書き:</td><td><span id="qe-overwrite-in">0</span></td></tr>
+                <tr><td style="padding:2px 8px">出勤1 上書き:</td><td><span id="qe-overwrite-in">0</span> <span style="color:#888">（うち出勤予定時刻も更新: <span id="qe-overwrite-sched-in">0</span>）</span></td></tr>
                 <tr><td style="padding:2px 8px">退勤1 上書き:</td><td><span id="qe-overwrite-out">0</span></td></tr>
                 <tr><td style="padding:2px 8px">休憩列 上書き:</td><td><span id="qe-overwrite-break">0</span></td></tr>
                 <tr><td style="padding:2px 8px">休憩・総労働時間スキップ:</td><td><span id="qe-skipped">0</span></td></tr>
@@ -584,6 +584,7 @@
             document.getElementById('qe-judges').textContent =
                 `${s.approved} / ${s.rejected} / ${s.held} / ${s.pending}`;
             document.getElementById('qe-overwrite-in').textContent = s.overwritten_punch_in;
+            document.getElementById('qe-overwrite-sched-in').textContent = s.overwritten_sched_in;
             document.getElementById('qe-overwrite-out').textContent = s.overwritten_punch_out;
             document.getElementById('qe-overwrite-break').textContent =
                 (s.overwritten_break_start + s.overwritten_break_end + s.overwritten_break_total) +
