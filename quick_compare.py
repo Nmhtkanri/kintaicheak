@@ -159,23 +159,37 @@ from services.triage import (  # noqa: E402
     TRIAGE_ORDER,
     JUDGE_KINTAI,
     JUDGE_JINJER,
+    JUDGE_HOLD,
 )
 
 
-def recommend_judge_label(kind: str, diff_minutes: str, threshold_minutes: int) -> str:
+def recommend_judge_label(
+    kind: str,
+    diff_minutes: str,
+    threshold_minutes: int,
+    has_comment: bool = False,
+) -> str:
     """自動修正提案値（採用ラベル）を決める。
 
-    出退勤の数値差分が許容しきい値（差分勤怠チェッカーで選択した範囲）以内なら
-    請求勤怠（=請求勤怠を採用）、超過なら jinjer勤怠。
-    総労働・休憩・差分なし（数値化できない）は jinjer勤怠（変更なし）。
+    出退勤の新ルール（2026-06-25 谷津指定）:
+      - 打刻時/打刻修正コメントに記載あり → jinjer勤怠
+      - コメントなし & 差分が許容しきい値以上、または片側欠落（差分なし）→ 保留
+      - コメントなし & 差分が許容しきい値未満 → 請求勤怠
+    総労働時間は手順3で書き戻せない計算値のため対象外＝従来通り jinjer勤怠（変更なし）。
     jinjer未登録は採用ラベルを付けない（書き戻し対象外・人が登録要否を判断する）。
     """
     if kind == DIFF_KIND_UNMATCHED:
         return ""
+    if kind == DIFF_KIND_TOTAL:
+        return JUDGE_JINJER
     if kind in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT):
+        if has_comment:
+            return JUDGE_JINJER
         d = to_int_diff(diff_minutes)
-        if d is not None:
-            return JUDGE_KINTAI if abs(d) <= threshold_minutes else JUDGE_JINJER
+        # 片側欠落（差分なし）は安全側に保留。差分が許容しきい値以上も保留。
+        if d is None or abs(d) >= threshold_minutes:
+            return JUDGE_HOLD
+        return JUDGE_KINTAI
     return JUDGE_JINJER
 
 
@@ -950,8 +964,12 @@ def compute_diffs(
             holiday_name1=r.holiday_name1,
             holiday_name1_type=r.holiday_name1_type,
         )
-        # 自動修正提案値（採用ラベル）。差分が許容しきい値内→請求勤怠 / 超過→jinjer勤怠。
-        r.recommend_judge = recommend_judge_label(r.kind, r.diff_minutes, threshold_minutes)
+        # 自動修正提案値（採用ラベル）。新ルール: コメントあり→jinjer勤怠 /
+        # 差分≧しきい値or片側欠落→保留 / それ以外→請求勤怠（総労働は対象外）。
+        has_comment = bool((r.punch_comment or "").strip() or (r.jinjer_stamp_comment or "").strip())
+        r.recommend_judge = recommend_judge_label(
+            r.kind, r.diff_minutes, threshold_minutes, has_comment
+        )
 
     return rows
 

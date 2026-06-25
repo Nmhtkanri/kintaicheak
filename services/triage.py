@@ -17,6 +17,7 @@ TRIAGE_INFO_ONLY = "参考のみ"  # 手順3で書き戻さない・判断不要
 # 既定の人間判断（quick_compare / quick_export と同じ語彙）
 JUDGE_KINTAI = "請求勤怠"   # 請求勤怠を正 → jinjer へ書き戻す
 JUDGE_JINJER = "jinjer勤怠"  # jinjer を正 → 書き戻さない
+JUDGE_HOLD = "保留"          # 人が個別に確認する（書き戻さない）
 
 # 警告レベル（quick_compare の LEVEL_* と一致させる）
 LEVEL_DANGER = "DANGER"

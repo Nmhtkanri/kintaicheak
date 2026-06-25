@@ -509,23 +509,27 @@ def test_human_judgment_conditional_formatting(tmp_path):
     assert decoded.count('type="cellIs"') >= 2
 
 
-def test_recommend_judge_label_threshold():
-    """自動修正提案値（採用ラベル）: 出退勤差分がしきい値内→請求勤怠 / 超過→jinjer勤怠。"""
-    # 出退勤の差分がしきい値(10)以内 → 請求勤怠
+def test_recommend_judge_label_new_rule():
+    """新ルール: コメントあり→jinjer勤怠 / 差分≧しきい値or片側欠落→保留 / それ以外→請求勤怠。"""
+    # コメントなし & 差分がしきい値(10)未満 → 請求勤怠
     assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "9", 10) == "請求勤怠"
-    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "10", 10) == "請求勤怠"
-    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "-10", 10) == "請求勤怠"
-    # しきい値超過 → jinjer勤怠
-    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "11", 10) == "jinjer勤怠"
-    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "-30", 10) == "jinjer勤怠"
-    # 数値化できない出退勤（jinjer欠落など）→ jinjer勤怠
-    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "", 10) == "jinjer勤怠"
-    # 総労働・その他 → jinjer勤怠（変更なし）
+    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "-9", 10) == "請求勤怠"
+    # コメントなし & 差分がしきい値以上 → 保留（10ちょうども「以上」で保留）
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "10", 10) == "保留"
+    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "11", 10) == "保留"
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "-30", 10) == "保留"
+    # 片側欠落（差分なし）→ 保留（安全側）
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "", 10) == "保留"
+    # コメントあり → jinjer勤怠（差分の大小に関わらず）
+    assert recommend_judge_label(DIFF_KIND_PUNCH_IN, "5", 10, has_comment=True) == "jinjer勤怠"
+    assert recommend_judge_label(DIFF_KIND_PUNCH_OUT, "120", 10, has_comment=True) == "jinjer勤怠"
+    # 総労働 → 対象外＝jinjer勤怠（コメント有無に関わらず変更なし）
     assert recommend_judge_label(DIFF_KIND_TOTAL, "5", 10) == "jinjer勤怠"
+    assert recommend_judge_label(DIFF_KIND_TOTAL, "5", 10, has_comment=True) == "jinjer勤怠"
 
 
 def test_recommend_judge_label_set_on_rows():
-    """compute_diffs が各差異行に recommend_judge を設定する。"""
+    """compute_diffs が各差異行に recommend_judge を設定する（新ルール）。"""
     kintai_df = pd.DataFrame([{
         "氏名": "上原 奏吾",
         "日付": date(2026, 4, 1),
@@ -544,8 +548,33 @@ def test_recommend_judge_label_set_on_rows():
     )
     in_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_IN)
     out_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT)
-    assert in_row.recommend_judge == "請求勤怠"   # 差分5分 ≤ 10
-    assert out_row.recommend_judge == "jinjer勤怠"  # 差分120分 > 10
+    assert in_row.recommend_judge == "請求勤怠"   # 差分5分 < 10 / コメントなし
+    assert out_row.recommend_judge == "保留"      # 差分120分 ≥ 10 / コメントなし
+
+
+def test_recommend_judge_label_comment_makes_jinjer():
+    """打刻時コメントがある出退勤差異は、差分が大きくても jinjer勤怠 を提案する。"""
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "9:30", JINJER_HEADERS["punch_out_1"]: "18:00",
+        "打刻時コメント": "出勤: 客先直行のため",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾", "日付": date(2026, 4, 1),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:30", "出勤差分(分)": 30,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): jrow},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs, extra_cols, threshold_minutes=10,
+    )
+    in_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_IN)
+    assert in_row.punch_comment  # コメントが転記されている
+    assert in_row.recommend_judge == "jinjer勤怠"  # コメントあり → jinjer勤怠
 
 
 def test_long_work_over_10h_no_longer_warns():
