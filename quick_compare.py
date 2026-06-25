@@ -342,6 +342,39 @@ def to_jinjer_overnight_punch_out(punch_in: Any, punch_out: Any) -> str:
     return f"{h:02d}:{m:02d}"
 
 
+def overnight_display_value(
+    value: Any, ref_in: Any, sched_out: Any = None, sched_in: Any = None
+) -> str:
+    """夜勤など深夜を跨ぐ退勤時刻を 24時超表記(25:00~ / 33:00~)へ揃える（差異一覧の表示用）。
+
+    変換条件（いずれかを満たせば +24h）:
+      - 実出勤 ref_in があり、退勤 < 出勤（同日内で逆転＝翌日にずれ込み）
+      - 退勤予定 sched_out が24時超（夜勤スケジュール）で、退勤が翌朝側
+        （出勤予定 sched_in 未満、無ければ正午未満）
+    すでに24時超表記・空・不正値はそのまま返す（冪等）。退勤(out)の表示にのみ使う。
+    出退勤の差分は両側を同じだけ +24h するため不変（33:00 と 33:01 の差は 1 分）。
+    """
+    out_min = parse_hhmm(value)
+    if out_min is None or out_min >= 24 * 60:
+        return clean_cell(value)
+    overnight = False
+    in_min = parse_hhmm(ref_in)
+    if in_min is not None and out_min < in_min:
+        overnight = True
+    else:
+        sout = parse_hhmm(sched_out)
+        if sout is not None and sout >= 24 * 60:
+            sin = parse_hhmm(sched_in)
+            ref = (sin % (24 * 60)) if sin is not None else 12 * 60
+            if out_min < ref:
+                overnight = True
+    if not overnight:
+        return clean_cell(value)
+    adjusted = out_min + 24 * 60
+    h, m = divmod(adjusted, 60)
+    return f"{h:02d}:{m:02d}"
+
+
 def first_present(row: pd.Series, candidates: list[str]) -> Any:
     for col in candidates:
         if col not in row:
@@ -849,12 +882,15 @@ def compute_diffs(
         k_out = clean_cell(krow.get("勤務表_退勤"))
         j_out = clean_cell(krow.get("jinjer_退勤"))
         diff_out = to_int_diff(krow.get("退勤差分(分)"))
+        # 夜勤など深夜跨ぎの退勤は 24時超表記(33:00 等)で表示する（差分は両側同値補正で不変）。
+        k_out_disp = overnight_display_value(k_out, k_in, extra["sched_out"], extra["sched_in"])
+        j_out_disp = overnight_display_value(j_out, j_in, extra["sched_out"], extra["sched_in"])
         if diff_out is not None and diff_out != 0:
             level, reason = classify_punch_diff(diff_out, "out")
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
                 kind=DIFF_KIND_PUNCH_OUT,
-                kintai_value=k_out, jinjer_value=j_out, diff_minutes=str(diff_out),
+                kintai_value=k_out_disp, jinjer_value=j_out_disp, diff_minutes=str(diff_out),
                 warn_level=level, warn_reason=reason,
                 auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
                 finalized=finalized,
@@ -866,7 +902,7 @@ def compute_diffs(
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
                 kind=DIFF_KIND_PUNCH_OUT,
-                kintai_value=k_out, jinjer_value="", diff_minutes="",
+                kintai_value=k_out_disp, jinjer_value="", diff_minutes="",
                 warn_level=LEVEL_WARN,
                 warn_reason="jinjer退勤なし / 請求勤怠側に時刻あり",
                 auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
@@ -881,7 +917,7 @@ def compute_diffs(
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
                 kind=DIFF_KIND_PUNCH_OUT,
-                kintai_value="", jinjer_value=j_out, diff_minutes="",
+                kintai_value="", jinjer_value=j_out_disp, diff_minutes="",
                 warn_level=LEVEL_WARN,
                 warn_reason="請求勤怠なし / jinjer側に時刻あり",
                 auto_fix_value="",

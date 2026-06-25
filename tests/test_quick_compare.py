@@ -20,6 +20,7 @@ from quick_compare import (  # noqa: E402
     kintai_total_minutes,
     load_stamp_correction_reasons,
     normalize_kintai_result_columns,
+    overnight_display_value,
     recommend_judge_label,
     resolve_jinjer_extra_columns,
     strip_punch_noise_words,
@@ -247,8 +248,8 @@ def test_compute_diffs_converts_overnight_punch_out_to_jinjer_format():
 
     out_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT]
     assert len(out_rows) == 1
-    # 請求勤怠値（表示）は元の 08:15、自動修正提案値は jinjer 用の 32:15
-    assert out_rows[0].kintai_value == "08:15"
+    # 夜勤の退勤は表示も 24時超表記に揃える（請求勤怠値=32:15）。自動修正提案値も 32:15。
+    assert out_rows[0].kintai_value == "32:15"
     assert out_rows[0].auto_fix_value == "32:15"
 
 
@@ -761,3 +762,51 @@ def test_format_stamp_comments_strips_noise():
     assert "打刻忘れ" not in out
     # 2件目: 定型語のみ → その項目ごと消える（退勤の項目が出ない）
     assert "退勤" not in out
+
+
+# =============================================================================
+# 夜勤の退勤を 24時超表記(33:00 等)で表示
+# =============================================================================
+
+def test_overnight_display_value_by_actual_in():
+    # 実出勤 20:45 → 退勤 09:00 は翌朝 ＝ 33:00
+    assert overnight_display_value("09:00", "20:45") == "33:00"
+    assert overnight_display_value("01:00", "22:00") == "25:00"
+    # 通常勤務（退勤 > 出勤）は変換しない
+    assert overnight_display_value("18:00", "09:00") == "18:00"
+    # すでに24時超表記は冪等
+    assert overnight_display_value("33:00", "20:45") == "33:00"
+    # 空・不正はそのまま空
+    assert overnight_display_value("", "20:45") == ""
+
+
+def test_overnight_display_value_by_schedule_when_in_missing():
+    # 実出勤が無くても、退勤予定が24時超(夜勤)で退勤が翌朝側なら +24h
+    assert overnight_display_value("09:00", "", sched_out="33:00", sched_in="20:45") == "33:00"
+    # 退勤予定が通常(日勤)なら変換しない
+    assert overnight_display_value("09:00", "", sched_out="17:30", sched_in="09:00") == "09:00"
+
+
+def test_compute_diffs_night_shift_punch_out_shown_as_over24():
+    """夜勤(出勤20:45/退勤予定33:00)の退勤09:00 は差異一覧で 33:00 表示。差分は不変。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "田中 一郎", "日付": date(2026, 5, 7),
+        "勤務表_出勤": "20:45", "jinjer_出勤": "20:45", "出勤差分(分)": 0,
+        "勤務表_退勤": "09:00", "jinjer_退勤": "09:01", "退勤差分(分)": 1,
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "20:45", JINJER_HEADERS["punch_out_1"]: "09:01",
+        "出勤予定時刻": "20:45", "退勤予定時刻": "33:00",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-05-07"): jrow},
+        {"田中 一郎": "2018057", "田中一郎": "2018057"},
+        logs, extra_cols, threshold_minutes=10,
+    )
+    out_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT)
+    assert out_row.kintai_value == "33:00"
+    assert out_row.jinjer_value == "33:01"
+    assert out_row.diff_minutes == "1"  # 差分は不変
