@@ -373,3 +373,52 @@ def test_apply_approved_rows_blank_adoption_keeps_schedule():
     assert rows[0][headers.index("出勤1")] == ""
     assert rows[0][headers.index("出勤予定時刻")] == "10:00"  # 予定は維持
     assert stats.overwritten_sched_in == 0
+
+
+def test_run_quick_export_punch_uses_seikyu_value_when_proposal_is_label(tmp_path):
+    """新フォーマット（自動修正提案値=採用ラベル）で、請求勤怠を採用した退勤を
+    請求勤怠値の時刻で書き戻す。太田さん5/7の『退勤1が空で上書き＝打刻消失』の回帰防止。"""
+    import csv as _csv
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    # 夜勤: 出勤20:45 / jinjer退勤09:01
+    with open(jinjer_path, "w", encoding="cp932", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(HEADERS)
+        w.writerow(["太田 太郎", "2020001", "2026/5/7", "20:45", "09:01", "", "", "0:00", "FALSE"])
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2020001", "氏名": "太田 太郎",
+        "対象日付": "2026-05-07", "差異種別": "退勤",
+        "請求勤怠値": "09:00",          # 表示している請求勤怠の退勤時刻（夜勤の翌朝）
+        "自動修正提案値": "請求勤怠",     # 新フォーマット: 採用ラベル（時刻ではない）
+        "打刻修正": "",                  # 手入力なし
+        "人間判断": "請求勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+    assert result.ok
+    row = _read_output_row(output_path)
+    # 空ではなく、請求勤怠値09:00が夜勤の24時超表記33:00に補正されて書き戻る
+    assert row["退勤1"] == "33:00"
+    assert result.stats.overwritten_punch_out == 1
+
+
+def test_run_quick_export_reverse_missing_punch_clears_when_seikyu_blank(tmp_path):
+    """逆向き片側欠落（請求勤怠値が空）を請求勤怠で承認したら、jinjer打刻を空で消す（意図どおり）。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)  # 上原 2018057 4/1 出勤9:00 退勤18:00
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01", "差異種別": "退勤",
+        "請求勤怠値": "",               # 請求勤怠側に打刻なし → 消す
+        "自動修正提案値": "保留",
+        "人間判断": "請求勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+    assert result.ok
+    assert _read_output_row(output_path)["退勤1"] == ""

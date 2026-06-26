@@ -275,7 +275,13 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
         emp_id = str(row.get("従業員ID") or "").strip()
         date_iso = normalize_date_iso(row.get("対象日付"))
         kind = str(row.get("差異種別") or "").strip()
-        auto_fix = _field("自動修正提案値")
+        # 「請求勤怠」を採用したときに書き戻す時刻。
+        # 旧フォーマットは「自動修正提案値」列に時刻が入っていた。新フォーマットでは同列が
+        # 採用ラベル（請求勤怠/jinjer勤怠/保留）に変わり _field で空に剥がれるため、表示している
+        # 「請求勤怠値」（＝請求勤怠の打刻時刻）にフォールバックする。
+        # ※これが無いと、退勤等を請求勤怠で承認したのに空で上書き＝打刻が消える不具合になる
+        #   （夜勤の太田さん 5/7 等で実際に退勤1が空になった）。
+        auto_fix = _field("自動修正提案値") or _field("請求勤怠値")
         # 列名は「打刻修正」（新）。旧フォーマットの「手入力修正値」も後方互換で読む。
         manual_fix = _field("打刻修正") or _field("手入力修正値")
         manual_break_start = _field("手入力休憩1")
