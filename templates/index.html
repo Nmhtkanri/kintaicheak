@@ -15,7 +15,7 @@
             <div class="workflow-kicker">処理モード</div>
             <h2>やりたい作業を選んでください</h2>
         </div>
-        <div class="workflow-note">勤怠チェック / スケジュールアップロード</div>
+        <div class="workflow-note">勤怠チェック / スケジュールアップロード / 経費チェック</div>
     </div>
 
     <form id="upload-form" class="workflow-card workflow-card-primary" enctype="multipart/form-data">
@@ -33,6 +33,13 @@
                 <span class="mode-card">
                     <span class="mode-title">スケジュールアップロードモード</span>
                     <span class="mode-desc">画像・Excelなどからスケジュールを読み取り、jinjer用CSVを作ります</span>
+                </span>
+            </label>
+            <label class="mode-option">
+                <input type="radio" name="mode" value="expense">
+                <span class="mode-card">
+                    <span class="mode-title">経費チェックモード</span>
+                    <span class="mode-desc">jinjer勤怠からテレワーク日数・出社日数を集計します</span>
                 </span>
             </label>
         </div>
@@ -439,6 +446,53 @@
         <div id="qe-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
+    <!-- ============================================================ -->
+    <!-- 経費チェックモード — テレワーク日数・出社日数                  -->
+    <!-- ============================================================ -->
+    <div class="workflow-card" id="expense-card" style="border:2px solid #548235; display:none">
+        <div class="step-header">
+            <div>
+                <div class="step-number" style="background:#548235">💴</div>
+                <div class="step-copy">
+                    <div class="section-title">経費チェック：テレワーク日数・出社日数（jinjer勤怠から自動集計）</div>
+                    <p class="hint">対象月を入れると、在籍者全員のテレワーク日数・出社日数・テレワーク実施日を社員番号/氏名ごとにExcelでまとめます。全員分を1名ずつ取得するため数分かかります。</p>
+                </div>
+            </div>
+        </div>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label style="display:inline-flex; align-items:center; gap:6px">
+                対象月:
+                <input type="text" id="ex-month" placeholder="例: 2026-05" style="width:160px; padding:6px 10px">
+            </label>
+            <label>
+                通勤費CSV（jinjer「人事データ出力（通勤費）」・任意）:
+                <input type="text" id="ex-commute-csv" placeholder="例: C:\Users\…\Downloads\jinjer_通勤費_….csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+                <div class="hint" style="margin-top:4px">指定すると同じExcelに「通勤費」シート（社員番号・氏名・出発・到着・経由1・経由2・通勤経路・支給金額など）を追加します。空欄ならテレワークのみ。</div>
+            </label>
+            <label>
+                出力ファイル名(任意・.xlsxは自動で付きます):
+                <input type="text" id="ex-output-filename" placeholder="経費チェック_2026年05月.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <div style="margin-top:6px">
+                <button type="button" class="btn btn-primary" id="ex-run-btn" style="background:#548235">💴 経費集計を実行</button>
+                <span id="ex-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="ex-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card"><div class="card-label">対象人数</div><div class="card-value" id="ex-cnt-emp">0</div></div>
+                <div class="summary-card"><div class="card-label">テレワーク延べ日数</div><div class="card-value" id="ex-cnt-tw">0</div></div>
+                <div class="summary-card"><div class="card-label">勤怠データなし</div><div class="card-value" id="ex-cnt-nodata">0</div></div>
+                <div class="summary-card"><div class="card-label">通勤費(件)</div><div class="card-value" id="ex-cnt-commute">0</div></div>
+            </div>
+            <a id="ex-download-link" href="#" class="btn btn-download" style="display:none">📥 経費チェックxlsxをダウンロード</a>
+            <pre id="ex-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+        </div>
+        <div id="ex-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
 </div>
 
 <script>
@@ -616,6 +670,49 @@
     }
     qeDryRunBtn.addEventListener('click', () => runQuickExport(false));
     qeExecuteBtn.addEventListener('click', () => runQuickExport(true));
+
+    // ----- 経費チェック（テレワーク日数）-----
+    const exRunBtn = document.getElementById('ex-run-btn');
+    if (exRunBtn) {
+        exRunBtn.addEventListener('click', async () => {
+            hideError('ex-error-area');
+            document.getElementById('ex-result-area').style.display = 'none';
+            document.getElementById('ex-status').textContent = '処理中...（在籍者全員の勤怠を取得します。数分かかります）';
+            exRunBtn.disabled = true;
+
+            const fd = new FormData();
+            fd.append('month', document.getElementById('ex-month').value);
+            fd.append('commute_csv', document.getElementById('ex-commute-csv').value);
+            fd.append('output_filename', document.getElementById('ex-output-filename').value);
+
+            try {
+                const res = await fetch('/expense_telework', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success){
+                    showError('ex-error-area', data.errors || ['処理に失敗しました']);
+                    document.getElementById('ex-status').textContent = '';
+                    return;
+                }
+                document.getElementById('ex-cnt-emp').textContent = data.stats.employee_count;
+                document.getElementById('ex-cnt-tw').textContent = data.stats.telework_total;
+                document.getElementById('ex-cnt-nodata').textContent = data.stats.no_data_count;
+                document.getElementById('ex-cnt-commute').textContent = data.stats.commute_count;
+                const dl = document.getElementById('ex-download-link');
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+                const consoleEl = document.getElementById('ex-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                document.getElementById('ex-result-area').style.display = 'block';
+                document.getElementById('ex-status').textContent = '完了';
+            } catch (e) {
+                showError('ex-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('ex-status').textContent = '';
+            } finally {
+                exRunBtn.disabled = false;
+            }
+        });
+    }
 })();
 </script>
 

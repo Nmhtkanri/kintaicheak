@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import uuid
 import logging
@@ -39,6 +40,7 @@ from pathlib import Path as _Path
 from quick_compare import run_quick_compare
 from quick_export import run_quick_export
 from services.batch_runner import run_batch_compare
+from services.expense_check import run_telework_export
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1116,6 +1118,65 @@ def route_quick_export():
 
     if not result.ok:
         payload["errors"] = [result.error] if result.error else ["CSV 生成に失敗しました"]
+        return jsonify(payload), 500
+    return jsonify(payload)
+
+
+@app.route("/expense_telework", methods=["POST"])
+def route_expense_telework():
+    """経費チェック: 指定月のテレワーク日数・出社日数を jinjer API から集計して Excel 出力。
+
+    フォーム:
+      - month           : YYYY-MM
+      - output_filename : 任意
+    在籍者全員の勤怠を1名ずつ取得するため数分かかる。
+    """
+    month_label = (request.form.get("month") or "").strip()
+    output_filename = (request.form.get("output_filename") or "").strip()
+    commute_csv_str = _clean_path_input(request.form.get("commute_csv"))
+
+    errors = []
+    if not re.fullmatch(r"\d{4}-\d{2}", month_label):
+        errors.append("対象月は YYYY-MM 形式で入力してください（例: 2026-05）")
+    commute_csv = _Path(commute_csv_str) if commute_csv_str else None
+    if commute_csv and not commute_csv.exists():
+        errors.append(f"通勤費CSVが見つかりません: {commute_csv}")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    if not output_filename:
+        y, m = month_label.split("-")
+        output_filename = f"テレワーク出社日数_{y}年{int(m):02d}月.xlsx"
+    output_filename = _ensure_extension(os.path.basename(output_filename), ".xlsx")
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result = run_telework_export(
+            month=month_label, output_path=output_path, log_func=_log, commute_csv=commute_csv
+        )
+    except Exception as e:
+        logger.exception("expense_telework failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    payload = {
+        "success": result.ok,
+        "download_url": f"/download/{output_filename}" if result.ok else None,
+        "output_filename": output_filename if result.ok else None,
+        "stats": {
+            "employee_count": result.employee_count,
+            "telework_total": result.telework_total,
+            "no_data_count": result.no_data_count,
+            "commute_count": result.commute_count,
+        },
+        "console": log_lines,
+    }
+    if not result.ok:
+        payload["errors"] = [result.error] if result.error else ["テレワーク集計に失敗しました"]
         return jsonify(payload), 500
     return jsonify(payload)
 

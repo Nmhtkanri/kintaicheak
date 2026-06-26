@@ -113,54 +113,41 @@ function applyModeUI(mode) {
     const monthlyCompareCard = document.getElementById('monthly-compare-card');
     const monthlyExportCard = document.getElementById('monthly-export-card');
     const batchCompareCard = document.getElementById('batch-compare-card');
+    const expenseCard = document.getElementById('expense-card');
 
-    if (mode === 'csv_export') {
-        // 勤怠チェックモード専用UIを非表示・無効化（FormDataから除外）
-        if (jinjerSection) jinjerSection.style.display = 'none';
-        if (timesheetSection) timesheetSection.style.display = 'none';
-        if (jinjerInput) jinjerInput.disabled = true;
-        if (timesheetInput) timesheetInput.disabled = true;
+    const isSchedule = mode === 'csv_export';
+    const isExpense = mode === 'expense';
+    const isMatch = !isSchedule && !isExpense;
 
-        // スケジュールアップロードモード専用UIを表示・有効化
-        if (targetYmSection) targetYmSection.style.display = '';
-        if (shiftFilesSection) shiftFilesSection.style.display = '';
-        if (shiftFilesInput) shiftFilesInput.disabled = false;
-        if (targetYearInput) targetYearInput.disabled = false;
-        if (targetMonthInput) targetMonthInput.disabled = false;
-        if (matchStepHeader) matchStepHeader.style.display = 'none';
-        if (scheduleStepHeader) scheduleStepHeader.style.display = '';
-        if (monthlyCompareCard) monthlyCompareCard.style.display = 'none';
-        if (monthlyExportCard) monthlyExportCard.style.display = 'none';
-        // 勤怠チェックの一括カード(⚡)はスケジュールモードでは不要
-        if (batchCompareCard) batchCompareCard.style.display = 'none';
+    // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
+    if (jinjerSection) jinjerSection.style.display = 'none';
+    if (timesheetSection) timesheetSection.style.display = 'none';
+    if (jinjerInput) jinjerInput.disabled = true;
+    if (timesheetInput) timesheetInput.disabled = true;
+    if (matchStepHeader) matchStepHeader.style.display = 'none';
+    if (settingsSection) settingsSection.style.display = 'none';
 
-        // 許容差分は不要。①フォームの実行ボタンはスケジュールCSV作成として表示
-        if (settingsSection) settingsSection.style.display = 'none';
-        if (runBtn) { runBtn.style.display = ''; runBtn.textContent = 'スケジュールCSVを作成'; }
-    } else {
-        // 勤怠チェックモード: 突合は ⚡一括(batch) と 手順2/3 で行うため、
-        // ①の突合アップロードフォーム本体は隠す（モード選択だけ残す）。
-        if (jinjerSection) jinjerSection.style.display = 'none';
-        if (timesheetSection) timesheetSection.style.display = 'none';
-        if (jinjerInput) jinjerInput.disabled = true;
-        if (timesheetInput) timesheetInput.disabled = true;
-        if (settingsSection) settingsSection.style.display = 'none';
-        if (matchStepHeader) matchStepHeader.style.display = 'none';
-        if (runBtn) runBtn.style.display = 'none';
+    // スケジュールアップロード専用UI（csv_export モードのみ表示・有効化）
+    if (targetYmSection) targetYmSection.style.display = isSchedule ? '' : 'none';
+    if (shiftFilesSection) shiftFilesSection.style.display = isSchedule ? '' : 'none';
+    if (shiftFilesInput) shiftFilesInput.disabled = !isSchedule;
+    if (targetYearInput) targetYearInput.disabled = !isSchedule;
+    if (targetMonthInput) targetMonthInput.disabled = !isSchedule;
+    if (scheduleStepHeader) scheduleStepHeader.style.display = isSchedule ? '' : 'none';
 
-        // スケジュールアップロード専用UIも非表示・無効化
-        if (targetYmSection) targetYmSection.style.display = 'none';
-        if (shiftFilesSection) shiftFilesSection.style.display = 'none';
-        if (shiftFilesInput) shiftFilesInput.disabled = true;
-        if (targetYearInput) targetYearInput.disabled = true;
-        if (targetMonthInput) targetMonthInput.disabled = true;
-        if (scheduleStepHeader) scheduleStepHeader.style.display = 'none';
-
-        // 勤怠チェックの導線（⚡一括＋手順2/手順3）を表示
-        if (batchCompareCard) batchCompareCard.style.display = '';
-        if (monthlyCompareCard) monthlyCompareCard.style.display = '';
-        if (monthlyExportCard) monthlyExportCard.style.display = '';
+    // ①フォームの実行ボタンはスケジュールモードのみ（スケジュールCSV作成）
+    if (runBtn) {
+        if (isSchedule) { runBtn.style.display = ''; runBtn.textContent = 'スケジュールCSVを作成'; }
+        else runBtn.style.display = 'none';
     }
+
+    // 勤怠チェックの導線（⚡一括＋手順2/手順3）は勤怠チェックモードのみ
+    if (batchCompareCard) batchCompareCard.style.display = isMatch ? '' : 'none';
+    if (monthlyCompareCard) monthlyCompareCard.style.display = isMatch ? '' : 'none';
+    if (monthlyExportCard) monthlyExportCard.style.display = isMatch ? '' : 'none';
+
+    // 経費チェックモード: 経費カードのみ表示
+    if (expenseCard) expenseCard.style.display = isExpense ? '' : 'none';
 }
 
 document.querySelectorAll('input[name="mode"]').forEach(radio => {
