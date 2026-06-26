@@ -119,3 +119,42 @@ def test_add_commute_sheet(tmp_path):
     # 合計行（支給金額の SUM 数式）
     total_row = 2 + 2
     assert str(ws.cell(row=total_row, column=COMMUTE_OUTPUT_COLUMNS.index("支給金額") + 1).value).startswith("=SUM")
+
+
+def test_fetch_commute_rows_via_api_maps_fields():
+    from services.expense_check import fetch_commute_rows_via_api
+
+    class FakeClient:
+        def get_commuting_information(self):
+            return [
+                {"employee_id": "2007002", "commuting": [
+                    {"departure": "笹塚", "arrival": "豊洲", "transit_1": "市ヶ谷", "transit_2": "",
+                     "path": "笹塚 → 豊洲", "type": {"name": "公共交通機関"}, "one_way_distance": "0.00",
+                     "payment": {"start_date": "2025-06", "interval": {"name": "毎月"},
+                                 "method": {"name": "一括"}, "total": "18350",
+                                 "tax_exemption_amount": "18350", "taxable_amount": "0"}},
+                ]},
+                {"employee_id": "2009009", "commuting": [
+                    {"departure": "A", "arrival": "B", "transit_1": "", "transit_2": "", "path": "A → B",
+                     "type": {"name": "車"}, "one_way_distance": "5.0",
+                     "payment": {"start_date": "2026-04", "interval": {"name": "6ヶ月"},
+                                 "method": {"name": "月割"}, "total": "30000",
+                                 "tax_exemption_amount": "30000", "taxable_amount": "0"}},
+                    {"departure": "C", "arrival": "D", "transit_1": "", "transit_2": "", "path": "C → D",
+                     "type": {"name": "公共交通機関"}, "one_way_distance": "0.00",
+                     "payment": {"start_date": "2026-04", "interval": {"name": "毎月"},
+                                 "method": {"name": "一括"}, "total": "5000",
+                                 "tax_exemption_amount": "5000", "taxable_amount": "0"}},
+                ]},
+            ]
+
+    rows = fetch_commute_rows_via_api(FakeClient(), {"2007002": "横山 弘樹", "2009009": "田中 花子"})
+    assert len(rows) == 3  # 2007002:1経路 + 2009009:2経路
+    r0 = rows[0]
+    assert r0["社員番号"] == "2007002" and r0["氏名"] == "横山 弘樹" and r0["経路No"] == 1
+    assert r0["出発"] == "笹塚" and r0["到着"] == "豊洲" and r0["経由1"] == "市ヶ谷"
+    assert r0["支給間隔"] == "毎月" and r0["支給金額"] == 18350
+    assert r0["利用交通機関"] == "公共交通機関" and r0["支給開始"] == "2025-06"
+    multi = [r for r in rows if r["社員番号"] == "2009009"]
+    assert len(multi) == 2 and multi[0]["経路No"] == 1 and multi[1]["経路No"] == 2
+    assert multi[0]["支給間隔"] == "6ヶ月" and multi[0]["支給方法"] == "月割"

@@ -465,10 +465,10 @@
                 <input type="text" id="ex-month" placeholder="例: 2026-05" style="width:160px; padding:6px 10px">
             </label>
             <label>
-                通勤費CSV（jinjer「人事データ出力（通勤費）」・任意）:
-                <input type="text" id="ex-commute-csv" placeholder="例: C:\Users\…\Downloads\jinjer_通勤費_….csv"
+                通勤費CSV（任意・上級者向け）:
+                <input type="text" id="ex-commute-csv" placeholder="通常は空欄でOK（jinjer APIから自動取得）"
                        style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">指定すると同じExcelに「通勤費」シート（社員番号・氏名・出発・到着・経由1・経由2・通勤経路・支給金額など）を追加します。空欄ならテレワークのみ。</div>
+                <div class="hint" style="margin-top:4px">通勤費（社員番号・氏名・出発・到着・経由1・経由2・通勤経路・支給間隔・支給金額など）は<b>jinjer APIから自動取得</b>して「通勤費」シートに追加します。特定のCSVを使いたい場合だけパスを入れてください（指定時はそちらを優先）。</div>
             </label>
             <label>
                 出力ファイル名(任意・.xlsxは自動で付きます):

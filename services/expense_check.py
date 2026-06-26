@@ -205,15 +205,16 @@ COMMUTE_FIELDS: list[tuple[str, list[str]]] = [
     ("支給金額", ["支給金額(通勤1)", "支給金額"]),
     ("非課税通勤費", ["非課税通勤費(通勤1)", "非課税通勤費"]),
     ("課税通勤費", ["課税通勤費(通勤1)", "課税通勤費"]),
-    ("利用開始日", ["利用開始日(通勤1)", "利用開始日"]),
+    ("支給開始", ["支給開始(通勤1)", "利用開始日(通勤1)", "支給開始", "利用開始日"]),
     ("片道距離(km)", ["片道距離(km)(通勤1)", "片道距離(km)", "片道距離"]),
 ]
 COMMUTE_AMOUNT_COLS = {"支給金額", "非課税通勤費", "課税通勤費"}
-# 出力シートの列順（氏名は CSV の氏＋名を結合して挿入する）
+# 出力シートの列順。ユーザー要望（出発・到着・経由1・経由2・通勤経路・支給間隔・支給金額）を含む。
+# 支給間隔/支給方法/支給開始/経路No は API（commuting-information）からのみ取得。
 COMMUTE_OUTPUT_COLUMNS = [
-    "社員番号", "氏名", "出発", "到着", "経由1", "経由2",
-    "利用交通機関", "通勤経路", "支給金額", "非課税通勤費", "課税通勤費",
-    "利用開始日", "片道距離(km)",
+    "社員番号", "氏名", "経路No", "出発", "到着", "経由1", "経由2", "通勤経路",
+    "利用交通機関", "支給間隔", "支給方法", "支給金額", "非課税通勤費", "課税通勤費",
+    "支給開始", "片道距離(km)",
 ]
 
 
@@ -275,10 +276,55 @@ def read_commute_csv(path: str | Path) -> list[dict]:
             rec["氏名"] = get(name_i)
         else:
             rec["氏名"] = (get(last_i) + " " + get(first_i)).strip()
+        # CSV には無い列（API のみ）は空で埋める。1行=1経路なので経路No=1。
+        rec.setdefault("経路No", 1)
+        rec.setdefault("支給間隔", "")
+        rec.setdefault("支給方法", "")
         if rec.get("社員番号"):
             result.append(rec)
     result.sort(key=lambda x: str(x.get("社員番号") or ""))
     return result
+
+
+def fetch_commute_rows_via_api(client: JinjerClient, id_to_name: dict | None = None) -> list[dict]:
+    """jinjer API（commuting-information）から通勤情報を取得し、シート用の行に整形する。
+
+    複数経路は経路ごとに1行（経路No=1,2,…）。氏名は ``id_to_name`` で補完（無ければ空）。
+    出発・到着・経由1・経由2・通勤経路・利用交通機関・支給間隔・支給方法・支給金額・
+    非課税/課税通勤費・支給開始・片道距離 を取り出す。
+    """
+    items = client.get_commuting_information()
+    id_to_name = id_to_name or {}
+    rows: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        eid = str(item.get("employee_id") or "").strip()
+        for i, route in enumerate(item.get("commuting") or [], start=1):
+            if not isinstance(route, dict):
+                continue
+            pay = route.get("payment") or {}
+            rtype = route.get("type") or {}
+            rows.append({
+                "社員番号": eid,
+                "氏名": id_to_name.get(eid, ""),
+                "経路No": i,
+                "出発": route.get("departure") or "",
+                "到着": route.get("arrival") or "",
+                "経由1": route.get("transit_1") or "",
+                "経由2": route.get("transit_2") or "",
+                "通勤経路": route.get("path") or "",
+                "利用交通機関": (rtype.get("name") if isinstance(rtype, dict) else "") or "",
+                "支給間隔": ((pay.get("interval") or {}).get("name")) or "",
+                "支給方法": ((pay.get("method") or {}).get("name")) or "",
+                "支給金額": _to_amount(pay.get("total")),
+                "非課税通勤費": _to_amount(pay.get("tax_exemption_amount")),
+                "課税通勤費": _to_amount(pay.get("taxable_amount")),
+                "支給開始": pay.get("start_date") or "",
+                "片道距離(km)": route.get("one_way_distance") or "",
+            })
+    rows.sort(key=lambda x: (str(x.get("社員番号") or ""), x.get("経路No") or 0))
+    return rows
 
 
 def add_commute_sheet(wb: Workbook, commute_rows: list[dict]) -> None:
@@ -306,9 +352,9 @@ def add_commute_sheet(wb: Workbook, commute_rows: list[dict]) -> None:
             c.alignment = right
 
     widths = {
-        "社員番号": 12, "氏名": 18, "出発": 14, "到着": 14, "経由1": 12, "経由2": 12,
-        "利用交通機関": 14, "通勤経路": 60, "支給金額": 12, "非課税通勤費": 12,
-        "課税通勤費": 12, "利用開始日": 12, "片道距離(km)": 12,
+        "社員番号": 12, "氏名": 16, "経路No": 7, "出発": 14, "到着": 14, "経由1": 12,
+        "経由2": 12, "通勤経路": 60, "利用交通機関": 14, "支給間隔": 10, "支給方法": 8,
+        "支給金額": 12, "非課税通勤費": 12, "課税通勤費": 12, "支給開始": 10, "片道距離(km)": 11,
     }
     for i, name in enumerate(COMMUTE_OUTPUT_COLUMNS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = widths.get(name, 14)
@@ -398,18 +444,23 @@ def run_telework_export(
             log_func(f"[進捗] {idx}/{total} 名 取得済み")
         _time.sleep(PACING_SEC)
 
-    # ブックを組み立て: テレワーク（サマリ＋明細）＋ 任意で通勤費シート
+    # ブックを組み立て: テレワーク（サマリ＋明細）＋ 通勤費シート。
+    # 通勤費は既定で jinjer API（commuting-information）から取得。commute_csv 指定時はCSV優先。
     wb = Workbook()
     _build_telework_sheets(wb, month, rows)
-    if commute_csv:
-        try:
+    try:
+        if commute_csv:
             commute_rows = read_commute_csv(commute_csv)
-            add_commute_sheet(wb, commute_rows)
-            result.commute_count = len(commute_rows)
-            log_func(f"[info] 通勤費CSV 読込: {result.commute_count} 名分 → 通勤費シート追加")
-        except Exception as e:
-            # 通勤費CSVが読めなくてもテレワーク集計は出す
-            log_func(f"[warn] 通勤費CSV 読込に失敗（通勤費シートはスキップ）: {e}")
+            log_func(f"[info] 通勤費CSV 読込: {len(commute_rows)} 行 → 通勤費シート追加")
+        else:
+            id_to_name = {e["id"]: e["name"] for e in employees}
+            commute_rows = fetch_commute_rows_via_api(client, id_to_name)
+            log_func(f"[info] 通勤情報をAPIから取得: {len(commute_rows)} 行 → 通勤費シート追加")
+        add_commute_sheet(wb, commute_rows)
+        result.commute_count = len(commute_rows)
+    except Exception as e:
+        # 通勤費が取れなくてもテレワーク集計は出す
+        log_func(f"[warn] 通勤費シートの作成に失敗（スキップ）: {e}")
     try:
         wb.calculation.fullCalcOnLoad = True
     except Exception:

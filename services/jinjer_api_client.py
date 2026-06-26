@@ -217,6 +217,58 @@ class JinjerClient:
         return all_employees
 
     # ------------------------------------------------------------------
+    # 通勤情報（出発・到着・経由・経路・支給間隔・支給金額）
+    # ------------------------------------------------------------------
+    def get_commuting_information(self, employee_ids: list[str] | None = None) -> list[dict]:
+        """`/v1/employees/commuting-information` を全ページ取得する。
+
+        各要素: ``{"employee_id": str, "commuting": [route, ...]}``。
+        route には ``departure / arrival / transit_1 / transit_2 / path / type / one_way_distance``
+        と ``payment{ start_date, interval{name}, method{name}, total, tax_exemption_amount,
+        taxable_amount }`` が含まれる（出発・到着・経由・通勤経路・支給間隔・支給金額が取れる）。
+
+        Args:
+            employee_ids: 指定時はその従業員のみ（カンマ区切り、未指定なら全員）。
+                          ※クエリは ``employee-ids``（複数形・ハイフン）のみ許可。
+                          ``employee-id``（単数）は 400 になる。
+        """
+        url = f"{self.base_url}/v1/employees/commuting-information"
+        headers = self._auth_headers()
+        base_params: dict[str, Any] = {}
+        if employee_ids:
+            base_params["employee-ids"] = ",".join(str(e).strip() for e in employee_ids if str(e).strip())
+
+        all_items: list[dict] = []
+        page = 1
+        while True:
+            params = dict(base_params, page=page)
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
+            except requests.RequestException as e:
+                raise JinjerAPIError(f"通勤情報取得に失敗: {e}") from e
+            if response.status_code != 200:
+                raise JinjerAPIError(f"通勤情報取得に失敗 (status={response.status_code})")
+
+            data = response.json().get("data", []) or []
+            if not data:
+                break
+            all_items.extend(data)
+
+            try:
+                total_count = int(response.headers.get("X-Item-Counts", 0))
+            except (TypeError, ValueError):
+                total_count = 0
+            if total_count and len(all_items) >= total_count:
+                break
+            if len(data) < 100:
+                break
+            page += 1
+            _time.sleep(0.1)
+
+        logger.info("jinjer 通勤情報取得: %d 件", len(all_items))
+        return all_items
+
+    # ------------------------------------------------------------------
     # 日次勤怠の打刻コメント（打刻修正申請の理由など）
     # ------------------------------------------------------------------
     def get_stamp_comments(
