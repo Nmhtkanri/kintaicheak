@@ -261,15 +261,15 @@
     </div>
 
     <!-- ============================================================ -->
-    <!-- 一括モード — batch_compare（手順1+2を一発）                    -->
+    <!-- 一括モード — batch_compare（差異一覧を一発生成）                 -->
     <!-- ============================================================ -->
     <div class="workflow-card" id="batch-compare-card" style="border:2px solid #2E75B6">
         <div class="step-header">
             <div>
                 <div class="step-number" style="background:#2E75B6">⚡</div>
                 <div class="step-copy">
-                    <div class="section-title">おすすめ：請求勤怠フォルダから差異一覧を一発生成（手順1＋2を自動）</div>
-                    <p class="hint">グループの請求勤怠フォルダ・jinjer汎用データ・申請データ・対象月を指定すると、突合（手順1）と差異一覧＋トリアージ（手順2）をまとめて実行します。ファイルを1枚ずつアップロードする必要はありません。グループ単位で実行してください（グループはまたがない）。</p>
+                    <div class="section-title">おすすめ：請求勤怠フォルダから差異一覧を一発生成</div>
+                    <p class="hint">グループの請求勤怠フォルダ・jinjer汎用データ・申請データ・対象月を指定すると、突合から差異一覧＋トリアージまでまとめて実行します。ファイルを1枚ずつアップロードする必要はありません。グループ単位で実行してください（グループはまたがない）。</p>
                 </div>
             </div>
         </div>
@@ -284,7 +284,7 @@
                 jinjer 汎用データCSV（ファイルまたは保存フォルダ）:
                 <input type="text" id="bc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\6月\jinjer勤怠データ\…汎用データ.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">突合の打刻照合にも、差異一覧の集計列にも、この1本を使います（手順1用の別CSVは不要）。</div>
+                <div class="hint" style="margin-top:4px">突合の打刻照合にも、差異一覧の集計列にも、この1本を使います（別CSVは不要）。</div>
             </label>
             <label>
                 jinjer 申請データ（打刻修正申請）CSV（任意）:
@@ -323,71 +323,11 @@
     <!-- ============================================================ -->
     <!-- 月次集約モード — quick_compare / quick_export                  -->
     <!-- ============================================================ -->
-    <div class="workflow-card" id="monthly-compare-card">
-        <div class="step-header">
-            <div>
-                <div class="step-number">2</div>
-                <div class="step-copy">
-                    <div class="section-title">差異一覧を作る（手順1の結果を月次でまとめる）</div>
-                    <p class="hint">手順1で出た勤怠突合結果xlsxと、元のjinjer汎用CSVを使って、人間判断用の差異一覧を作成します。</p>
-                </div>
-            </div>
-        </div>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label>
-                手順1の勤怠突合結果xlsx（ファイルまたは保存フォルダ）:
-                <input type="text" id="qc-kintai-dir" placeholder="例: C:\Users\谷津晴香\Downloads\勤怠突合結果_20260527_165611.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">1ファイルだけならxlsxをそのまま指定してOKです。複数人分をまとめる場合はxlsxが入ったフォルダを指定します。</div>
-            </label>
-            <label>
-                jinjer 汎用データCSV（ファイルまたは保存フォルダ）:
-                <input type="text" id="qc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ\汎用データ.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">手順1で使った勤怠CSVではなく、jinjerから出した汎用データCSVを指定します。</div>
-            </label>
-            <label>
-                jinjer 申請データ（打刻修正申請）CSV（任意・ファイルまたは保存フォルダ）:
-                <input type="text" id="qc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">指定すると「打刻修正時コメント」列に申請理由を併記します。jinjer管理画面 → データ出力 →「申請データ（打刻修正申請）」でDLしたCSVです。空欄でもOK。</div>
-            </label>
-            <label style="display:inline-flex; align-items:center; gap:6px">
-                対象月:
-                <input type="text" id="qc-month" placeholder="例: 2026-05"
-                       style="width:160px; padding:6px 10px">
-            </label>
-            <label>
-                出力ファイル名(任意・.xlsxは自動で付きます):
-                <input type="text" id="qc-output-filename" placeholder="差異一覧_2026-05.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-            </label>
-            <div style="margin-top:6px">
-                <button type="button" class="btn btn-primary" id="qc-run-btn">
-                    📊 差異一覧を生成
-                </button>
-                <span id="qc-status" style="margin-left:12px; color:#666"></span>
-            </div>
-        </div>
-        <div id="qc-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
-            <div class="summary-cards" style="margin-bottom:8px">
-                <div class="summary-card card-ng"><div class="card-label">DANGER</div><div class="card-value" id="qc-cnt-danger">0</div></div>
-                <div class="summary-card card-caution"><div class="card-label">WARN</div><div class="card-value" id="qc-cnt-warn">0</div></div>
-                <div class="summary-card card-ok"><div class="card-label">INFO</div><div class="card-value" id="qc-cnt-info">0</div></div>
-                <div class="summary-card"><div class="card-label">総差異</div><div class="card-value" id="qc-cnt-total">0</div></div>
-            </div>
-            <a id="qc-download-link" href="#" class="btn btn-download" style="display:none">
-                📥 差異一覧xlsxをダウンロード
-            </a>
-            <pre id="qc-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
-        </div>
-        <div id="qc-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
-    </div>
 
     <div class="workflow-card" id="monthly-export-card">
         <div class="step-header">
             <div>
-                <div class="step-number">3</div>
+                <div class="step-number">2</div>
                 <div class="step-copy">
                     <div class="section-title">アップロード用CSVを作る</div>
                     <p class="hint">差異一覧で承認・却下・保留を入力した後、jinjerに戻すCSVを生成します。</p>
@@ -395,15 +335,15 @@
             </div>
         </div>
         <p class="hint" style="padding:0 14px">
-            手順2で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値だけ汎用データへ反映します。
+            一発生成で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値だけ汎用データへ反映します。
         </p>
         <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
             <label>
-                人間判断を埋めた差異一覧xlsx（手順2の出力）:
+                人間判断を埋めた差異一覧xlsx（一発生成の出力）:
                 <input type="file" id="qe-diff-file" accept=".xlsx" style="margin-top:4px">
             </label>
             <label>
-                jinjer 汎用データCSV（ファイルまたは保存フォルダ・手順2と同じもの）:
+                jinjer 汎用データCSV（ファイルまたは保存フォルダ・一発生成と同じもの）:
                 <input type="text" id="qe-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ\汎用データ.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
                 <div class="hint" style="margin-top:4px">CSVファイルを直接指定してOKです。複数CSVをまとめる場合だけフォルダを指定します。</div>
@@ -465,12 +405,6 @@
                 <input type="text" id="ex-month" placeholder="例: 2026-05" style="width:160px; padding:6px 10px">
             </label>
             <label>
-                通勤費CSV（任意・上級者向け）:
-                <input type="text" id="ex-commute-csv" placeholder="通常は空欄でOK（jinjer APIから自動取得）"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">通勤費（社員番号・氏名・出発・到着・経由1・経由2・通勤経路・支給間隔・支給金額など）は<b>jinjer APIから自動取得</b>して「通勤費」シートに追加します。特定のCSVを使いたい場合だけパスを入れてください（指定時はそちらを優先）。</div>
-            </label>
-            <label>
                 出力ファイル名(任意・.xlsxは自動で付きます):
                 <input type="text" id="ex-output-filename" placeholder="経費チェック_2026年05月.xlsx"
                        style="width:100%; padding:6px 10px; margin-top:4px">
@@ -514,48 +448,50 @@
     }
 
     // ----- quick_compare -----
-    qcRunBtn.addEventListener('click', async () => {
-        hideError('qc-error-area');
-        document.getElementById('qc-result-area').style.display = 'none';
-        document.getElementById('qc-status').textContent = '処理中...';
-        qcRunBtn.disabled = true;
+    if (qcRunBtn) {
+        qcRunBtn.addEventListener('click', async () => {
+            hideError('qc-error-area');
+            document.getElementById('qc-result-area').style.display = 'none';
+            document.getElementById('qc-status').textContent = '処理中...';
+            qcRunBtn.disabled = true;
 
-        const fd = new FormData();
-        fd.append('kintai_dir', document.getElementById('qc-kintai-dir').value);
-        fd.append('jinjer_dir', document.getElementById('qc-jinjer-dir').value);
-        fd.append('application_csv', document.getElementById('qc-application-csv').value);
-        fd.append('month', document.getElementById('qc-month').value);
-        fd.append('output_filename', document.getElementById('qc-output-filename').value);
+            const fd = new FormData();
+            fd.append('kintai_dir', document.getElementById('qc-kintai-dir').value);
+            fd.append('jinjer_dir', document.getElementById('qc-jinjer-dir').value);
+            fd.append('application_csv', document.getElementById('qc-application-csv').value);
+            fd.append('month', document.getElementById('qc-month').value);
+            fd.append('output_filename', document.getElementById('qc-output-filename').value);
 
-        try {
-            const res = await fetch('/quick_compare', {method:'POST', body: fd});
-            const data = await res.json();
-            if (!data.success){
-                showError('qc-error-area', data.errors || ['処理に失敗しました']);
+            try {
+                const res = await fetch('/quick_compare', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success){
+                    showError('qc-error-area', data.errors || ['処理に失敗しました']);
+                    document.getElementById('qc-status').textContent = '';
+                    return;
+                }
+                document.getElementById('qc-cnt-danger').textContent = data.stats.danger_count;
+                document.getElementById('qc-cnt-warn').textContent = data.stats.warn_count;
+                document.getElementById('qc-cnt-info').textContent = data.stats.info_count;
+                document.getElementById('qc-cnt-total').textContent = data.stats.diff_count;
+                const dl = document.getElementById('qc-download-link');
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+                const consoleEl = document.getElementById('qc-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                document.getElementById('qc-result-area').style.display = 'block';
+                document.getElementById('qc-status').textContent = '完了';
+            } catch (e) {
+                showError('qc-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('qc-status').textContent = '';
-                return;
+            } finally {
+                qcRunBtn.disabled = false;
             }
-            document.getElementById('qc-cnt-danger').textContent = data.stats.danger_count;
-            document.getElementById('qc-cnt-warn').textContent = data.stats.warn_count;
-            document.getElementById('qc-cnt-info').textContent = data.stats.info_count;
-            document.getElementById('qc-cnt-total').textContent = data.stats.diff_count;
-            const dl = document.getElementById('qc-download-link');
-            dl.href = data.download_url;
-            dl.style.display = 'inline-block';
-            const consoleEl = document.getElementById('qc-console');
-            consoleEl.textContent = (data.console || []).join('\n');
-            consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
-            document.getElementById('qc-result-area').style.display = 'block';
-            document.getElementById('qc-status').textContent = '完了';
-        } catch (e) {
-            showError('qc-error-area', ['通信エラー: ' + e.message]);
-            document.getElementById('qc-status').textContent = '';
-        } finally {
-            qcRunBtn.disabled = false;
-        }
-    });
+        });
+    }
 
-    // ----- batch_compare（手順1+2 一括）-----
+    // ----- batch_compare（一括）-----
     const bcRunBtn = document.getElementById('bc-run-btn');
     if (bcRunBtn) {
         bcRunBtn.addEventListener('click', async () => {
@@ -682,7 +618,7 @@
 
             const fd = new FormData();
             fd.append('month', document.getElementById('ex-month').value);
-            fd.append('commute_csv', document.getElementById('ex-commute-csv').value);
+            fd.append('commute_csv', '');
             fd.append('output_filename', document.getElementById('ex-output-filename').value);
 
             try {

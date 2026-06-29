@@ -67,13 +67,17 @@ def _legend_for_test():
     ]
 
 
-def test_resolve_cell_ake_returns_zero():
+def test_resolve_cell_ake_returns_rest_value():
     legend = normalize_legend(_legend_for_test())
     code_to_name = {"B": "B勤"}
     val = _resolve_cell_value(
         "明", date(2026, 4, 1), legend, code_to_name, set()
     )
-    assert val == "0"
+    assert val == "休み"
+    val_words = _resolve_cell_value(
+        "明け休", date(2026, 4, 2), legend, code_to_name, set()
+    )
+    assert val_words == "休み"
 
 
 def test_resolve_cell_off_on_sunday():
@@ -209,8 +213,8 @@ def test_export_csv_basic_round_trip(tmp_path):
     assert emp_row[5] == "所"
     # 4/5 (日) → 公 → "法"
     assert emp_row[6] == "法"
-    # 4/6 (月) → 明 → "0"
-    assert emp_row[7] == "0"
+    # 4/6 (月) → 明 → "休み"
+    assert emp_row[7] == "休み"
 
 
 def test_export_csv_records_missing_id(tmp_path):

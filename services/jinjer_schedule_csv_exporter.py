@@ -9,7 +9,7 @@ CSV フォーマット:
   行3〜: 氏名, 従業員ID, 値, 値, ...              ← 各従業員1行
 
 各セルの値:
-  - "明" を含むコード             → "0" （明け休）
+  - "明" / "明け休" を含むコード  → "休み" （明け休）
   - 凡例で is_off=True のコード   → 土曜=所、日曜=法、平日=所（A案）
   - 凡例の休扱い記号 / 空欄         → 同上（A案）
   - 凡例にあって時刻定義あり        → jinjer 雛形ID
@@ -46,6 +46,7 @@ _HALF_DAY_LEAVE_MARKERS = ("AM", "PM", "am", "pm", "ＡＭ", "ＰＭ", "午前",
 GENERAL_TEMPLATE_NAME = "一般"
 GENERAL_TEMPLATE_START = "9:00"
 GENERAL_TEMPLATE_END = "17:30"
+AKE_REST_VALUE = "休み"
 
 
 def _is_full_day_paid_leave(code: str, label: str = "") -> bool:
@@ -344,9 +345,9 @@ def _resolve_cell_value(
     if general_template_id and _is_full_day_paid_leave(code, label):
         return general_template_id
 
-    # 1) 明け休 → "0"
+    # 1) 明け休 → "休み"
     if _is_ake_code(code, label):
-        return "0"
+        return AKE_REST_VALUE
 
     # 2) 凡例で is_off の場合
     if entry and entry.get("is_off"):
