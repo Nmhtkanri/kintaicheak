@@ -944,9 +944,37 @@ def _fieldglass_pad_left(values, dates):
     return (["-"] * pad_count + values)[:len(dates)]
 
 
+def _fieldglass_12h_to_24h(hour, minute, meridiem):
+    """Fieldglass PDF の 12時間制(AM/PM) を "HH:MM"(24時間制) に変換する。
+
+    AM/PM が無い場合はそのまま（既に24時間制とみなす）。
+      12:00 AM → 00:00（深夜0時）, 12:00 PM → 12:00（正午）,
+      6:00 PM → 18:00, 9:00 AM → 09:00
+    """
+    if meridiem:
+        m = meridiem.upper()
+        if m == "AM":
+            if hour == 12:
+                hour = 0
+        elif m == "PM":
+            if hour != 12:
+                hour += 12
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _fieldglass_time_values(line, prefix, dates):
+    # Fieldglass PDF の Time In/Out は "6:00 PM" のような 12時間制(AM/PM)。
+    # AM/PM を落とすと 18:00 が 6:00 と誤読され、夜勤跨ぎ判定で +24h されて
+    # 30:00 のように化けるため、ここで必ず 24時間制へ変換する。
     body = line[len(prefix):].strip()
-    values = re.findall(r"\d{1,2}:\d{2}|-", body)
+    values = []
+    for m in re.finditer(r"(\d{1,2}):(\d{2})\s*(AM|PM)?|(-)", body, re.IGNORECASE):
+        if m.group(4):  # "-"（打刻なし）
+            values.append("-")
+        else:
+            values.append(
+                _fieldglass_12h_to_24h(int(m.group(1)), int(m.group(2)), m.group(3))
+            )
     return _fieldglass_pad_left(values, dates)
 
 

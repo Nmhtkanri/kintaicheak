@@ -250,6 +250,50 @@ def test_parse_fieldglass_pdf_direct(monkeypatch, tmp_path):
     assert df.iloc[2]["退勤時刻"] == time(21, 30)
 
 
+def test_parse_fieldglass_pdf_12h_ampm(monkeypatch, tmp_path):
+    """Fieldglass PDF の 12時間制(AM/PM) を 24時間制に正しく変換する。
+
+    実データ(MAHARJAN/奈良)の不具合の再現: "6:00 PM"(=18:00) の PM を落として
+    6:00 と誤読し、出勤(9:00)より早い→夜勤跨ぎ+24h で 30:00 に化けていた。
+    夜勤(太田)は Time In "8:45 PM"=20:45、Time Out 翌9:00 AM も確認する。
+    """
+    path = tmp_path / "timesheet_ERCSTS_ampm.pdf"
+    pdf_text = "\n".join([
+        "Time Sheet",
+        "ID ERCSTS01182072 Worker Ramita, Maharjan(ERCSWK00144175)",
+        "Period 2026-06-01 to 2026-06-30 Job Posting Support Engineer|JP|Job Stage",
+        "Time in/time out",
+        "Day 6-01 Mon 6-02 Tue 6-03 Wed 6-06 Sat 6-07 Sun Total",
+        "Time In 9:00 AM 9:00 AM 9:00 AM 12:00 AM 12:00 AM",
+        "Time Out 6:00 PM 8:00 PM 7:00 PM 12:00 AM 12:00 AM",
+        "Total 8h 0m 10h 0m 9h 0m 0h 0m 0h 0m 27h 0m",
+    ])
+    monkeypatch.setattr(
+        timesheet_parser,
+        "_pdf_to_text_or_bytes",
+        lambda filepath: (pdf_text, None),
+    )
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert df.iloc[0]["出勤時刻"] == time(9, 0)
+    assert df.iloc[0]["退勤時刻"] == time(18, 0)   # 6:00 PM → 18:00（30:00 に化けない）
+    assert df.iloc[1]["退勤時刻"] == time(20, 0)   # 8:00 PM → 20:00
+    assert df.iloc[2]["退勤時刻"] == time(19, 0)   # 7:00 PM → 19:00
+
+
+def test_fieldglass_12h_to_24h_conversion():
+    """AM/PM → 24時間制の境界値（12:00 AM=00:00, 12:00 PM=12:00）。"""
+    f = timesheet_parser._fieldglass_12h_to_24h
+    assert f(12, 0, "AM") == "00:00"   # 深夜0時
+    assert f(12, 0, "PM") == "12:00"   # 正午
+    assert f(6, 0, "PM") == "18:00"
+    assert f(8, 45, "PM") == "20:45"
+    assert f(9, 0, "AM") == "09:00"
+    assert f(20, 30, None) == "20:30"  # AM/PM無し＝既に24時間制
+
+
 def test_parse_fieldglass_pdf_katakana_filename_uses_romaji_worker_name(monkeypatch, tmp_path):
     """ファイル名がカタカナ通称（ラミタ）でも、PDF本文のローマ字氏名で突合できる。
 
