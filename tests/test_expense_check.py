@@ -109,12 +109,24 @@ def test_selected_employee_views_link_all_sheets(tmp_path):
     assert rb.defined_names[EMP_PICK_NAME].attr_text == "サマリ!$I$2"
     assert rb["サマリ"]["I2"].value == "2020001"
 
-    # 連動シートは FILTER（内部名 _xlfn._xlws.FILTER）で選択社員を参照
-    tw = rb["テレワーク明細(選択者)"].cell(row=4, column=1).value
-    assert tw.startswith("=_xlfn._xlws.FILTER(")
-    assert EMP_PICK_NAME in tw
-    cm = rb["通勤費(選択者)"].cell(row=4, column=1).value
-    assert cm.startswith("=_xlfn._xlws.FILTER(") and EMP_PICK_NAME in cm
+    # 連動シートは INDEX+MATCH で選択社員の該当行を各セルに引く（配列/スピル非依存）
+    tw_view = rb["テレワーク明細(選択者)"]
+    tw_a4 = tw_view.cell(row=4, column=1).value
+    assert tw_a4.startswith("=IFERROR(INDEX(テレワーク明細!A$2")
+    assert "MATCH(ROW()-3" in tw_a4
+    # 田中は2件のテレワーク → データ行は2行ぶん生成される
+    assert tw_view.cell(row=5, column=1).value is not None
+    assert tw_view.cell(row=6, column=1).value is None
+
+    # 順位ヘルパーは元シート側（テレワーク明細 E列）に付き、非表示
+    src = rb["テレワーク明細"]
+    e2 = src.cell(row=2, column=5).value
+    assert "COUNTIF" in e2 and EMP_PICK_NAME in e2
+    assert src.column_dimensions["E"].hidden is True
+
+    cm_view = rb["通勤費(選択者)"]
+    cm_a4 = cm_view.cell(row=4, column=1).value
+    assert cm_a4.startswith("=IFERROR(INDEX(通勤費!A$2") and "MATCH(ROW()-3" in cm_a4
 
     # サマリのミニ集計は XLOOKUP（内部名 _xlfn.XLOOKUP）
     assert str(rb["サマリ"]["I3"].value).startswith("=_xlfn.XLOOKUP(")

@@ -385,8 +385,9 @@ def add_commute_sheet(wb: Workbook, commute_rows: list[dict]) -> None:
 EMP_PICK_NAME = "選択社員"
 
 # openpyxl は新関数名をそのまま書き出すため、Excel が認識する内部名で保存する。
-# （FILTER/SORT 等の動的配列は "_xlfn._xlws."、XLOOKUP は "_xlfn." が必要）
-_FILTER = "_xlfn._xlws.FILTER"
+# XLOOKUP は単一値なので "_xlfn." 付きでそのまま動く（サマリのミニ集計で使用）。
+# ※ 連動ビューの明細は FILTER（動的配列）だと openpyxl がメタデータを書けず
+#   スピルしないため、INDEX+AGGREGATE 方式（_fill_linked_rows）を採用している。
 _XLOOKUP = "_xlfn.XLOOKUP"
 
 
@@ -394,6 +395,61 @@ def _detail_last_row(wb: Workbook) -> int:
     """テレワーク明細シートの最終データ行（合計行なし）。ヘッダーのみなら 1。"""
     ws = wb["テレワーク明細"]
     return max(ws.max_row, 1)
+
+
+def _max_rows_per_id(ws, last_data_row: int, id_col: int = 1, first_row: int = 2) -> int:
+    """元シートで、同一社員番号が最大何行あるか（連動ビューの行数決定用）。"""
+    from collections import Counter
+    counter: Counter = Counter()
+    for r in range(first_row, last_data_row + 1):
+        v = ws.cell(row=r, column=id_col).value
+        if v is not None and str(v).strip():
+            counter[str(v).strip()] += 1
+    return max(counter.values()) if counter else 0
+
+
+def _add_source_rank_helper(ws, helper_col: int, last_data_row: int) -> None:
+    """元シートに「選択社員の何番目の行か（1,2,3…）」を返す順位ヘルパー列を足す。
+
+    選択社員に一致する行にだけ 1,2,3… の連番を振り、それ以外は ""。
+    配列数式を使わない純スカラー式（COUNTIF/IF）なので、Excel の実装差や
+    暗黙的交差の影響を受けない。連動ビューはこの列を MATCH で引く。
+    """
+    letter = get_column_letter(helper_col)
+    for r in range(2, last_data_row + 1):
+        ws.cell(row=r, column=helper_col).value = (
+            f'=IF($A{r}={EMP_PICK_NAME},COUNTIF($A$2:$A{r},{EMP_PICK_NAME}),"")'
+        )
+    ws.column_dimensions[letter].hidden = True
+
+
+def _fill_linked_rows(
+    vs, source_sheet: str, ncols: int, src_helper_letter: str,
+    last_data_row: int, n_rows: int,
+) -> None:
+    """選択社員の該当行だけを MATCH+INDEX で引いて各セルに書き込む。
+
+    元シートの順位ヘルパー列（src_helper_letter）に 1,2,3… が振られているので、
+    ビューの i 行目は「順位 i の行」を MATCH で探して INDEX で各列を取得する。
+    使う関数は INDEX/MATCH/IFERROR/ROW のみ＝配列評価もダイナミック配列も不要で、
+    どの Excel でも確実にスピルなしで表示できる。範囲は実データ行までに限定する
+    （全列参照 A:A は Excel でも計算エンジンでも重いため）。
+    """
+    if n_rows <= 0 or last_data_row < 2:
+        vs["A4"] = "（該当データなし）"
+        vs["A4"].font = Font(name=FONT, italic=True, color="808080")
+        return
+
+    hcol = src_helper_letter
+    match_range = f"{source_sheet}!${hcol}$2:${hcol}${last_data_row}"
+    for i in range(1, n_rows + 1):
+        r = 3 + i
+        for c in range(1, ncols + 1):
+            cl = get_column_letter(c)
+            data_range = f"{source_sheet}!{cl}$2:{cl}${last_data_row}"
+            vs.cell(row=r, column=c).value = (
+                f'=IFERROR(INDEX({data_range},MATCH(ROW()-3,{match_range},0)),"")'
+            )
 
 
 def add_selected_employee_views(
@@ -486,15 +542,14 @@ def add_selected_employee_views(
 
     # ---- テレワーク明細(選択者) ----
     d_last = _detail_last_row(wb)
+    tw_headers = ["社員番号", "氏名", "テレワーク日", "打刻区分"]
+    # 元シートに順位ヘルパー列（データ4列の右＝E列）を足す
+    tw_helper_col = len(tw_headers) + 1        # E
+    _add_source_rank_helper(wb["テレワーク明細"], tw_helper_col, d_last)
     vs = wb.create_sheet("テレワーク明細(選択者)")
-    _style_view(vs, ["社員番号", "氏名", "テレワーク日", "打刻区分"], "テレワーク")
-    if d_last >= 2:
-        vs["A4"] = (
-            f'={_FILTER}(テレワーク明細!A2:D{d_last},'
-            f'テレワーク明細!A2:A{d_last}={EMP_PICK_NAME},"該当なし")'
-        )
-    else:
-        vs["A4"] = '="該当なし"'
+    _style_view(vs, tw_headers, "テレワーク")
+    tw_n = _max_rows_per_id(wb["テレワーク明細"], d_last)
+    _fill_linked_rows(vs, "テレワーク明細", len(tw_headers), get_column_letter(tw_helper_col), d_last, tw_n)
     for col, width in zip("ABCD", [12, 18, 14, 24]):
         vs.column_dimensions[col].width = width
     vs.freeze_panes = "A4"
@@ -502,13 +557,12 @@ def add_selected_employee_views(
     # ---- 通勤費(選択者) ----（通勤費シートがある場合のみ） ----
     if commute_row_count > 0 and "通勤費" in wb.sheetnames:
         c_last = commute_row_count + 1          # 合計行(n+2)は含めない
-        last_col = get_column_letter(len(COMMUTE_OUTPUT_COLUMNS))
+        cm_helper_col = len(COMMUTE_OUTPUT_COLUMNS) + 1   # Q
+        _add_source_rank_helper(wb["通勤費"], cm_helper_col, c_last)
         cv = wb.create_sheet("通勤費(選択者)")
         _style_view(cv, COMMUTE_OUTPUT_COLUMNS, "通勤費")
-        cv["A4"] = (
-            f'={_FILTER}(通勤費!A2:{last_col}{c_last},'
-            f'通勤費!A2:A{c_last}={EMP_PICK_NAME},"該当なし")'
-        )
+        cm_n = _max_rows_per_id(wb["通勤費"], c_last)
+        _fill_linked_rows(cv, "通勤費", len(COMMUTE_OUTPUT_COLUMNS), get_column_letter(cm_helper_col), c_last, cm_n)
         widths = {
             "社員番号": 12, "氏名": 16, "経路No": 7, "出発": 14, "到着": 14, "経由1": 12,
             "経由2": 12, "通勤経路": 60, "利用交通機関": 14, "支給間隔": 10, "支給方法": 8,
