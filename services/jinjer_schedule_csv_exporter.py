@@ -309,16 +309,42 @@ def _parse_iso_date(s) -> date | None:
         return None
 
 
-def _build_employee_day_map(employee: dict) -> dict[int, str]:
-    """1人分の shifts → {day(int): code(str)} に変換"""
+def _build_employee_day_map(employee: dict, days_in_month: int = 31) -> dict[int, str]:
+    """1人分の shifts → {day(int): code(str)} に変換
+
+    shifts は「表の左端から1日ずつ、空欄も code:'' として順番に記録したリスト」
+    という契約（shift_legend_parser のプロンプト参照）。画像から年月が読めないと
+    Claude は date を null で返すため、日付が無いシフトは**並び順（index+1）で日を
+    割り当てる**。日付が明示されているシフトはそちらを優先し、日付なしシフトは
+    既に埋まっていない日にだけ位置ベースで補完する。
+
+    こうしないと、日付が null のシフトが全部捨てられ、その日が休扱いデフォルト
+    （所/法）に化けてスケジュールが反映されない。
+    """
     result: dict[int, str] = {}
-    for shift in employee.get("shifts") or []:
+    shifts = employee.get("shifts") or []
+
+    # 1) 明示的な日付を持つシフトを優先で配置（こちらが正）
+    dated_days: set[int] = set()
+    dateless: list[tuple[int, str]] = []
+    for idx, shift in enumerate(shifts):
         if not isinstance(shift, dict):
             continue
+        code = str(shift.get("code") or "").strip()
         d = _parse_iso_date(shift.get("date"))
-        if d is None:
-            continue
-        result[d.day] = str(shift.get("code") or "").strip()
+        if d is not None:
+            if 1 <= d.day <= days_in_month:
+                result[d.day] = code
+                dated_days.add(d.day)
+        else:
+            dateless.append((idx, code))
+
+    # 2) 日付が無いシフトは並び順（1始まりの日）で補完（既存の日は上書きしない）
+    for idx, code in dateless:
+        day = idx + 1
+        if 1 <= day <= days_in_month and day not in dated_days:
+            result[day] = code
+
     return result
 
 
@@ -450,7 +476,7 @@ def export_jinjer_schedule_csv(
         official_name = id_to_official_name.get(emp_id) if emp_id else ""
         display_name = official_name or name
 
-        day_map = _build_employee_day_map(emp)
+        day_map = _build_employee_day_map(emp, days_in_month)
 
         # 深夜跨ぎ統合の検出（同一従業員内のみ）
         emp_merges, consumed_days = _detect_employee_overnight_merges(

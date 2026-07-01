@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.jinjer_schedule_csv_exporter import (
+    _build_employee_day_map,
     _is_ake_code,
     _is_full_day_paid_leave,
     _off_value_for_weekday,
@@ -275,6 +276,58 @@ def test_export_csv_blank_day_for_active_employee(tmp_path):
     assert emp_row[3] == "所"
     # 4/5 (日) は記録なし → "法"
     assert emp_row[6] == "法"
+
+
+def test_build_day_map_positional_when_dates_missing():
+    """日付が null のシフト（AIが年月を読めなかったケース）は並び順で日を割り当てる。
+
+    小林環さんの不具合の再現: shifts が日順に並んでいるのに date が全て None だと、
+    修正前は全件捨てられて日別マップが空になり、全日が休扱いデフォルトに化けていた。
+    """
+    emp = {
+        "name": "小林環",
+        "shifts": [{"date": None, "code": c} for c in ["A", "", "B", "C"]],
+    }
+    day_map = _build_employee_day_map(emp, days_in_month=31)
+    assert day_map == {1: "A", 2: "", 3: "B", 4: "C"}
+
+
+def test_build_day_map_explicit_dates_win_and_fill_gaps():
+    """明示日付は優先。日付なしシフトは既に埋まった日を上書きしない。"""
+    emp = {
+        "name": "テスト",
+        "shifts": [
+            {"date": "2026-07-01", "code": "am6"},  # 明示日付 → 1日
+            {"date": None, "code": "B"},            # index1 → 2日
+            {"date": None, "code": "C"},            # index2 → 3日
+        ],
+    }
+    day_map = _build_employee_day_map(emp, days_in_month=31)
+    assert day_map == {1: "am6", 2: "B", 3: "C"}
+
+
+def test_export_csv_reflects_dateless_shifts(tmp_path):
+    """date が None でも並び順で実勤務がセルに反映されること（休扱いに化けない）"""
+    legend = _legend_for_test()
+    employees = [
+        {"name": "小嶋桃子", "shifts": [{"date": None, "code": "B"} for _ in range(30)]},
+    ]
+    name_to_id = {"小嶋桃子": "1234"}
+    out = tmp_path / "out.csv"
+
+    export_jinjer_schedule_csv(
+        legend=legend, employees=employees,
+        year=2026, month=4,
+        name_to_id=name_to_id,
+        output_path=str(out),
+    )
+
+    with open(out, "r", encoding="cp932", newline="") as f:
+        all_rows = list(csv.reader(f))
+
+    emp_row = all_rows[2]
+    # 1日目(index2列)は勤務コード B が反映され、休扱い(所/法)ではない
+    assert emp_row[2] not in ("所", "法")
 
 
 def test_build_legend_to_template_name_no_csv():
