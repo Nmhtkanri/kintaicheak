@@ -101,8 +101,11 @@ def normalize_legend(raw_legend) -> dict:
         is_off = bool(entry.get("is_off"))
         start = _parse_time_str(entry.get("start_time"))
         end = _parse_time_str(entry.get("end_time"))
-        if start is None and end is None:
-            # 時刻が両方無い ＝ 暗黙的に休扱い
+        template_id = str(entry.get("template_id") or "").strip()
+        if start is None and end is None and not template_id:
+            # 時刻が両方無く、jinjer 雛形IDの明示指定も無い ＝ 暗黙的に休扱い。
+            # ※ UI のプルダウンで雛形を選んだ勤務コード（時刻は空欄でも雛形IDあり）を
+            #   休扱いにしてしまうと、その勤務日が全部 所/法 に化けるため除外する。
             is_off = True
 
         try:

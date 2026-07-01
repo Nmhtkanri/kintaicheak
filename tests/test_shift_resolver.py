@@ -56,6 +56,21 @@ def test_normalize_legend_explicit_off():
     assert legend["明"]["is_off"] is True
 
 
+def test_normalize_legend_template_id_prevents_auto_off():
+    """雛形IDを明示選択した勤務コードは、時刻が空欄でも休扱いにしない。
+
+    小林環さんの不具合の再現: プルダウンで jinjer 雛形だけ選び 出勤/退勤 を空欄に
+    すると、従来は「時刻が両方無い→暗黙的に休扱い」で is_off=True になり、その勤務日
+    が全部 所/法 に化けていた。template_id があれば勤務コードとして扱う。
+    """
+    raw = [
+        {"code": "6", "label": "6", "start_time": "", "end_time": "",
+         "is_off": False, "template_id": "K1"},
+    ]
+    legend = normalize_legend(raw)
+    assert legend["6"]["is_off"] is False
+
+
 def test_normalize_legend_overnight_time():
     """25:00 などの 24h 超表記は %24 で正規化されること"""
     raw = [
