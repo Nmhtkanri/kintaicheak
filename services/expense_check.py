@@ -20,6 +20,8 @@ import requests
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.workbook.defined_name import DefinedName
 
 from services.jinjer_api_client import JinjerClient, JinjerAPIError, _safe_get
 
@@ -180,6 +182,7 @@ def build_telework_workbook(month: str, rows: list[dict], out_path: Path) -> Non
     """テレワークのみの Excel を保存する（CLI / テスト用）。"""
     wb = Workbook()
     _build_telework_sheets(wb, month, rows)
+    add_selected_employee_views(wb, employee_count=len(rows))
     try:
         wb.calculation.fullCalcOnLoad = True
     except Exception:
@@ -375,6 +378,156 @@ def add_commute_sheet(wb: Workbook, commute_rows: list[dict]) -> None:
 
 
 # ----------------------------------------------------------------------
+# 従業員フィルタ連動ビュー（Excel 365 の FILTER で全シート連動）
+# ----------------------------------------------------------------------
+
+# 選択中の従業員（社員番号）を保持する定義名。全シートがこれを参照する。
+EMP_PICK_NAME = "選択社員"
+
+# openpyxl は新関数名をそのまま書き出すため、Excel が認識する内部名で保存する。
+# （FILTER/SORT 等の動的配列は "_xlfn._xlws."、XLOOKUP は "_xlfn." が必要）
+_FILTER = "_xlfn._xlws.FILTER"
+_XLOOKUP = "_xlfn.XLOOKUP"
+
+
+def _detail_last_row(wb: Workbook) -> int:
+    """テレワーク明細シートの最終データ行（合計行なし）。ヘッダーのみなら 1。"""
+    ws = wb["テレワーク明細"]
+    return max(ws.max_row, 1)
+
+
+def add_selected_employee_views(
+    wb: Workbook,
+    employee_count: int,
+    commute_row_count: int = 0,
+) -> None:
+    """サマリに「従業員選択」ドロップダウンを付け、選択した従業員だけを表示する
+    連動シート（テレワーク明細(選択者)/通勤費(選択者)）を追加する。
+
+    1つのドロップダウン（定義名 ``選択社員`` = サマリ!$I$2）を全シートが FILTER で
+    参照するため、選択を変えると連動シートが同じ従業員に一斉に切り替わる。
+    Excel 365 / 2021 の FILTER・XLOOKUP を使う（マクロ不要）。
+
+    Args:
+        wb: サマリ／テレワーク明細（＋任意で通勤費）が既にあるブック
+        employee_count: サマリのデータ行数（従業員数）
+        commute_row_count: 通勤費のデータ行数（0 なら通勤費連動シートは作らない）
+    """
+    if employee_count <= 0 or "サマリ" not in wb.sheetnames:
+        return
+
+    header_font = Font(name=FONT, bold=True, color="FFFFFF")
+    pick_fill = PatternFill("solid", start_color="FFC000")   # 選択セル＝目立つ黄色
+    label_font = Font(name=FONT, bold=True)
+    body_font = Font(name=FONT)
+    center = Alignment(horizontal="center")
+
+    ws = wb["サマリ"]
+    s_first, s_last = 2, employee_count + 1   # サマリのデータ行範囲
+    id_range = f"サマリ!$A${s_first}:$A${s_last}"
+    name_range = f"サマリ!$B${s_first}:$B${s_last}"
+
+    # ---- サマリ右側（H:I）に選択ダッシュボードを置く（既存 A:F 表は触らない） ----
+    ws["H1"] = "🔎 従業員を選択"
+    ws["H1"].font = label_font
+    labels = [
+        ("H2", "社員番号", "I2", None),
+        ("H3", "氏名", "I3", f'={_XLOOKUP}({EMP_PICK_NAME},{id_range},{name_range},"—")'),
+        ("H4", "出勤日数", "I4", f'={_XLOOKUP}({EMP_PICK_NAME},{id_range},サマリ!$C${s_first}:$C${s_last},"—")'),
+        ("H5", "テレワーク日数", "I5", f'={_XLOOKUP}({EMP_PICK_NAME},{id_range},サマリ!$D${s_first}:$D${s_last},"—")'),
+        ("H6", "出社日数", "I6", f'={_XLOOKUP}({EMP_PICK_NAME},{id_range},サマリ!$E${s_first}:$E${s_last},"—")'),
+    ]
+    for lcell, ltext, vcell, formula in labels:
+        ws[lcell] = ltext
+        ws[lcell].font = label_font
+        if formula is not None:
+            ws[vcell] = formula
+            ws[vcell].font = body_font
+    ws["H7"] = "↑ここで選ぶと「(選択者)」シートが連動します"
+    ws["H7"].font = Font(name=FONT, italic=True, size=9, color="808080")
+
+    # 選択セル I2：初期値＝先頭従業員、黄色ハイライト、プルダウン、定義名
+    first_id = ws.cell(row=s_first, column=1).value
+    ws["I2"] = first_id
+    ws["I2"].fill = pick_fill
+    ws["I2"].font = Font(name=FONT, bold=True)
+    dv = DataValidation(type="list", formula1=f"={id_range}", allow_blank=False)
+    dv.error = "一覧にある社員番号を選んでください"
+    dv.prompt = "社員番号を選択"
+    ws.add_data_validation(dv)
+    dv.add(ws["I2"])
+    # 既存の定義名があれば消してから登録（再生成に強くする）
+    try:
+        if EMP_PICK_NAME in wb.defined_names:
+            del wb.defined_names[EMP_PICK_NAME]
+    except (KeyError, TypeError):
+        pass
+    wb.defined_names.add(DefinedName(EMP_PICK_NAME, attr_text="サマリ!$I$2"))
+
+    ws.column_dimensions["H"].width = 16
+    ws.column_dimensions["I"].width = 22
+
+    def _style_view(vs, headers, banner_label):
+        """連動シートの共通スタイル（バナー＋ヘッダー）を整える。"""
+        vs["A1"] = "選択中 ▶"
+        vs["A1"].font = label_font
+        vs["B1"] = f"={EMP_PICK_NAME}"
+        vs["B1"].font = Font(name=FONT, bold=True)
+        vs["B1"].fill = pick_fill
+        vs["C1"] = f'={_XLOOKUP}({EMP_PICK_NAME},{id_range},{name_range},"—")'
+        vs["C1"].font = label_font
+        vs["E1"] = "※選択は「サマリ」シートの黄色セルで変更"
+        vs["E1"].font = Font(name=FONT, italic=True, size=9, color="808080")
+        for ci, h in enumerate(headers, start=1):
+            c = vs.cell(row=3, column=ci, value=h)
+            c.font = header_font
+            c.fill = PatternFill("solid", start_color="4472C4")
+            c.alignment = center
+
+    # ---- テレワーク明細(選択者) ----
+    d_last = _detail_last_row(wb)
+    vs = wb.create_sheet("テレワーク明細(選択者)")
+    _style_view(vs, ["社員番号", "氏名", "テレワーク日", "打刻区分"], "テレワーク")
+    if d_last >= 2:
+        vs["A4"] = (
+            f'={_FILTER}(テレワーク明細!A2:D{d_last},'
+            f'テレワーク明細!A2:A{d_last}={EMP_PICK_NAME},"該当なし")'
+        )
+    else:
+        vs["A4"] = '="該当なし"'
+    for col, width in zip("ABCD", [12, 18, 14, 24]):
+        vs.column_dimensions[col].width = width
+    vs.freeze_panes = "A4"
+
+    # ---- 通勤費(選択者) ----（通勤費シートがある場合のみ） ----
+    if commute_row_count > 0 and "通勤費" in wb.sheetnames:
+        c_last = commute_row_count + 1          # 合計行(n+2)は含めない
+        last_col = get_column_letter(len(COMMUTE_OUTPUT_COLUMNS))
+        cv = wb.create_sheet("通勤費(選択者)")
+        _style_view(cv, COMMUTE_OUTPUT_COLUMNS, "通勤費")
+        cv["A4"] = (
+            f'={_FILTER}(通勤費!A2:{last_col}{c_last},'
+            f'通勤費!A2:A{c_last}={EMP_PICK_NAME},"該当なし")'
+        )
+        widths = {
+            "社員番号": 12, "氏名": 16, "経路No": 7, "出発": 14, "到着": 14, "経由1": 12,
+            "経由2": 12, "通勤経路": 60, "利用交通機関": 14, "支給間隔": 10, "支給方法": 8,
+            "支給金額": 12, "非課税通勤費": 12, "課税通勤費": 12, "支給開始": 10, "片道距離(km)": 11,
+        }
+        for i, name in enumerate(COMMUTE_OUTPUT_COLUMNS, start=1):
+            cv.column_dimensions[get_column_letter(i)].width = widths.get(name, 14)
+        cv.freeze_panes = "A4"
+
+    # ---- シート順：サマリ → 連動ビュー → 元データ ----
+    order = ["サマリ", "テレワーク明細(選択者)"]
+    if "通勤費(選択者)" in wb.sheetnames:
+        order.append("通勤費(選択者)")
+    order += [n for n in ("テレワーク明細", "通勤費") if n in wb.sheetnames]
+    order += [n for n in wb.sheetnames if n not in order]
+    wb._sheets.sort(key=lambda s: order.index(s.title))
+
+
+# ----------------------------------------------------------------------
 # 共通実行関数（CLI / Flask 共用）
 # ----------------------------------------------------------------------
 
@@ -448,6 +601,7 @@ def run_telework_export(
     # 通勤費は既定で jinjer API（commuting-information）から取得。commute_csv 指定時はCSV優先。
     wb = Workbook()
     _build_telework_sheets(wb, month, rows)
+    commute_count = 0
     try:
         if commute_csv:
             commute_rows = read_commute_csv(commute_csv)
@@ -457,10 +611,18 @@ def run_telework_export(
             commute_rows = fetch_commute_rows_via_api(client, id_to_name)
             log_func(f"[info] 通勤情報をAPIから取得: {len(commute_rows)} 行 → 通勤費シート追加")
         add_commute_sheet(wb, commute_rows)
-        result.commute_count = len(commute_rows)
+        commute_count = len(commute_rows)
+        result.commute_count = commute_count
     except Exception as e:
         # 通勤費が取れなくてもテレワーク集計は出す
         log_func(f"[warn] 通勤費シートの作成に失敗（スキップ）: {e}")
+
+    # 従業員選択で全シート連動するビューを追加（サマリのプルダウン＋(選択者)シート）
+    try:
+        add_selected_employee_views(wb, employee_count=len(rows), commute_row_count=commute_count)
+    except Exception as e:
+        log_func(f"[warn] 従業員選択ビューの追加に失敗（スキップ）: {e}")
+
     try:
         wb.calculation.fullCalcOnLoad = True
     except Exception:

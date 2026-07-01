@@ -6,7 +6,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.expense_check import (
     summarize, build_telework_workbook, _md,
-    read_commute_csv, add_commute_sheet, COMMUTE_OUTPUT_COLUMNS,
+    read_commute_csv, add_commute_sheet, add_selected_employee_views,
+    COMMUTE_OUTPUT_COLUMNS, _build_telework_sheets, EMP_PICK_NAME,
 )
 
 
@@ -59,10 +60,13 @@ def test_build_telework_workbook(tmp_path):
     ], out)
     assert out.exists()
     wb = load_workbook(out)
-    assert set(wb.sheetnames) == {"サマリ", "テレワーク明細"}
+    # 連動ビュー（テレワーク明細(選択者)）も追加される
+    assert set(wb.sheetnames) == {"サマリ", "テレワーク明細", "テレワーク明細(選択者)"}
     assert wb.sheetnames[0] == "サマリ"  # サマリを先頭に表示
     ws = wb["サマリ"]
-    assert [c.value for c in ws[1]] == ["社員番号", "氏名", "出勤日数", "テレワーク日数", "出社日数", "テレワーク実施日"]
+    # A:F が既存のサマリ見出し（G以降は選択ダッシュボード用なので先頭6列だけ確認）
+    assert [ws.cell(row=1, column=c).value for c in range(1, 7)] == \
+        ["社員番号", "氏名", "出勤日数", "テレワーク日数", "出社日数", "テレワーク実施日"]
     # 田中: テレワーク実施日は 5/1、5/8 表記
     assert ws.cell(row=2, column=6).value == "5/1、5/8"
     # テレワーク日数は COUNTIF 数式
@@ -70,6 +74,60 @@ def test_build_telework_workbook(tmp_path):
     # 明細は田中の2行
     wd = wb["テレワーク明細"]
     assert wd.max_row == 3  # ヘッダー + 2行
+
+
+def test_selected_employee_views_link_all_sheets(tmp_path):
+    """従業員選択ドロップダウン＋連動シートが正しく作られること。"""
+    from openpyxl import Workbook, load_workbook
+    rows = [
+        {"id": "2020001", "name": "田中 一郎", "work_days": 20,
+         "telework_days": [("2026-05-01", "テレワーク"), ("2026-05-08", "テレワーク")]},
+        {"id": "2020002", "name": "上原 奏吾", "work_days": 18, "telework_days": []},
+    ]
+    commute = [
+        {"社員番号": "2020001", "氏名": "田中 一郎", "経路No": 1, "出発": "笹塚", "到着": "豊洲",
+         "経由1": "", "経由2": "", "利用交通機関": "公共交通機関", "通勤経路": "笹塚 → 豊洲",
+         "支給間隔": "毎月", "支給方法": "一括", "支給金額": 18350, "非課税通勤費": 18350,
+         "課税通勤費": 0, "支給開始": "2025-06", "片道距離(km)": ""},
+    ]
+    wb = Workbook()
+    _build_telework_sheets(wb, "2026-05", rows)
+    add_commute_sheet(wb, commute)
+    add_selected_employee_views(wb, employee_count=len(rows), commute_row_count=len(commute))
+    out = tmp_path / "views.xlsx"
+    wb.calculation.fullCalcOnLoad = True
+    wb.save(out)
+
+    rb = load_workbook(out)
+    # サマリ先頭 → 連動ビュー → 元データ の順
+    assert rb.sheetnames[0] == "サマリ"
+    assert "テレワーク明細(選択者)" in rb.sheetnames
+    assert "通勤費(選択者)" in rb.sheetnames
+
+    # 定義名 選択社員 = サマリ!$I$2、初期値は先頭従業員
+    assert EMP_PICK_NAME in rb.defined_names
+    assert rb.defined_names[EMP_PICK_NAME].attr_text == "サマリ!$I$2"
+    assert rb["サマリ"]["I2"].value == "2020001"
+
+    # 連動シートは FILTER（内部名 _xlfn._xlws.FILTER）で選択社員を参照
+    tw = rb["テレワーク明細(選択者)"].cell(row=4, column=1).value
+    assert tw.startswith("=_xlfn._xlws.FILTER(")
+    assert EMP_PICK_NAME in tw
+    cm = rb["通勤費(選択者)"].cell(row=4, column=1).value
+    assert cm.startswith("=_xlfn._xlws.FILTER(") and EMP_PICK_NAME in cm
+
+    # サマリのミニ集計は XLOOKUP（内部名 _xlfn.XLOOKUP）
+    assert str(rb["サマリ"]["I3"].value).startswith("=_xlfn.XLOOKUP(")
+
+
+def test_selected_views_skips_when_no_employees():
+    """従業員0名なら連動ビューは追加しない（例外にならない）。"""
+    from openpyxl import Workbook
+    wb = Workbook()
+    _build_telework_sheets(wb, "2026-05", [])
+    add_selected_employee_views(wb, employee_count=0)
+    assert "テレワーク明細(選択者)" not in wb.sheetnames
+    assert EMP_PICK_NAME not in wb.defined_names
 
 
 def test_read_commute_csv_maps_fields(tmp_path):
