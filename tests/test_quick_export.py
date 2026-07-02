@@ -93,6 +93,97 @@ def test_run_quick_export_skips_approved_break_without_manual_values(tmp_path):
     assert result.stats.skipped_break == 1
 
 
+def test_run_quick_export_applies_manual_break_on_non_break_rows(tmp_path):
+    """休憩行が無くても、出勤/退勤/総労働時間の行に入力した手入力休憩を反映する。
+
+    菅原孝さん 2026-06 の実例: 差異一覧に「休憩」種別の行が1件も無く、
+    手入力休憩1/復帰1 を出勤・退勤・総労働時間の行に入力したところ、
+    旧実装では全行無視され休憩1/復帰1 が空のままだった。
+    """
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    common = {
+        "従業員ID": "2018057",
+        "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01",
+        "手入力休憩1": "12:00",
+        "手入力復帰1": "13:30",
+    }
+    pd.DataFrame([
+        {"行ID": 1, "差異種別": "出勤", "自動修正提案値": "08:30", "人間判断": "請求勤怠", **common},
+        {"行ID": 2, "差異種別": "退勤", "自動修正提案値": "19:45", "人間判断": "請求勤怠", **common},
+        # 総労働時間を jinjer勤怠（却下）にしても、手入力休憩は反映される
+        {"行ID": 3, "差異種別": "総労働時間", "自動修正提案値": "", "人間判断": "jinjer勤怠", **common},
+    ]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    row = _read_output_row(output_path)
+    assert row["休憩1"] == "12:00"
+    assert row["復帰1"] == "13:30"
+    assert row["出勤1"] == "08:30"
+    assert row["退勤1"] == "19:45"
+    # 同一 (従業員, 日付) なので反映は1回だけ
+    assert result.stats.manual_break_days == 1
+    assert result.stats.overwritten_break_start == 1
+    assert result.stats.overwritten_break_end == 1
+    assert result.stats.manual_break_conflicts == 0
+    assert result.stats.skipped_break == 0
+
+
+def test_run_quick_export_warns_on_conflicting_manual_breaks(tmp_path):
+    """同じ日に食い違う手入力休憩が入力された場合、先の値を採用して警告する。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([
+        {"行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾", "対象日付": "2026-04-01",
+         "差異種別": "出勤", "自動修正提案値": "08:30", "人間判断": "請求勤怠",
+         "手入力休憩1": "12:00", "手入力復帰1": "13:00"},
+        {"行ID": 2, "従業員ID": "2018057", "氏名": "上原 奏吾", "対象日付": "2026-04-01",
+         "差異種別": "退勤", "自動修正提案値": "19:45", "人間判断": "請求勤怠",
+         "手入力休憩1": "12:00", "手入力復帰1": "13:30"},  # 復帰が食い違う
+    ]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    row = _read_output_row(output_path)
+    assert row["休憩1"] == "12:00"
+    assert row["復帰1"] == "13:00"  # 先に読んだ行の値を採用
+    assert result.stats.manual_break_conflicts == 1
+    assert any("食い違" in w for w in result.stats.warnings)
+
+
+def test_run_quick_export_holds_manual_break_on_hold_row(tmp_path):
+    """人間判断=保留 の行に入力された手入力休憩は反映しない。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾", "対象日付": "2026-04-01",
+        "差異種別": "総労働時間", "自動修正提案値": "", "人間判断": "保留",
+        "手入力休憩1": "12:00", "手入力復帰1": "13:30",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    row = _read_output_row(output_path)
+    assert row["休憩1"] == ""
+    assert row["復帰1"] == ""
+    assert result.stats.manual_break_days == 0
+    assert any("保留のため反映しません" in w for w in result.stats.warnings)
+
+
 def test_run_quick_export_prefers_manual_fix_value_for_punch(tmp_path):
     diff_path = tmp_path / "diff.xlsx"
     jinjer_path = tmp_path / "jinjer.csv"

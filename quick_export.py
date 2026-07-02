@@ -11,8 +11,9 @@
   3. 承認行に応じて該当セルを上書き:
      - 出勤差異 → 出勤1（22列目）
      - 退勤差異 → 退勤1（23列目）
-     - 休憩差異 → 手入力休憩1 / 手入力復帰1 / 手入力休憩時間 があれば該当列へ反映
-     - 総労働時間差異 → 警告のみ、上書きしない
+     - 手入力休憩1 / 手入力復帰1 / 手入力休憩時間 → 差異種別（出勤/退勤/休憩/総労働時間）を
+       問わず、入力があれば (従業員, 日付) 単位で休憩1/復帰1/休憩時間へ反映（保留の行は除く）
+     - 総労働時間差異 → 手入力休憩が無い場合は警告のみ、上書きしない
   4. 全件をそのままアップロード用CSV として書き出す
 
 実績確定済みの扱い:
@@ -99,6 +100,23 @@ class ApprovedRow:
 
 
 @dataclass
+class ManualBreak:
+    """手入力休憩の反映指示。(従業員ID, 日付) 単位で1件。
+
+    休憩差異は「休憩」行として出ないことも多く（総労働時間差異にしか現れない等）、
+    実務では出勤/退勤/総労働時間の行に手入力休憩が書かれる。そのため差異種別に
+    関係なく、手入力休憩欄に値があれば反映指示として扱う（保留の行だけ除外）。
+    """
+    emp_id: str
+    date_iso: str
+    start: str = ""
+    end: str = ""
+    total: str = ""
+    name: str = ""
+    source_diff_row_id: int = 0
+
+
+@dataclass
 class Stats:
     total_diff_rows: int = 0
     approved: int = 0
@@ -119,6 +137,8 @@ class Stats:
     overwritten_break_start: int = 0
     overwritten_break_end: int = 0
     overwritten_break_total: int = 0
+    manual_break_days: int = 0  # 手入力休憩の反映指示 (従業員, 日付) 件数
+    manual_break_conflicts: int = 0  # 同一 (従業員, 日付) で手入力休憩の値が食い違った件数
     not_matched: int = 0  # jinjer 行が見つからない承認行
     overwritten_finalized: int = 0  # 上書きしたうち実績確定済みだった件数（参考表示）
     recovered_misplaced: int = 0  # 「人間判断」列以外に入っていた判断を回収した件数
@@ -212,8 +232,18 @@ def clean_excel_text(value: Any) -> str:
 # 入力読み込み
 # ----------------------------------------------------------------------
 
-def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
-    """差異一覧xlsx の「差異一覧」シートから 人間判断=承認 の行を抽出。"""
+def load_approved_rows(
+    diff_xlsx: Path, stats: Stats
+) -> tuple[list[ApprovedRow], dict[tuple[str, str], ManualBreak]]:
+    """差異一覧xlsx の「差異一覧」シートから 人間判断=承認 の行と手入力休憩を抽出。
+
+    Returns:
+        (approved, manual_breaks)
+        - approved      : 人間判断=請求勤怠(承認) の行
+        - manual_breaks : 手入力休憩1/復帰1/休憩時間 が入力された行から集めた
+                          (従業員ID, 日付ISO) → ManualBreak。差異種別・人間判断の
+                          種類を問わず収集する（保留の行だけ除外）。
+    """
     if not diff_xlsx.exists():
         raise FileNotFoundError(f"差異一覧xlsx が見つかりません: {diff_xlsx}")
 
@@ -235,6 +265,7 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
     stats.total_diff_rows = len(df)
 
     approved: list[ApprovedRow] = []
+    manual_breaks: dict[tuple[str, str], ManualBreak] = {}
     for _, row in df.iterrows():
         judge = str(row.get("人間判断") or "").strip()
 
@@ -252,18 +283,6 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
                     stats.misplaced_by_col[col] = stats.misplaced_by_col.get(col, 0) + 1
                     break
 
-        if judge in APPROVE_LABELS:
-            stats.approved += 1
-        elif judge in REJECT_LABELS:
-            stats.rejected += 1
-            continue
-        elif judge in HOLD_LABELS:
-            stats.held += 1
-            continue
-        else:
-            stats.pending += 1
-            continue
-
         # 判断を回収した列の値は「承認」等の文字列なので、時刻として書き込まないよう除外する。
         def _field(col: str) -> str:
             if col == misplaced_col:
@@ -275,6 +294,68 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
         emp_id = str(row.get("従業員ID") or "").strip()
         date_iso = normalize_date_iso(row.get("対象日付"))
         kind = str(row.get("差異種別") or "").strip()
+        name = str(row.get("氏名") or "").strip()
+        row_id_raw = row.get("行ID")
+        try:
+            row_id = int(row_id_raw) if row_id_raw is not None else 0
+        except (ValueError, TypeError):
+            row_id = 0
+
+        # 手入力休憩は、差異種別（出勤/退勤/総労働時間/休憩）や人間判断のラベルに
+        # 関係なく「入力があれば反映する」指示として全行から収集する。
+        # 休憩差異は「休憩」行として出ず総労働時間差異にしか現れないことが多く、
+        # 実務では出勤/退勤/総労働時間の行に手入力されるため（菅原さん 2026-06 で
+        # 全行無視され休憩が反映されなかった実例あり）。保留の行だけは対象外。
+        mb_start = _field("手入力休憩1")
+        mb_end = _field("手入力復帰1")
+        mb_total = _field("手入力休憩時間")
+        if (mb_start or mb_end or mb_total) and emp_id and date_iso:
+            if judge in HOLD_LABELS:
+                stats.warnings.append(
+                    f"行ID={row_id_raw} 手入力休憩がありますが人間判断=保留のため反映しません "
+                    f"(emp={emp_id} date={date_iso} {name})"
+                )
+            else:
+                key = (emp_id, date_iso)
+                existing = manual_breaks.get(key)
+                if existing is None:
+                    manual_breaks[key] = ManualBreak(
+                        emp_id=emp_id, date_iso=date_iso,
+                        start=mb_start, end=mb_end, total=mb_total,
+                        name=name, source_diff_row_id=row_id,
+                    )
+                else:
+                    conflict = (
+                        (mb_start and existing.start and mb_start != existing.start)
+                        or (mb_end and existing.end and mb_end != existing.end)
+                        or (mb_total and existing.total and mb_total != existing.total)
+                    )
+                    if conflict:
+                        stats.manual_break_conflicts += 1
+                        stats.warnings.append(
+                            f"行ID={row_id_raw} 同じ日付の手入力休憩が食い違っています。"
+                            f"先に読んだ行ID={existing.source_diff_row_id} の値を採用します "
+                            f"(emp={emp_id} date={date_iso} {name}: "
+                            f"採用={existing.start}/{existing.end}/{existing.total} "
+                            f"無視={mb_start}/{mb_end}/{mb_total})"
+                        )
+                    else:
+                        # 同値の重複入力（複数行に同じ休憩を記入）は空欄だけ補完する
+                        existing.start = existing.start or mb_start
+                        existing.end = existing.end or mb_end
+                        existing.total = existing.total or mb_total
+
+        if judge in APPROVE_LABELS:
+            stats.approved += 1
+        elif judge in REJECT_LABELS:
+            stats.rejected += 1
+            continue
+        elif judge in HOLD_LABELS:
+            stats.held += 1
+            continue
+        else:
+            stats.pending += 1
+            continue
         # 「請求勤怠」を採用したときに書き戻す時刻。
         # 旧フォーマットは「自動修正提案値」列に時刻が入っていた。新フォーマットでは同列が
         # 採用ラベル（請求勤怠/jinjer勤怠/保留）に変わり _field で空に剥がれるため、表示している
@@ -284,16 +365,7 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
         auto_fix = _field("自動修正提案値") or _field("請求勤怠値")
         # 列名は「打刻修正」（新）。旧フォーマットの「手入力修正値」も後方互換で読む。
         manual_fix = _field("打刻修正") or _field("手入力修正値")
-        manual_break_start = _field("手入力休憩1")
-        manual_break_end = _field("手入力復帰1")
-        manual_break_total = _field("手入力休憩時間")
-        name = str(row.get("氏名") or "").strip()
         warn_level = str(row.get("警告レベル") or "").strip()
-        row_id_raw = row.get("行ID")
-        try:
-            row_id = int(row_id_raw) if row_id_raw is not None else 0
-        except (ValueError, TypeError):
-            row_id = 0
 
         if not emp_id or not date_iso or not kind:
             stats.warnings.append(
@@ -305,9 +377,9 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
             emp_id=emp_id, target_date_iso=date_iso, kind=kind,
             auto_fix_value=auto_fix,
             manual_fix_value=manual_fix,
-            manual_break_start=manual_break_start,
-            manual_break_end=manual_break_end,
-            manual_break_total=manual_break_total,
+            manual_break_start=mb_start,
+            manual_break_end=mb_end,
+            manual_break_total=mb_total,
             name=name, warn_level=warn_level,
             source_diff_row_id=row_id,
         ))
@@ -334,7 +406,8 @@ def load_approved_rows(diff_xlsx: Path, stats: Stats) -> list[ApprovedRow]:
             "次回は必ず「人間判断」列（プルダウンのある列）に入力してください。",
         )
 
-    return approved
+    stats.manual_break_days = len(manual_breaks)
+    return approved, manual_breaks
 
 
 def _csv_input_files(path: Path) -> list[Path]:
@@ -421,6 +494,7 @@ def apply_approved_rows(
     row_index: dict[tuple[str, str], int],
     approved: list[ApprovedRow],
     stats: Stats,
+    manual_breaks: dict[tuple[str, str], ManualBreak] | None = None,
 ) -> None:
     """承認行に応じて rows を in-place で上書きする。
 
@@ -442,43 +516,41 @@ def apply_approved_rows(
     # 実績確定状況列があれば、上書きしたうち何件が実績確定済だったかを集計する（参考表示のみ）
     finalized_col = headers.index("実績確定状況") if "実績確定状況" in headers else None
 
+    # ---- 手入力休憩の反映（差異種別に依存しない・(従業員, 日付) 単位で1回） ----
+    # 休憩は請求勤怠から自動推定せず、人間が差異一覧に入力した欄だけ反映する。
+    manual_breaks = manual_breaks or {}
+    for key, mb in manual_breaks.items():
+        idx = row_index.get(key)
+        if idx is None:
+            stats.not_matched += 1
+            stats.warnings.append(
+                f"行ID={mb.source_diff_row_id} 手入力休憩の対象行が jinjer CSV にありません "
+                f"(emp={mb.emp_id} date={mb.date_iso} {mb.name})"
+            )
+            continue
+        if mb.start:
+            if break_start_col is None:
+                stats.warnings.append(f"行ID={mb.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_START}' 列がありません")
+            else:
+                rows[idx][break_start_col] = mb.start
+                stats.overwritten_break_start += 1
+        if mb.end:
+            if break_end_col is None:
+                stats.warnings.append(f"行ID={mb.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_END}' 列がありません")
+            else:
+                rows[idx][break_end_col] = mb.end
+                stats.overwritten_break_end += 1
+        if mb.total:
+            if break_total_col is None:
+                stats.warnings.append(f"行ID={mb.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_TOTAL}' 列がありません")
+            else:
+                rows[idx][break_total_col] = mb.total
+                stats.overwritten_break_total += 1
+
     for app in approved:
-        # 休憩は請求勤怠から自動推定せず、人間が差異一覧に入力した欄だけ反映する。
         if app.kind == DIFF_KIND_BREAK:
-            key = (app.emp_id, app.target_date_iso)
-            idx = row_index.get(key)
-            if idx is None:
-                stats.not_matched += 1
-                stats.warnings.append(
-                    f"行ID={app.source_diff_row_id} jinjer CSV に該当行なし "
-                    f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
-                )
-                continue
-
-            wrote = False
-            if app.manual_break_start:
-                if break_start_col is None:
-                    stats.warnings.append(f"行ID={app.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_START}' 列がありません")
-                else:
-                    rows[idx][break_start_col] = app.manual_break_start
-                    stats.overwritten_break_start += 1
-                    wrote = True
-            if app.manual_break_end:
-                if break_end_col is None:
-                    stats.warnings.append(f"行ID={app.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_END}' 列がありません")
-                else:
-                    rows[idx][break_end_col] = app.manual_break_end
-                    stats.overwritten_break_end += 1
-                    wrote = True
-            if app.manual_break_total:
-                if break_total_col is None:
-                    stats.warnings.append(f"行ID={app.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_TOTAL}' 列がありません")
-                else:
-                    rows[idx][break_total_col] = app.manual_break_total
-                    stats.overwritten_break_total += 1
-                    wrote = True
-
-            if not wrote:
+            # 上書き自体は manual_breaks で処理済み。手入力が無い承認だけ警告する。
+            if (app.emp_id, app.target_date_iso) not in manual_breaks:
                 stats.skipped_break += 1
                 stats.warnings.append(
                     f"行ID={app.source_diff_row_id} 休憩差異が承認されましたが、手入力休憩欄が空のため反映しませんでした "
@@ -487,10 +559,12 @@ def apply_approved_rows(
             continue
         if app.kind == DIFF_KIND_TOTAL:
             stats.skipped_total += 1
-            stats.warnings.append(
-                f"行ID={app.source_diff_row_id} 総労働時間差異が承認されましたが、自動反映はスキップしました "
-                f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
-            )
+            # 同じ日に手入力休憩を反映済みなら、それが総労働時間差異への対処なので警告しない
+            if (app.emp_id, app.target_date_iso) not in manual_breaks:
+                stats.warnings.append(
+                    f"行ID={app.source_diff_row_id} 総労働時間差異が承認されましたが、自動反映はスキップしました "
+                    f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
+                )
             continue
 
         if app.kind not in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT):
@@ -567,6 +641,9 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"  退勤差異   : {stats.approved_punch_out} → 退勤1 列に上書き")
     print(f"  休憩差異   : {stats.approved_break} → 手入力欄がある場合のみ休憩列へ上書き")
     print(f"  総労働時間 : {stats.approved_total} → 警告のみ、上書きしない")
+    print(f"  手入力休憩 : {stats.manual_break_days} 日分（差異種別を問わず入力があれば反映）")
+    if stats.manual_break_conflicts:
+        print(f"  ⚠️ 手入力休憩の値の食い違い: {stats.manual_break_conflicts} 件（警告参照）")
     print()
     print(f"{mode} ===== 実際の上書き結果 =====")
     print(f"  出勤1 上書き         : {stats.overwritten_punch_in}")
@@ -627,13 +704,16 @@ def run_quick_export(
     log_func(f"[start] モード: {'dry-run' if dry_run else 'execute'}")
 
     try:
-        approved = load_approved_rows(diff_xlsx, stats)
+        approved, manual_breaks = load_approved_rows(diff_xlsx, stats)
     except Exception as e:
         msg = f"差異一覧読み込み失敗: {e}"
         log_func(f"[error] {msg}")
         result.error = msg
         return result
-    log_func(f"[info] 承認行 {len(approved)} 件 / 総差異 {stats.total_diff_rows} 件")
+    log_func(
+        f"[info] 承認行 {len(approved)} 件 / 手入力休憩 {len(manual_breaks)} 日分 / "
+        f"総差異 {stats.total_diff_rows} 件"
+    )
 
     try:
         headers, rows = load_jinjer_csvs(jinjer_dir)
@@ -654,7 +734,7 @@ def run_quick_export(
         return result
     log_func(f"[info] (従業員ID, 年月日) インデックス {len(row_index)} 件")
 
-    apply_approved_rows(headers, rows, row_index, approved, stats)
+    apply_approved_rows(headers, rows, row_index, approved, stats, manual_breaks)
 
     if not dry_run:
         try:
