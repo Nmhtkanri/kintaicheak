@@ -1,4 +1,5 @@
 import os
+import socket
 import sys
 import threading
 import time
@@ -23,7 +24,14 @@ os.chdir(ROOT_DIR)
 def _open_browser():
     if os.environ.get("KINTAI_CHECKER_NO_BROWSER") == "1":
         return
-    time.sleep(3)
+    # サーバーのポートが開いたら即ブラウザを開く（固定3秒待ちをやめて起動を体感短縮）
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", 5000), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.2)
     webbrowser.open("http://localhost:5000")
 
 
@@ -31,4 +39,5 @@ if __name__ == "__main__":
     from app import app
 
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    # 各自のPCでローカル起動する運用のため、待ち受けは自分のPC内のみ（LANに公開しない）
+    app.run(debug=False, host="127.0.0.1", port=5000)
