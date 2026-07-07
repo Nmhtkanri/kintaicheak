@@ -112,6 +112,10 @@ TOKKI_PREV_MONTH_TAIL_UNMATCHED = (
     "前月末夜勤の後半(jinjer側は前月末日行に記録・自動書戻し不可。"
     "jinjerダウンロード範囲に前月末日を含めると突合可能)"
 )
+TOKKI_JINJER_SPLIT = (
+    "jinjer側2行分割登録(退勤の自動書戻し不可。"
+    "修正する場合はjinjerを開始日1行の24時超表記へ手動統合)"
+)
 
 
 def _as_date(value):
@@ -139,16 +143,21 @@ def _dedup_timesheet_rows(timesheet_df):
     return timesheet_df.drop_duplicates(subset=subset, keep="first").reset_index(drop=True)
 
 
-def _merge_sheet_midnight_split_rows(timesheet_df):
-    """請求勤怠側の「深夜0時割り」2行を勤務開始日の1行に結合する。
+def _merge_midnight_split_rows(timesheet_df):
+    """「深夜0時割り」の2行（D日 X〜24:00 ＋ D+1日 0:00〜Y）を勤務開始日の1行に結合する。
 
-    SAP Fieldglass等は日跨ぎ夜勤を暦日で「D日 X〜24:00」「D+1日 0:00〜Y」の2行に
-    分割するが、jinjerは勤務開始日の1行（退勤は24時超表記）で記録する。jinjerと
-    同じ形に揃えるため 日付=D・出勤=X・退勤=Y（翌日時刻）・実働=両行の合計 に結合する。
+    SAP Fieldglass等は日跨ぎ夜勤を暦日で2行に分割する。またjinjer側にも、深夜0時で
+    2行に分けて登録された夜勤が存在する（例: 6/2 17:00〜24:00 ＋ 6/3 0:00〜7:00）。
+    突合は「勤務開始日の1行（退勤は24時超相当）」の形に両側を揃えて行うため、
+    日付=D・出勤=X・退勤=Y（翌日時刻）・実働=両行の合計 に結合する。
     曖昧なケース（同日に複数候補）は結合しない。
+
+    Returns:
+        tuple(df, merged_keys)
+        - merged_keys: 結合が起きた (氏名_normalized, 開始日) の集合
     """
     if timesheet_df.empty:
-        return timesheet_df
+        return timesheet_df, set()
 
     df = timesheet_df.reset_index(drop=True)
     first_halves = {}   # (氏名key, 日付) -> [行番号] 退勤がちょうど0:00（前半）
@@ -166,6 +175,7 @@ def _merge_sheet_midnight_split_rows(timesheet_df):
             second_halves.setdefault((key, d), []).append(idx)
 
     dropped = set()
+    merged_keys = set()
     has_total = "総労働時間(分)" in df.columns
     for (key, d), f_idxs in first_halves.items():
         s_idxs = second_halves.get((key, d + timedelta(days=1)), [])
@@ -174,6 +184,7 @@ def _merge_sheet_midnight_split_rows(timesheet_df):
         fi, si = f_idxs[0], s_idxs[0]
         if fi in dropped or si in dropped:
             continue
+        merged_keys.add((key, d))
         df.at[fi, "退勤時刻"] = df.at[si, "退勤時刻"]
         if has_total:
             t1, t2 = df.at[fi, "総労働時間(分)"], df.at[si, "総労働時間(分)"]
@@ -191,8 +202,8 @@ def _merge_sheet_midnight_split_rows(timesheet_df):
         dropped.add(si)
 
     if not dropped:
-        return df
-    return df.drop(index=list(dropped)).reset_index(drop=True)
+        return df, merged_keys
+    return df.drop(index=list(dropped)).reset_index(drop=True), merged_keys
 
 
 def _pair_cross_midnight_rows(merged, sheet_min_date, sheet_max_date):
@@ -498,7 +509,7 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     # 請求勤怠側の完全重複行を除去し、深夜0時割りの2行を勤務開始日1本に結合する
     # （jinjerは夜勤を開始日の1行・24時超表記で記録するため、同じ形に揃えて突合する）。
     timesheet_df = _dedup_timesheet_rows(timesheet_df)
-    timesheet_df = _merge_sheet_midnight_split_rows(timesheet_df)
+    timesheet_df, _ = _merge_midnight_split_rows(timesheet_df)
 
     # 勤務表に含まれる社員の正規化名セット
     sheet_names = set(timesheet_df["氏名_normalized"].unique())
@@ -513,6 +524,11 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
 
     # jinjer側を勤務表の社員のみにフィルタリング
     jinjer_filtered = jinjer_df[jinjer_df["氏名_normalized"].isin(sheet_names)]
+
+    # jinjer側にも深夜0時割りで2行登録された夜勤が存在する（例: 17:00〜24:00 ＋ 翌日0:00〜7:00）。
+    # 突合用に開始日1本へ結合する。該当した勤務は「特記」を付け、退勤の自動書き戻しを止める
+    # （実データのjinjerは2行のままなので、開始日行だけに24時超の退勤を書くと二重計上になる）。
+    jinjer_filtered, jinjer_merged_keys = _merge_midnight_split_rows(jinjer_filtered)
 
     # カラムリネーム
     jinjer_renamed = jinjer_filtered.rename(columns={
@@ -556,6 +572,15 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     if "特記" not in merged.columns:
         merged["特記"] = ""
     merged["特記"] = merged["特記"].fillna("")
+
+    # jinjer側を結合した勤務に特記を付ける（退勤の自動書き戻し抑止用）
+    if jinjer_merged_keys:
+        def _mark_jinjer_split(row):
+            tokki = str(row.get("特記") or "").strip()
+            if (row.get("氏名_normalized"), _as_date(row.get("日付"))) in jinjer_merged_keys:
+                return f"{tokki} / {TOKKI_JINJER_SPLIT}" if tokki else TOKKI_JINJER_SPLIT
+            return tokki
+        merged["特記"] = merged.apply(_mark_jinjer_split, axis=1)
 
     # 氏名の決定（どちらかから取得）
     merged["氏名"] = merged.apply(
@@ -617,7 +642,11 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
             return row["判定"], row["詳細"]
         detail = f"{row['詳細']} / {tokki}" if row["詳細"] else tokki
         judgement = row["判定"]
-        if judgement == "OK" and TOKKI_PREV_MONTH_TAIL_MATCHED not in tokki:
+        # 前月末突合済み・jinjer2行分割（差異なしなら問題なし）はOKのまま据え置く
+        keep_ok = TOKKI_PREV_MONTH_TAIL_MATCHED in tokki or (
+            TOKKI_JINJER_SPLIT in tokki and tokki.strip(" /") == TOKKI_JINJER_SPLIT
+        )
+        if judgement == "OK" and not keep_ok:
             judgement = "要確認"
         return judgement, detail
 

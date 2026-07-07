@@ -449,3 +449,51 @@ if __name__ == "__main__":
     test_actual_work_minutes_from_timesheet()
     test_actual_work_minutes_absent_fallback()
     print("全テスト通過")
+
+
+def test_jinjer_split_registration_is_merged_and_marked():
+    """jinjer側が深夜0時割り2行で登録された夜勤（瀬川さんパターン）も開始日1行に結合する。
+
+    請求側の結合行と一致すれば従来どおりOK（差異なし）。
+    ただし退勤の自動書き戻しは危険（jinjer実データの翌日行が残るため）なので特記を付ける。
+    """
+    jinjer = make_df([
+        ("瀬川 真宙", date(2026, 6, 2), time(17, 0), time(0, 0)),
+        ("瀬川 真宙", date(2026, 6, 3), time(0, 0), time(7, 0)),
+        ("瀬川 真宙", date(2026, 6, 4), time(9, 0), time(17, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("瀬川, 真宙", date(2026, 6, 2), time(17, 0), time(0, 0)),
+        ("瀬川, 真宙", date(2026, 6, 3), time(0, 0), time(7, 0)),
+        ("瀬川, 真宙", date(2026, 6, 4), time(9, 0), time(17, 30)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    assert len(result) == 2  # 6/2(結合済み) と 6/4
+    row = result[result["日付"] == date(2026, 6, 2)].iloc[0]
+    assert row["jinjer_出勤時刻"] == time(17, 0)
+    assert row["jinjer_退勤時刻"] == time(7, 0)
+    assert row["勤務表_退勤時刻"] == time(7, 0)
+    assert row["出勤差分(分)"] == 0
+    assert row["退勤差分(分)"] == 0
+    assert "jinjer側2行分割登録" in str(row["特記"])
+    assert row["判定"] == "OK"  # 差異なしならOKのまま（従来どおり静か）
+
+
+def test_jinjer_split_with_real_diff_detected():
+    """jinjer2行分割で退勤に実差がある場合は差分として検出される。"""
+    jinjer = make_df([
+        ("瀬川 真宙", date(2026, 6, 2), time(17, 0), time(0, 0)),
+        ("瀬川 真宙", date(2026, 6, 3), time(0, 0), time(7, 0)),
+    ], "jinjer")
+    sheet = make_df([
+        ("瀬川, 真宙", date(2026, 6, 2), time(17, 0), time(0, 0)),
+        ("瀬川, 真宙", date(2026, 6, 3), time(0, 0), time(7, 15)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    row = result[result["日付"] == date(2026, 6, 2)].iloc[0]
+    assert row["退勤差分(分)"] == 15
+    assert "jinjer側2行分割登録" in str(row["特記"])

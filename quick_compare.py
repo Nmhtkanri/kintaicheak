@@ -850,6 +850,14 @@ def compute_diffs(
                 # 前月末日で突合済み: 退勤（24時超表記で前月末日へ書き戻し）は通常突合。
                 # 総労働は後半のみの値のため突合しない。
                 skip_total = True
+            elif "jinjer側2行分割登録" in tokki:
+                # jinjerの実データが2行のまま（開始日行＋翌日行）のため、開始日行の退勤へ
+                # 24時超の値を書くと翌日行と二重計上になる。退勤の自動書き戻しは止め、
+                # 退勤に差があるときだけ注記行で知らせる（差が無ければ従来どおり行を出さない）。
+                skip_out = True
+                skip_total = True
+                if to_int_diff(krow.get("退勤差分(分)")) not in (None, 0):
+                    tokki_note = tokki
             else:
                 # Fieldglass時刻なし・未知の特記は安全側: 全て注記行のみ出す
                 skip_in = skip_out = skip_total = True
@@ -1051,7 +1059,7 @@ def compute_diffs(
         ))
 
     # トリアージ: 各差異行を 要確認/自動採用/自動OK に分類し、既定の人間判断を付ける
-    _TOKKI_KEYWORDS = ("月末日跨ぎ", "前月末夜勤の後半", "Fieldglass時刻なし")
+    _TOKKI_KEYWORDS = ("月末日跨ぎ", "前月末夜勤の後半", "Fieldglass時刻なし", "jinjer側2行分割登録")
     for r in rows:
         # 特記の注記行は必ず人が見る（休暇情報等で自動OKに紛れて見落とされないように）
         if r.kind == DIFF_KIND_TOTAL and any(k in (r.warn_reason or "") for k in _TOKKI_KEYWORDS):
