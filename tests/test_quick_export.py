@@ -177,11 +177,13 @@ def test_run_quick_export_holds_manual_break_on_hold_row(tmp_path):
     result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
 
     assert result.ok
-    row = _read_output_row(output_path)
-    assert row["休憩1"] == ""
-    assert row["復帰1"] == ""
     assert result.stats.manual_break_days == 0
     assert any("保留のため反映しません" in w for w in result.stats.warnings)
+    # 保留の日は行ごとアップロードCSVから除外される（jinjer手修正の保護）
+    assert result.stats.held_rows_removed == 1
+    with open(output_path, encoding="cp932", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows == []
 
 
 def test_run_quick_export_prefers_manual_fix_value_for_punch(tmp_path):
@@ -513,3 +515,85 @@ def test_run_quick_export_reverse_missing_punch_clears_when_seikyu_blank(tmp_pat
     result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
     assert result.ok
     assert _read_output_row(output_path)["退勤1"] == ""
+
+
+def _write_jinjer_csv_3days(path):
+    with open(path, "w", encoding="cp932", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(HEADERS)
+        writer.writerow(["上原 奏吾", "2018057", "2026/4/1", "9:00", "18:00", "", "", "0:00", "TRUE"])
+        writer.writerow(["上原 奏吾", "2018057", "2026/4/2", "16:45", "33:33", "", "", "1:00", "TRUE"])
+        writer.writerow(["上原 奏吾", "2018057", "2026/4/3", "9:00", "18:00", "", "", "0:00", "TRUE"])
+
+
+def _read_output_rows(path):
+    with open(path, encoding="cp932", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def test_run_quick_export_removes_held_day_rows(tmp_path):
+    """人間判断=保留 の日は行ごとアップロードCSVから除外される。
+
+    保留=「この日はツールで触らない」。DL後にjinjer画面で手修正した日を保留にする
+    運用のため、DL時点の古い値を再インポートして手修正を巻き戻さない。
+    """
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv_3days(jinjer_path)
+
+    pd.DataFrame([
+        {   # 4/2 は保留（jinjer手修正済みの想定）
+            "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+            "対象日付": "2026-04-02", "差異種別": "退勤",
+            "請求勤怠値": "33:30", "自動修正提案値": "", "人間判断": "保留",
+        },
+        {   # 4/3 は承認 → 通常どおり上書きして出力
+            "行ID": 2, "従業員ID": "2018057", "氏名": "上原 奏吾",
+            "対象日付": "2026-04-03", "差異種別": "退勤",
+            "請求勤怠値": "18:15", "自動修正提案値": "18:15", "人間判断": "請求勤怠",
+        },
+    ]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert result.stats.held_rows_removed == 1
+    rows = _read_output_rows(output_path)
+    dates = [r["*年月日"] for r in rows]
+    assert "2026/4/2" not in dates          # 保留日は行ごと消えている
+    assert len(rows) == 2                    # 4/1(判断なし・そのまま) と 4/3(承認)
+    out_43 = next(r for r in rows if r["*年月日"] == "2026/4/3")
+    assert out_43["退勤1"] == "18:15"
+
+
+def test_run_quick_export_keeps_row_when_hold_and_approve_mixed(tmp_path):
+    """同じ日に保留と承認が混在する場合は行を残して警告を出す（承認の書き戻しを優先）。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv_3days(jinjer_path)
+
+    pd.DataFrame([
+        {
+            "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+            "対象日付": "2026-04-01", "差異種別": "出勤",
+            "請求勤怠値": "8:55", "自動修正提案値": "8:55", "人間判断": "請求勤怠",
+        },
+        {
+            "行ID": 2, "従業員ID": "2018057", "氏名": "上原 奏吾",
+            "対象日付": "2026-04-01", "差異種別": "退勤",
+            "請求勤怠値": "18:10", "自動修正提案値": "", "人間判断": "保留",
+        },
+    ]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    assert result.stats.held_rows_removed == 0
+    rows = _read_output_rows(output_path)
+    dates = [r["*年月日"] for r in rows]
+    assert "2026/4/1" in dates  # 承認があるので行は残る
+    out_41 = next(r for r in rows if r["*年月日"] == "2026/4/1")
+    assert out_41["出勤1"] == "8:55"   # 承認分は反映
+    assert any("混在" in w for w in result.stats.warnings)

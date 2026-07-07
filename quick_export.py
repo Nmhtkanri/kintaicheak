@@ -14,7 +14,11 @@
      - 手入力休憩1 / 手入力復帰1 / 手入力休憩時間 → 差異種別（出勤/退勤/休憩/総労働時間）を
        問わず、入力があれば (従業員, 日付) 単位で休憩1/復帰1/休憩時間へ反映（保留の行は除く）
      - 総労働時間差異 → 手入力休憩が無い場合は警告のみ、上書きしない
-  4. 全件をそのままアップロード用CSV として書き出す
+  4. 人間判断=保留 の (従業員, 日付) は行ごと出力から除外する
+     （保留=「この日はツールで触らない」。ダウンロード後にjinjer画面で手修正した日を
+     保留にする運用のため、DL時点の古い値を再インポートして手修正を巻き戻さない。
+     インポートファイルに行が無ければ jinjer はその日を変更しない）
+  5. 残りをアップロード用CSV として書き出す
 
 実績確定済みの扱い:
   実績確定済（180列=TRUE）は「本人が打刻申請を確定した状態」を示すだけで、
@@ -139,6 +143,7 @@ class Stats:
     overwritten_break_total: int = 0
     manual_break_days: int = 0  # 手入力休憩の反映指示 (従業員, 日付) 件数
     manual_break_conflicts: int = 0  # 同一 (従業員, 日付) で手入力休憩の値が食い違った件数
+    held_rows_removed: int = 0  # 保留日の行を出力から除外した件数（jinjer手修正の保護）
     not_matched: int = 0  # jinjer 行が見つからない承認行
     overwritten_finalized: int = 0  # 上書きしたうち実績確定済みだった件数（参考表示）
     recovered_misplaced: int = 0  # 「人間判断」列以外に入っていた判断を回収した件数
@@ -234,15 +239,17 @@ def clean_excel_text(value: Any) -> str:
 
 def load_approved_rows(
     diff_xlsx: Path, stats: Stats
-) -> tuple[list[ApprovedRow], dict[tuple[str, str], ManualBreak]]:
+) -> tuple[list[ApprovedRow], dict[tuple[str, str], ManualBreak], set[tuple[str, str]]]:
     """差異一覧xlsx の「差異一覧」シートから 人間判断=承認 の行と手入力休憩を抽出。
 
     Returns:
-        (approved, manual_breaks)
+        (approved, manual_breaks, held_days)
         - approved      : 人間判断=請求勤怠(承認) の行
         - manual_breaks : 手入力休憩1/復帰1/休憩時間 が入力された行から集めた
                           (従業員ID, 日付ISO) → ManualBreak。差異種別・人間判断の
                           種類を問わず収集する（保留の行だけ除外）。
+        - held_days     : 人間判断=保留 が1つでもある (従業員ID, 日付ISO) の集合。
+                          アップロードCSVから行ごと除外する対象。
     """
     if not diff_xlsx.exists():
         raise FileNotFoundError(f"差異一覧xlsx が見つかりません: {diff_xlsx}")
@@ -266,6 +273,7 @@ def load_approved_rows(
 
     approved: list[ApprovedRow] = []
     manual_breaks: dict[tuple[str, str], ManualBreak] = {}
+    held_days: set[tuple[str, str]] = set()
     for _, row in df.iterrows():
         judge = str(row.get("人間判断") or "").strip()
 
@@ -352,6 +360,9 @@ def load_approved_rows(
             continue
         elif judge in HOLD_LABELS:
             stats.held += 1
+            # 保留の日は行ごとアップロードCSVから除外する（jinjer手修正の保護）
+            if emp_id and date_iso:
+                held_days.add((emp_id, date_iso))
             continue
         else:
             stats.pending += 1
@@ -407,7 +418,7 @@ def load_approved_rows(
         )
 
     stats.manual_break_days = len(manual_breaks)
-    return approved, manual_breaks
+    return approved, manual_breaks, held_days
 
 
 def _csv_input_files(path: Path) -> list[Path]:
@@ -610,6 +621,60 @@ def apply_approved_rows(
                 stats.overwritten_finalized += 1
 
 
+def remove_held_day_rows(
+    headers: list[str],
+    rows: list[list[str]],
+    approved: list[ApprovedRow],
+    manual_breaks: dict[tuple[str, str], ManualBreak],
+    held_days: set[tuple[str, str]],
+    stats: Stats,
+) -> list[list[str]]:
+    """人間判断=保留 の (従業員, 日付) の行をアップロードCSVから除外する。
+
+    保留=「この日はツールで触らない」という意思表示。汎用データのダウンロード後に
+    jinjer画面で手修正した日を保留にする運用があるため、DL時点の古い値を再インポート
+    して手修正を巻き戻さないよう、行ごと出力から外す（インポートファイルに行が
+    無ければ jinjer はその日を変更しない）。
+
+    同じ日に承認による書き戻し（出勤/退勤/手入力休憩）が混在する場合は行を残し、
+    保留側の項目にDL時点の値が入ることを警告する。
+    """
+    if not held_days:
+        return rows
+
+    write_days = {
+        (a.emp_id, a.target_date_iso)
+        for a in approved
+        if a.kind in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT)
+    }
+    write_days |= set((manual_breaks or {}).keys())
+
+    mixed = held_days & write_days
+    for emp_id, date_iso in sorted(mixed):
+        stats.warnings.append(
+            f"保留と承認(書き戻し)が同じ日に混在しています (emp={emp_id} date={date_iso})。"
+            "行は出力されるため、保留側の項目はダウンロード時点の値がインポートされます。"
+            "この日をjinjer画面で手修正している場合は、インポート前に値を確認してください。"
+        )
+
+    drop_days = held_days - write_days
+    if not drop_days:
+        return rows
+
+    emp_col = headers.index(JINJER_COL_EMP_ID)
+    date_col = headers.index(JINJER_COL_DATE)
+    kept: list[list[str]] = []
+    removed = 0
+    for row in rows:
+        key = ((row[emp_col] or "").strip(), normalize_date_iso(row[date_col]))
+        if key in drop_days:
+            removed += 1
+            continue
+        kept.append(row)
+    stats.held_rows_removed = removed
+    return kept
+
+
 # ----------------------------------------------------------------------
 # 出力
 # ----------------------------------------------------------------------
@@ -654,6 +719,7 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"  休憩時間 上書き      : {stats.overwritten_break_total}")
     print(f"  休憩スキップ         : {stats.skipped_break}")
     print(f"  総労働スキップ       : {stats.skipped_total}")
+    print(f"  保留日の行を除外     : {stats.held_rows_removed}（jinjer手修正の保護・インポートで触らない）")
     print(f"  jinjer行 未マッチ    : {stats.not_matched}")
     print(f"  (うち実績確定済を上書き: {stats.overwritten_finalized} 件 / 参考)")
     print()
@@ -704,7 +770,7 @@ def run_quick_export(
     log_func(f"[start] モード: {'dry-run' if dry_run else 'execute'}")
 
     try:
-        approved, manual_breaks = load_approved_rows(diff_xlsx, stats)
+        approved, manual_breaks, held_days = load_approved_rows(diff_xlsx, stats)
     except Exception as e:
         msg = f"差異一覧読み込み失敗: {e}"
         log_func(f"[error] {msg}")
@@ -735,6 +801,12 @@ def run_quick_export(
     log_func(f"[info] (従業員ID, 年月日) インデックス {len(row_index)} 件")
 
     apply_approved_rows(headers, rows, row_index, approved, stats, manual_breaks)
+
+    # 保留の日は行ごと除外（ダウンロード後のjinjer手修正を巻き戻さないため）
+    rows = remove_held_day_rows(headers, rows, approved, manual_breaks, held_days, stats)
+    result.total_jinjer_rows = len(rows)
+    if stats.held_rows_removed:
+        log_func(f"[info] 保留日の行 {stats.held_rows_removed} 件を出力から除外（jinjer手修正の保護）")
 
     if not dry_run:
         try:
