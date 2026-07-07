@@ -210,8 +210,12 @@ def test_match_romaji_name_is_case_insensitive():
     assert result.iloc[0]["判定"] == "OK"
 
 
-def test_overnight_jinjer_row_matches_split_sap_rows():
-    """jinjerの夜勤1行を、SAPの日跨ぎ2行と突合する"""
+def test_overnight_sap_split_rows_are_merged_to_shift_start_date():
+    """SAPの日跨ぎ2行（深夜0時割り）を勤務開始日1行に結合してjinjerの夜勤1行と突合する。
+
+    jinjerは夜勤を開始日の1行（退勤24時超表記）で記録するため、書き戻しが
+    開始日の行へ行える形（1シフト=1行）で突合結果を出す。
+    """
     jinjer = make_df([
         ("及川 航平", date(2026, 4, 3), time(16, 45), time(9, 30)),
     ], "jinjer")
@@ -223,11 +227,181 @@ def test_overnight_jinjer_row_matches_split_sap_rows():
     result, unsubmitted = match(jinjer, sheet, threshold_minutes=10)
 
     assert unsubmitted == []
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["判定"] == "OK"
+    assert row["日付"] == date(2026, 4, 3)
+    assert row["勤務表_出勤時刻"] == time(16, 45)
+    assert row["勤務表_退勤時刻"] == time(9, 30)
+    assert row["jinjer_退勤時刻"] == time(9, 30)
+
+
+def test_overnight_merge_sums_net_work_minutes():
+    """深夜0時割り2行の結合時、実働(総労働時間(分))は両行の合計になる。"""
+    jinjer = make_df([
+        ("及川 航平", date(2026, 4, 3), time(16, 45), time(9, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("及川, 航平", date(2026, 4, 3), time(16, 45), time(0, 0)),
+        ("及川, 航平", date(2026, 4, 4), time(0, 0), time(9, 30)),
+    ], "勤務表")
+    sheet["総労働時間(分)"] = [390, 510]  # 6.5h + 8.5h
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    assert len(result) == 1
+    assert result.iloc[0]["勤務表_実働時間"] == "15:00"
+
+
+def test_month_end_overnight_is_paired_with_tokki():
+    """月末の夜勤（請求側が24:00打切り・翌月分未取得）は同日で突合し、特記を付ける。
+
+    出勤は通常突合（差分が出る）。退勤・総労働は翌月確認のため差分を出さない。
+    """
+    jinjer = make_df([
+        ("山口 太雅", date(2026, 6, 30), time(17, 15), time(9, 33)),
+    ], "jinjer")
+    sheet = make_df([
+        ("山口, 太雅", date(2026, 6, 30), time(16, 45), time(0, 0)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["出勤差分(分)"] == 30
+    assert pd.isna(row["退勤差分(分)"]) or row["退勤差分(分)"] is None
+    assert pd.isna(row["総労働差分(分)"]) or row["総労働差分(分)"] is None
+    assert "月末日跨ぎ" in str(row["特記"])
+    assert "月末日跨ぎ" in str(row["詳細"])
+    assert row["判定"] in ("NG", "要確認")  # 出勤30分差はそのまま検出される
+
+
+def test_month_end_overnight_ok_start_becomes_needs_check():
+    """月末夜勤で出勤が一致していても、退勤未確認のためOKにはせず要確認にする。"""
+    jinjer = make_df([
+        ("及川 航平", date(2026, 6, 30), time(16, 45), time(9, 33)),
+    ], "jinjer")
+    sheet = make_df([
+        ("及川, 航平", date(2026, 6, 30), time(16, 45), time(0, 0)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    assert len(result) == 1
+    assert result.iloc[0]["判定"] == "要確認"
+    assert "月末日跨ぎ" in str(result.iloc[0]["特記"])
+
+
+def test_mid_month_24h_end_pairs_and_shows_real_diff():
+    """月中で請求が24:00終わり・jinjerが翌日2:00退勤の場合は同日で突合し、実差120分を出す。"""
+    jinjer = make_df([
+        ("畑中 竜哉", date(2026, 6, 12), time(9, 0), time(2, 0)),
+        ("畑中 竜哉", date(2026, 6, 13), time(9, 0), time(17, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("畑中, 竜哉", date(2026, 6, 12), time(9, 0), time(0, 0)),
+        ("畑中, 竜哉", date(2026, 6, 13), time(9, 0), time(17, 30)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
     assert len(result) == 2
-    assert result["判定"].tolist() == ["OK", "OK"]
-    assert result.iloc[0]["jinjer_退勤時刻"] == time(0, 0)
-    assert result.iloc[1]["jinjer_出勤時刻"] == time(0, 0)
-    assert result.iloc[1]["jinjer_退勤時刻"] == time(9, 30)
+    row = result[result["日付"] == date(2026, 6, 12)].iloc[0]
+    assert row["退勤差分(分)"] == 120
+    assert str(row.get("特記") or "") == ""  # 月末ではないので特記なし＝実差として扱う
+    assert row["判定"] == "NG"
+
+
+def test_month_start_orphan_tail_matched_to_prev_month_end():
+    """月初の0:00始まり孤児行（前月末勤務の後半）は、前月末日のjinjer行と退勤を突合する。
+
+    対象日付が前月末日になるため、書き戻しは開始日の行へ24時超表記で行える。
+    """
+    jinjer = make_df([
+        ("大堀 広智", date(2026, 5, 31), time(16, 45), time(9, 33)),
+        ("大堀 広智", date(2026, 6, 1), None, None),
+    ], "jinjer")
+    sheet = make_df([
+        ("大堀, 広智", date(2026, 6, 1), time(0, 0), time(9, 30)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    paired = result[result["日付"] == date(2026, 5, 31)]
+    assert len(paired) == 1
+    row = paired.iloc[0]
+    assert row["勤務表_退勤時刻"] == time(9, 30)
+    assert row["退勤差分(分)"] == 3
+    assert row["出勤差分(分)"] == 0  # 前半は前月分で確認済みのため差0
+    assert "前月末夜勤の後半" in str(row["特記"])
+    assert row["判定"] == "OK"  # 3分差は許容内。特記(突合済み)はOKのまま
+    # 6/1 の勤務表のみ行は前月末日へ付け替えられて消えている
+    sheet_only_61 = result[
+        (result["日付"] == date(2026, 6, 1))
+        & result["勤務表_出勤時刻"].notna()
+    ]
+    assert len(sheet_only_61) == 0
+
+
+def test_month_start_orphan_tail_unmatched_gets_tokki():
+    """前月末日のjinjer行が無い場合、月初の孤児行には「自動書戻し不可」の特記を付ける。"""
+    jinjer = make_df([
+        ("大堀 広智", date(2026, 6, 1), None, None),
+    ], "jinjer")
+    sheet = make_df([
+        ("大堀, 広智", date(2026, 6, 1), time(0, 0), time(9, 30)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    orphan = result[result["勤務表_出勤時刻"].notna()]
+    assert len(orphan) == 1
+    assert "自動書戻し不可" in str(orphan.iloc[0]["特記"])
+
+
+def test_no_punch_night_worker_gets_single_merged_row():
+    """jinjerに打刻が無い夜勤者でも、請求側は開始日1行（16:45〜翌9:30）に結合される。
+
+    これにより書き戻しは開始日の行に 出勤16:45/退勤33:30（24時超表記）となり、
+    翌日行へ 00:00〜09:30 が書かれる事故を防ぐ。
+    """
+    jinjer = make_df([
+        ("大堀 広智", date(2026, 6, 2), None, None),
+        ("大堀 広智", date(2026, 6, 3), None, None),
+    ], "jinjer")
+    sheet = make_df([
+        ("大堀, 広智", date(2026, 6, 2), time(16, 45), time(0, 0)),
+        ("大堀, 広智", date(2026, 6, 3), time(0, 0), time(9, 30)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    merged_row = result[result["勤務表_出勤時刻"].notna()]
+    assert len(merged_row) == 1
+    row = merged_row.iloc[0]
+    assert row["日付"] == date(2026, 6, 2)
+    assert row["勤務表_出勤時刻"] == time(16, 45)
+    assert row["勤務表_退勤時刻"] == time(9, 30)
+    assert row["判定"] == "データ欠損"
+
+
+def test_duplicate_sheet_rows_are_deduped():
+    """請求勤怠側の完全重複行（Fieldglassレポートの複製行）は1行に畳まれる。"""
+    jinjer = make_df([
+        ("畑中 竜哉", date(2026, 6, 10), time(9, 0), time(17, 30)),
+    ], "jinjer")
+    sheet = make_df([
+        ("畑中, 竜哉", date(2026, 6, 10), time(9, 0), time(17, 30)),
+        ("畑中, 竜哉", date(2026, 6, 10), time(9, 0), time(17, 30)),
+        ("畑中, 竜哉", date(2026, 6, 10), time(9, 0), time(17, 30)),
+        ("畑中, 竜哉", date(2026, 6, 10), time(9, 0), time(17, 30)),
+    ], "勤務表")
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+
+    assert len(result) == 1
+    assert result.iloc[0]["判定"] == "OK"
 
 
 def test_total_work_diff_is_included_in_judgment():

@@ -68,7 +68,8 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
         "請求勤怠_総労働", "jinjer_総労働", "総労働差分(分)",
         "請求勤怠_実働",
         "判定", "詳細",
-        "jinjer_コメント", "請求勤怠_コメント"
+        "jinjer_コメント", "請求勤怠_コメント",
+        "特記"
     ]
 
     col_map = {
@@ -88,6 +89,7 @@ def export_to_excel(result_df, threshold_minutes, output_folder=None, unsubmitte
         "詳細": "詳細",
         "jinjer_コメント": "jinjer_コメント",
         "請求勤怠_コメント": "勤務表_コメント",
+        "特記": "特記",
     }
 
     # ヘッダー行

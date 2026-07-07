@@ -831,11 +831,37 @@ def compute_diffs(
             "jinjer_stamp_comment": format_stamp_comments(stamp_comments.get((emp_id, date_iso))),
         }
 
+        # 突合結果の「特記」（月末日跨ぎ・前月末後半・Fieldglass時刻なし等）。
+        # 種別ごとに出す行を変え、誤った自動書き戻し提案（打切り24:00での上書きや
+        # 前月末勤務の後半を当日行へ書く等）を防ぐ。注記は総労働時間の行として出す
+        # （総労働時間は手順3で書き戻し対象外のため、誤操作しても打刻が消えない）。
+        tokki = clean_cell(krow.get("特記"))
+        skip_in = skip_out = skip_total = False
+        tokki_note = ""
+        if tokki:
+            if "月末日跨ぎ" in tokki:
+                # 請求側の24:00は暦日打切りで実退勤ではない。出勤のみ通常突合。
+                skip_out = skip_total = True
+                tokki_note = tokki
+            elif "前月末夜勤の後半" in tokki and "自動書戻し不可" in tokki:
+                skip_in = skip_out = skip_total = True
+                tokki_note = tokki
+            elif "前月末夜勤の後半" in tokki:
+                # 前月末日で突合済み: 退勤（24時超表記で前月末日へ書き戻し）は通常突合。
+                # 総労働は後半のみの値のため突合しない。
+                skip_total = True
+            else:
+                # Fieldglass時刻なし・未知の特記は安全側: 全て注記行のみ出す
+                skip_in = skip_out = skip_total = True
+                tokki_note = tokki
+
         # ----- 出勤差異 -----
         k_in = clean_cell(krow.get("勤務表_出勤"))
         j_in = clean_cell(krow.get("jinjer_出勤"))
         diff_in = to_int_diff(krow.get("出勤差分(分)"))
-        if diff_in is not None and diff_in != 0:
+        if skip_in:
+            pass
+        elif diff_in is not None and diff_in != 0:
             level, reason = classify_punch_diff(diff_in, "in")
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
@@ -885,7 +911,9 @@ def compute_diffs(
         # 夜勤など深夜跨ぎの退勤は 24時超表記(33:00 等)で表示する（差分は両側同値補正で不変）。
         k_out_disp = overnight_display_value(k_out, k_in, extra["sched_out"], extra["sched_in"])
         j_out_disp = overnight_display_value(j_out, j_in, extra["sched_out"], extra["sched_in"])
-        if diff_out is not None and diff_out != 0:
+        if skip_out:
+            pass
+        elif diff_out is not None and diff_out != 0:
             level, reason = classify_punch_diff(diff_out, "out")
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
@@ -929,24 +957,35 @@ def compute_diffs(
 
         # ----- 総労働時間差異 -----
         # 「休憩」の突合は廃止（総労働時間が正味で突合されるため不要）。
-        if jrow is not None:
+        if jrow is not None and not skip_total:
             k_total_min, k_total = kintai_total_minutes(krow)
             j_total = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
             j_total_min = parse_hhmm(j_total)
             if k_total_min is not None and j_total_min is not None and k_total_min != j_total_min:
                 diff_total = k_total_min - j_total_min
-                level, reason = classify_total_work_diff(diff_total, jrow)
-                rows.append(DiffRow(
-                    row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
-                    kind=DIFF_KIND_TOTAL,
-                    kintai_value=k_total, jinjer_value=j_total, diff_minutes=str(diff_total),
-                    warn_level=level, warn_reason=reason,
-                    auto_fix_value="",  # 総労働時間は自動反映しない
-                    finalized=finalized,
-                    source_file=source_file,
-                    **extra,
-                ))
-                next_id += 1
+                # 出退勤のズレだけで説明がつく総労働差異は行を出さない（出勤/退勤行と
+                # 重複アラートになるため）。拘束時間の差（請求−jinjer）が総労働の差と
+                # 一致する ＝ 休憩は両者同じで、差はすべて出退勤行に現れている。
+                k_elapsed = elapsed_minutes_from_values(k_in, k_out)
+                j_elapsed = elapsed_minutes_from_values(j_in, j_out)
+                explained_by_punches = (
+                    k_elapsed is not None
+                    and j_elapsed is not None
+                    and diff_total == k_elapsed - j_elapsed
+                )
+                if not explained_by_punches:
+                    level, reason = classify_total_work_diff(diff_total, jrow)
+                    rows.append(DiffRow(
+                        row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                        kind=DIFF_KIND_TOTAL,
+                        kintai_value=k_total, jinjer_value=j_total, diff_minutes=str(diff_total),
+                        warn_level=level, warn_reason=reason,
+                        auto_fix_value="",  # 総労働時間は自動反映しない
+                        finalized=finalized,
+                        source_file=source_file,
+                        **extra,
+                    ))
+                    next_id += 1
             else:
                 total_warn = classify_total_work(jrow)
                 if total_warn:
@@ -962,6 +1001,28 @@ def compute_diffs(
                         **extra,
                     ))
                     next_id += 1
+
+        # ----- 特記の注記行 -----
+        # 月末日跨ぎ・前月末後半(書戻し不可)・Fieldglass時刻なし等は、判断材料として
+        # 1行だけ注記を出す。総労働時間の行なので手順3で書き戻されることはない。
+        if tokki_note:
+            if "Fieldglass時刻なし" in tokki_note:
+                reason = f"{tokki_note}: 出退勤時刻が取得できないため突合不可。Fieldglassのエントリ/レポートを確認"
+            else:
+                reason = tokki_note
+            k_span = f"{k_in}〜{k_out_disp}" if (k_in or k_out_disp) else ""
+            j_span = f"{j_in}〜{j_out_disp}" if (j_in or j_out_disp) else ""
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_TOTAL,
+                kintai_value=k_span, jinjer_value=j_span, diff_minutes="",
+                warn_level=LEVEL_WARN, warn_reason=reason,
+                auto_fix_value="",
+                finalized=finalized,
+                source_file=source_file,
+                **extra,
+            ))
+            next_id += 1
 
     # 氏名→ID 解決不可だが請求勤怠に勤務がある人を「jinjer未登録」要確認行として可視化する。
     # 1人につき1行（勤務日数・期間を集約）。派遣等の正当な除外か、給与対象者の抜けかを人が判断する。
@@ -990,7 +1051,14 @@ def compute_diffs(
         ))
 
     # トリアージ: 各差異行を 要確認/自動採用/自動OK に分類し、既定の人間判断を付ける
+    _TOKKI_KEYWORDS = ("月末日跨ぎ", "前月末夜勤の後半", "Fieldglass時刻なし")
     for r in rows:
+        # 特記の注記行は必ず人が見る（休暇情報等で自動OKに紛れて見落とされないように）
+        if r.kind == DIFF_KIND_TOTAL and any(k in (r.warn_reason or "") for k in _TOKKI_KEYWORDS):
+            r.triage = TRIAGE_NEEDS_CHECK
+            r.judge_default = ""
+            r.recommend_judge = ""
+            continue
         r.triage, r.judge_default = triage_classify(
             kind=r.kind,
             warn_level=r.warn_level,

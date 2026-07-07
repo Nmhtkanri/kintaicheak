@@ -810,3 +810,165 @@ def test_compute_diffs_night_shift_punch_out_shown_as_over24():
     assert out_row.kintai_value == "33:00"
     assert out_row.jinjer_value == "33:01"
     assert out_row.diff_minutes == "1"  # 差分は不変
+
+
+def test_total_diff_explained_by_punches_is_suppressed():
+    """出退勤のズレだけで説明がつく総労働時間差異は行を出さない（重複アラート防止）。
+
+    例: 退勤183分差 → 総労働も183分差。総労働行は退勤行と同じ情報のため冗長。
+    """
+    kintai_df = pd.DataFrame([{
+        "氏名": "畑中 竜哉", "日付": date(2026, 6, 9),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:00", "出勤差分(分)": 0,
+        "勤務表_退勤": "20:30", "jinjer_退勤": "23:33", "退勤差分(分)": 183,
+        "勤務表_実働時間": "10:30",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "9:00",
+        JINJER_HEADERS["punch_out_1"]: "23:33",
+        JINJER_HEADERS["total_work"]: "13:33",
+    })
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-09"): jrow},
+        {"畑中 竜哉": "2018057", "畑中竜哉": "2018057"},
+        logs,
+    )
+    kinds = [r.kind for r in rows]
+    assert DIFF_KIND_PUNCH_OUT in kinds
+    assert DIFF_KIND_TOTAL not in kinds  # 退勤行で説明がつくため総労働行は出さない
+
+
+def test_total_diff_from_break_difference_still_reported():
+    """出退勤が一致していて総労働だけ違う（＝休憩の違い）場合は従来どおり行を出す。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "上原 奏吾", "日付": date(2026, 6, 10),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:00", "出勤差分(分)": 0,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+        "勤務表_実働時間": "8:00",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "9:00",
+        JINJER_HEADERS["punch_out_1"]: "18:00",
+        JINJER_HEADERS["total_work"]: "8:30",
+    })
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-10"): jrow},
+        {"上原 奏吾": "2018057", "上原奏吾": "2018057"},
+        logs,
+    )
+    total_rows = [r for r in rows if r.kind == DIFF_KIND_TOTAL]
+    assert len(total_rows) == 1
+    assert total_rows[0].diff_minutes == "-30"
+
+
+def test_month_end_tokki_keeps_punch_in_but_skips_out_and_total():
+    """月末日跨ぎの特記行: 出勤は通常突合、退勤・総労働は出さず注記行を1行出す。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "山口 太雅", "日付": date(2026, 6, 30),
+        "勤務表_出勤": "16:45", "jinjer_出勤": "17:15", "出勤差分(分)": 30,
+        "勤務表_退勤": "00:00", "jinjer_退勤": "09:33", "退勤差分(分)": None,
+        "勤務表_実働時間": "6:30",
+        "特記": "月末日跨ぎ勤務(請求側の翌月分未取得のため退勤・総労働は翌月確認)",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "17:15",
+        JINJER_HEADERS["punch_out_1"]: "33:33",
+        JINJER_HEADERS["total_work"]: "15:03",
+    })
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-30"): jrow},
+        {"山口 太雅": "2018057", "山口太雅": "2018057"},
+        logs,
+    )
+    kinds = [r.kind for r in rows]
+    assert kinds.count(DIFF_KIND_PUNCH_IN) == 1
+    assert DIFF_KIND_PUNCH_OUT not in kinds  # 24:00は打切りであり実退勤ではない
+    note_rows = [r for r in rows if r.kind == DIFF_KIND_TOTAL]
+    assert len(note_rows) == 1
+    assert "月末日跨ぎ" in note_rows[0].warn_reason
+    assert note_rows[0].auto_fix_value == ""
+
+
+def test_prev_month_tail_matched_emits_overnight_autofix():
+    """前月末日で突合した夜勤後半: 退勤の書き戻し値は24時超表記（例 33:30）になる。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "大堀 広智", "日付": date(2026, 5, 31),
+        "勤務表_出勤": "16:45", "jinjer_出勤": "16:45", "出勤差分(分)": 0,
+        "勤務表_退勤": "09:30", "jinjer_退勤": "09:33", "退勤差分(分)": 3,
+        "特記": "前月末夜勤の後半(前月末日で突合)",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["date"]: "2026/5/31",
+        JINJER_HEADERS["punch_in_1"]: "16:45",
+        JINJER_HEADERS["punch_out_1"]: "33:33",
+        JINJER_HEADERS["total_work"]: "15:03",
+    })
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-05-31"): jrow},
+        {"大堀 広智": "2018057", "大堀広智": "2018057"},
+        logs,
+    )
+    kinds = [r.kind for r in rows]
+    assert DIFF_KIND_TOTAL not in kinds  # 後半のみの実働のため総労働は突合しない
+    out_row = next(r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT)
+    assert out_row.target_date == "2026-05-31"  # 書き戻し先は勤務開始日
+    assert out_row.auto_fix_value == "33:30"    # jinjerインポートは24時超表記
+
+
+def test_prev_month_tail_unmatched_tokki_note_only():
+    """前月末日のjinjer行が無い孤児行: 片側欠落行を出さず、注記行のみ出す。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "大堀 広智", "日付": date(2026, 6, 1),
+        "勤務表_出勤": "00:00", "jinjer_出勤": "", "出勤差分(分)": None,
+        "勤務表_退勤": "09:30", "jinjer_退勤": "", "退勤差分(分)": None,
+        "特記": "前月末夜勤の後半(jinjer側は前月末日行に記録・自動書戻し不可。jinjerダウンロード範囲に前月末日を含めると突合可能)",
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-01"): _jinjer_row()},
+        {"大堀 広智": "2018057", "大堀広智": "2018057"},
+        logs,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_TOTAL]
+    assert "自動書戻し不可" in rows[0].warn_reason
+    assert rows[0].auto_fix_value == ""
+
+
+def test_fieldglass_no_time_tokki_note_only():
+    """Fieldglass時刻なし行: 00:00打刻や総労働24:00の偽差異を出さず、注記行のみ出す。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "福家 寛昭", "日付": date(2026, 6, 30),
+        "勤務表_出勤": "", "jinjer_出勤": "08:30", "出勤差分(分)": None,
+        "勤務表_退勤": "", "jinjer_退勤": "17:12", "退勤差分(分)": None,
+        "特記": "Fieldglass時刻なし(00:00-00:00プレースホルダ行)",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "08:30",
+        JINJER_HEADERS["punch_out_1"]: "17:12",
+        JINJER_HEADERS["total_work"]: "07:30",
+    })
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-30"): jrow},
+        {"福家 寛昭": "2018057", "福家寛昭": "2018057"},
+        logs,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_TOTAL]
+    assert "Fieldglass時刻なし" in rows[0].warn_reason
+    assert "Fieldglass" in rows[0].warn_reason
+    assert rows[0].jinjer_value == "08:30〜17:12"
+    assert rows[0].auto_fix_value == ""
+    # 注記行は休暇情報等に関わらず必ず要確認（自動OKに紛れて見落とされない）
+    from services.triage import TRIAGE_NEEDS_CHECK
+    assert rows[0].triage == TRIAGE_NEEDS_CHECK
+    assert rows[0].recommend_judge == ""

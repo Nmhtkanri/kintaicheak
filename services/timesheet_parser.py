@@ -690,6 +690,26 @@ def _sap_timesheet_df_from_table(df):
 
         total_min = _decimal_hours_to_minutes(row.get(total_col)) if total_col else None
 
+        # Fieldglassレポートは時刻未確定の日を「00:00〜00:00・24.000h」のプレースホルダで
+        # 出力することがある（月末日に多発）。実打刻ではないため時刻・実働は取り込まず、
+        # 「特記」付きの行として残す（突合側で突合不可の要確認行になる）。
+        if (
+            start == dt_time(0, 0)
+            and end == dt_time(0, 0)
+            and (total_min is None or total_min >= 24 * 60)
+        ):
+            rows.append({
+                "氏名": str(name).strip(),
+                "日付": work_date,
+                "出勤時刻": None,
+                "退勤時刻": None,
+                "コメント": None,
+                "データソース": "勤務表",
+                "総労働時間(分)": None,
+                "特記": "Fieldglass時刻なし(00:00-00:00プレースホルダ行)",
+            })
+            continue
+
         rows.append({
             "氏名": str(name).strip(),
             "日付": work_date,
@@ -698,12 +718,13 @@ def _sap_timesheet_df_from_table(df):
             "コメント": None,
             "データソース": "勤務表",
             "総労働時間(分)": total_min,
+            "特記": "",
         })
 
     if not rows:
         return None
 
-    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
+    return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)", "特記"])
 
 
 def _parse_sap_timesheet_file(filepath):
@@ -739,7 +760,7 @@ def _parse_sap_timesheet_file(filepath):
         return None
 
     result = pd.concat(frames, ignore_index=True)
-    return result[["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"]]
+    return result[["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)", "特記"]]
 
 
 def _parse_estaffing_timesheet_text(filepath):
@@ -818,8 +839,11 @@ def _estaffing_csv_df_from_table(df):
         if raw_comment is not None and str(raw_comment).strip() not in ("", "nan", "None"):
             comment = str(raw_comment).strip()
 
-        # 正味労働 = (終了 − 開始) − 休憩時間(HH:MM)。e-staffing は総労働列が無いため計算。
-        total_min = _net_minutes_from_times(start, end, _hhmm_to_minutes(row.get("休憩時間")))
+        # 正味労働 = (終了 − 開始) − 実休憩。e-staffing は総労働列が無いため計算。
+        # 実休憩 = 休憩時間(AD列) + 深夜休憩時間(AE列)。夜勤の深夜休憩は別列のため合算必須
+        # （AD列のみだと夜勤者の正味が過大になり、偽の総労働時間差異が出る）。
+        break_min = _hhmm_to_minutes(row.get("休憩時間")) + _hhmm_to_minutes(row.get("深夜休憩時間"))
+        total_min = _net_minutes_from_times(start, end, break_min)
 
         rows.append({
             "氏名": str(name).strip(),

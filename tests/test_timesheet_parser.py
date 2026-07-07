@@ -196,6 +196,80 @@ def test_parse_estaffing_timesheet_csv_direct(tmp_path):
     assert df.iloc[1]["コメント"] == "テレワーク"
 
 
+def test_estaffing_break_includes_night_break(tmp_path):
+    """e-staffingの実休憩は 休憩時間(AD列) + 深夜休憩時間(AE列) の合算。
+
+    夜勤者は深夜休憩が別列のため、AD列だけだと正味労働が過大になる
+    （河端さんの90分・加藤英人さんの30分の偽差異の原因）。
+    """
+    path = tmp_path / "estaffing.csv"
+    pd.DataFrame([
+        {   # 夜勤: 20:00〜翌8:15 拘束735分 − (休憩60 + 深夜休憩30) = 645分
+            "スタッフ氏名": "加藤 英人",
+            "就業年月日": "2026/6/3",
+            "開始時刻": "20:00",
+            "終了時刻": "32:15:00",
+            "休憩時間": "1:00",
+            "深夜休憩時間": "0:30",
+            "備考コメント": "",
+        },
+        {   # 深夜休憩のみ: 拘束735分 − 90分 = 645分
+            "スタッフ氏名": "河端 桂大",
+            "就業年月日": "2026/6/1",
+            "開始時刻": "20:00",
+            "終了時刻": "32:15:00",
+            "休憩時間": "0:00",
+            "深夜休憩時間": "1:30",
+            "備考コメント": "",
+        },
+    ]).to_csv(path, index=False, encoding="cp932")
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert df.iloc[0]["総労働時間(分)"] == 645
+    assert df.iloc[1]["総労働時間(分)"] == 645
+
+
+def test_sap_placeholder_row_has_no_time_and_tokki(tmp_path):
+    """Fieldglassの「00:00〜00:00・24h」プレースホルダ行は時刻なし＋特記付きで取り込む。
+
+    実打刻ではないため、00:00打刻や総労働24:00として突合してはならない。
+    """
+    path = tmp_path / "sap_timesheet.csv"
+    pd.DataFrame([
+        {
+            "スタッフ": "福家, 寛昭",
+            "出勤時刻": "00:00",
+            "終了時刻": "00:00",
+            "エントリ日の労働時間 (ブレークダウンなし)": "24.000",
+            "時間エントリ日": "2026-06-30",
+        },
+        {
+            "スタッフ": "福家, 寛昭",
+            "出勤時刻": "08:30",
+            "終了時刻": "17:00",
+            "エントリ日の労働時間 (ブレークダウンなし)": "7.500",
+            "時間エントリ日": "2026-06-29",
+        },
+    ]).to_csv(path, index=False, encoding="utf-8-sig")
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert len(df) == 2
+    placeholder = df[df["日付"] == date(2026, 6, 30)].iloc[0]
+    assert placeholder["出勤時刻"] is None or pd.isna(placeholder["出勤時刻"])
+    assert placeholder["退勤時刻"] is None or pd.isna(placeholder["退勤時刻"])
+    assert placeholder["総労働時間(分)"] is None or pd.isna(placeholder["総労働時間(分)"])
+    assert "Fieldglass時刻なし" in str(placeholder["特記"])
+    normal = df[df["日付"] == date(2026, 6, 29)].iloc[0]
+    assert normal["出勤時刻"] == time(8, 30)
+    assert str(normal["特記"] or "") in ("", "nan")
+
+
 def test_parse_estaffing_timesheet_text_direct(tmp_path):
     path = tmp_path / "estaffing.txt"
     lines = [
