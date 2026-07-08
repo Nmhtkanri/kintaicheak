@@ -86,11 +86,10 @@ def test_run_quick_export_skips_approved_break_without_manual_values(tmp_path):
     result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
 
     assert result.ok
-    row = _read_output_row(output_path)
-    assert row["休憩1"] == ""
-    assert row["復帰1"] == ""
-    assert row["休憩時間"] == "0:00"
     assert result.stats.skipped_break == 1
+    # 何も書き込まれなかった日は出力しない（変更行のみ出力）
+    with open(output_path, encoding="cp932", newline="") as f:
+        assert list(csv.DictReader(f)) == []
 
 
 def test_run_quick_export_applies_manual_break_on_non_break_rows(tmp_path):
@@ -405,9 +404,11 @@ def test_run_quick_export_label_jinjer_keeps_jinjer(tmp_path):
     result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
 
     assert result.ok
-    assert _read_output_row(output_path)["出勤1"] == "9:00"  # 書き戻さない
     assert result.stats.approved == 0
     assert result.stats.rejected == 1
+    # 書き戻さない＝無変更の日なので、行自体を出力しない（jinjerに触らせない）
+    with open(output_path, encoding="cp932", newline="") as f:
+        assert list(csv.DictReader(f)) == []
 
 
 # =============================================================================
@@ -562,8 +563,9 @@ def test_run_quick_export_removes_held_day_rows(tmp_path):
     rows = _read_output_rows(output_path)
     dates = [r["*年月日"] for r in rows]
     assert "2026/4/2" not in dates          # 保留日は行ごと消えている
-    assert len(rows) == 2                    # 4/1(判断なし・そのまま) と 4/3(承認)
-    out_43 = next(r for r in rows if r["*年月日"] == "2026/4/3")
+    assert "2026/4/1" not in dates          # 無変更日も出力しない（変更行のみ出力）
+    assert len(rows) == 1                    # 4/3(承認)のみ
+    out_43 = rows[0]
     assert out_43["退勤1"] == "18:15"
 
 
@@ -597,3 +599,125 @@ def test_run_quick_export_keeps_row_when_hold_and_approve_mixed(tmp_path):
     out_41 = next(r for r in rows if r["*年月日"] == "2026/4/1")
     assert out_41["出勤1"] == "8:55"   # 承認分は反映
     assert any("混在" in w for w in result.stats.warnings)
+
+
+def _make_approved(emp, date_iso, kind, value, row_id=1, name="テスト"):
+    from quick_export import ApprovedRow
+    return ApprovedRow(
+        emp_id=emp, target_date_iso=date_iso, kind=kind,
+        auto_fix_value=value, manual_fix_value="", manual_break_start="",
+        manual_break_end="", manual_break_total="", name=name,
+        warn_level="", source_diff_row_id=row_id,
+    )
+
+
+def test_sched_sync_skipped_when_no_schedule():
+    """退勤予定時刻が空（スケジュール未設定）の行には出勤予定時刻を書かない。
+
+    林広美さん 2026-06 の実例: スケジュール未設定の行に出勤予定だけ書いたところ、
+    jinjerが「退勤予定時刻が正しくありません」で行ごと弾いた。
+    """
+    from quick_export import apply_approved_rows, build_jinjer_row_index, Stats, DIFF_KIND_PUNCH_IN
+
+    headers = ["*従業員ID", "*年月日", "出勤予定時刻", "退勤予定時刻", "出勤1", "退勤1"]
+    rows = [["2020003", "2026/6/2", "", "", "9:30", "18:01"]]
+    idx = build_jinjer_row_index(headers, rows)
+    stats = Stats()
+    apply_approved_rows(headers, rows, idx,
+                        [_make_approved("2020003", "2026-06-02", DIFF_KIND_PUNCH_IN, "09:00")],
+                        stats)
+    assert rows[0][headers.index("出勤1")] == "09:00"
+    assert rows[0][headers.index("出勤予定時刻")] == ""  # 予定は書かない
+    assert stats.overwritten_sched_in == 0
+
+
+def test_work_status_flag_cleared_when_writing_punches():
+    """打刻を書き込む日は勤務状況（0:未打刻1:欠勤）フラグをクリアする。
+
+    矢野瑞穂さん 2026-06-04 の実例: 勤務状況=0(未打刻)のまま打刻を書いたところ、
+    jinjerが「出勤1/退勤1/勤務状況が正しくありません」で弾いた。
+    """
+    from quick_export import apply_approved_rows, build_jinjer_row_index, Stats, DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT
+
+    headers = ["*従業員ID", "*年月日", "出勤予定時刻", "退勤予定時刻",
+               "勤務状況（0:未打刻1:欠勤）", "出勤1", "退勤1"]
+    rows = [["2020004", "2026/6/4", "09:00", "17:30", "0", "", ""]]
+    idx = build_jinjer_row_index(headers, rows)
+    stats = Stats()
+    apply_approved_rows(headers, rows, idx, [
+        _make_approved("2020004", "2026-06-04", DIFF_KIND_PUNCH_IN, "08:50"),
+        _make_approved("2020004", "2026-06-04", DIFF_KIND_PUNCH_OUT, "17:40", row_id=2),
+    ], stats)
+    assert rows[0][headers.index("出勤1")] == "08:50"
+    assert rows[0][headers.index("退勤1")] == "17:40"
+    assert rows[0][headers.index("勤務状況（0:未打刻1:欠勤）")] == ""
+
+
+def test_clearing_both_punches_clears_break_leftovers():
+    """出勤1・退勤1を両方削除した日は休憩の残り（休憩1/復帰1/休憩時間）もクリアする。
+
+    塚本靖さん 2026-06-30 の実例: 打刻を消したのに休憩時間01:00が残り、
+    jinjerが「出勤1が正しくありません」で弾いた。
+    """
+    from quick_export import apply_approved_rows, build_jinjer_row_index, Stats, DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT
+
+    headers = ["*従業員ID", "*年月日", "出勤1", "退勤1", "休憩1", "復帰1", "休憩時間"]
+    rows = [["2020005", "2026/6/30", "9:00", "18:23", "12:00", "13:00", "01:00"]]
+    idx = build_jinjer_row_index(headers, rows)
+    stats = Stats()
+    apply_approved_rows(headers, rows, idx, [
+        _make_approved("2020005", "2026-06-30", DIFF_KIND_PUNCH_IN, ""),
+        _make_approved("2020005", "2026-06-30", DIFF_KIND_PUNCH_OUT, "", row_id=2),
+    ], stats)
+    assert rows[0][headers.index("出勤1")] == ""
+    assert rows[0][headers.index("退勤1")] == ""
+    assert rows[0][headers.index("休憩1")] == ""
+    assert rows[0][headers.index("復帰1")] == ""
+    assert rows[0][headers.index("休憩時間")] == "00:00"
+
+
+def test_clearing_one_punch_warns_about_leftover():
+    """片側の打刻だけを削除して他方が残る場合は警告する（自動では辻褄を合わせない）。
+
+    塚本靖さん 2026-06-23 の実例: 退勤1だけ消して出勤1が残り、jinjerが
+    「退勤1が正しくありません」で弾いた。
+    """
+    from quick_export import apply_approved_rows, build_jinjer_row_index, Stats, DIFF_KIND_PUNCH_OUT
+
+    headers = ["*従業員ID", "*年月日", "出勤1", "退勤1", "休憩時間"]
+    rows = [["2020006", "2026/6/23", "9:00", "18:40", "01:00"]]
+    idx = build_jinjer_row_index(headers, rows)
+    stats = Stats()
+    apply_approved_rows(headers, rows, idx, [
+        _make_approved("2020006", "2026-06-23", DIFF_KIND_PUNCH_OUT, ""),
+    ], stats)
+    assert rows[0][headers.index("退勤1")] == ""
+    assert rows[0][headers.index("出勤1")] == "9:00"  # 自動では消さない
+    assert rows[0][headers.index("休憩時間")] == "01:00"  # 触らない
+    assert any("片側だけ" in w for w in stats.warnings)
+
+
+def test_unchanged_rows_are_not_output(tmp_path):
+    """ツールが変更していない日の行はアップロードCSVに出力しない。
+
+    無変更行を送り返すと、jinjer側の既存不整合（有給残0・勤務状況の矛盾など）で
+    エラー通知が汚れるだけ（池村さん・佐藤さん・福島さん 2026-06 の実例）。
+    """
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv_3days(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+        "対象日付": "2026-04-02", "差異種別": "退勤",
+        "請求勤怠値": "33:30", "自動修正提案値": "33:30", "人間判断": "請求勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    rows = _read_output_rows(output_path)
+    assert [r["*年月日"] for r in rows] == ["2026/4/2"]  # 変更した日だけ
+    assert result.stats.unchanged_rows_removed == 2
+

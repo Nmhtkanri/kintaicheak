@@ -14,11 +14,16 @@
      - 手入力休憩1 / 手入力復帰1 / 手入力休憩時間 → 差異種別（出勤/退勤/休憩/総労働時間）を
        問わず、入力があれば (従業員, 日付) 単位で休憩1/復帰1/休憩時間へ反映（保留の行は除く）
      - 総労働時間差異 → 手入力休憩が無い場合は警告のみ、上書きしない
-  4. 人間判断=保留 の (従業員, 日付) は行ごと出力から除外する
-     （保留=「この日はツールで触らない」。ダウンロード後にjinjer画面で手修正した日を
-     保留にする運用のため、DL時点の古い値を再インポートして手修正を巻き戻さない。
-     インポートファイルに行が無ければ jinjer はその日を変更しない）
-  5. 残りをアップロード用CSV として書き出す
+  4. このツールが値を変更した (従業員, 日付) の行だけをアップロード用CSVとして書き出す
+     - 無変更行を送り返すと、jinjer側の既存不整合（休暇残数不足・勤務状況フラグの矛盾
+       など、jinjer自身がエクスポートした行でも再インポートで弾かれるもの）でエラー
+       通知が汚れるだけのため出力しない
+     - 人間判断=保留 の日は変更されないので自然に出力から外れる（保留=「この日は
+       ツールで触らない」。DL後にjinjer画面で手修正した日を保留にする運用のため、
+       古い値の再インポートによる手修正の巻き戻しを防ぐ）
+     - 打刻を書く日は 勤務状況(未打刻/欠勤)フラグをクリアし、出勤予定時刻の同期は
+       退勤予定時刻がある行に限る。打刻を両方削除した日は休憩の残りもクリアする
+       （いずれもjinjerインポートの整合性チェック対策）
 
 実績確定済みの扱い:
   実績確定済（180列=TRUE）は「本人が打刻申請を確定した状態」を示すだけで、
@@ -53,8 +58,12 @@ JINJER_COL_BREAK_1_START = "休憩1"
 JINJER_COL_BREAK_1_END = "復帰1"
 JINJER_COL_BREAK_TOTAL = "休憩時間"
 JINJER_COL_SCHED_IN = "出勤予定時刻"  # スケジュール（予定）開始時刻。出勤採用時に実打刻へ合わせる
+JINJER_COL_SCHED_OUT = "退勤予定時刻"  # スケジュール未設定の行に出勤予定だけ書かないための判定用
 JINJER_COL_EMP_ID = "*従業員ID"
 JINJER_COL_DATE = "*年月日"
+# 勤務状況（0:未打刻 1:欠勤）。打刻を書き込む日にこのフラグが残っていると
+# jinjer インポートが「出勤1/退勤1/勤務状況が正しくありません」で弾くためクリアする。
+JINJER_COL_WORK_STATUS_PREFIX = "勤務状況"
 
 # 差異種別
 DIFF_KIND_PUNCH_IN = "出勤"
@@ -143,7 +152,8 @@ class Stats:
     overwritten_break_total: int = 0
     manual_break_days: int = 0  # 手入力休憩の反映指示 (従業員, 日付) 件数
     manual_break_conflicts: int = 0  # 同一 (従業員, 日付) で手入力休憩の値が食い違った件数
-    held_rows_removed: int = 0  # 保留日の行を出力から除外した件数（jinjer手修正の保護）
+    held_rows_removed: int = 0  # 保留日のうち出力から外れた日数（jinjer手修正の保護）
+    unchanged_rows_removed: int = 0  # 無変更のため出力しなかった行数
     not_matched: int = 0  # jinjer 行が見つからない承認行
     overwritten_finalized: int = 0  # 上書きしたうち実績確定済みだった件数（参考表示）
     recovered_misplaced: int = 0  # 「人間判断」列以外に入っていた判断を回収した件数
@@ -506,12 +516,17 @@ def apply_approved_rows(
     approved: list[ApprovedRow],
     stats: Stats,
     manual_breaks: dict[tuple[str, str], ManualBreak] | None = None,
-) -> None:
+) -> set[tuple[str, str]]:
     """承認行に応じて rows を in-place で上書きする。
 
     人間判断=承認 のみが上書きの条件。実績確定状況は上書き可否の判定材料にしない
     （実績確定済 = 本人が打刻申請を確定しただけで、勤怠が正しいことを保証しない。
     原則として請求勤怠が正しいため、管理部の判断＝承認なら実績確定済でも上書きする）。
+
+    Returns:
+        changed_days: このツールが値を書いた (従業員ID, 日付ISO) の集合。
+        アップロードCSVにはこの日の行だけを出力する（無変更行を送り返すと、
+        休暇残数や勤務状況の既存不整合でjinjerのエラー通知が汚れるだけで得がない）。
     """
     required_cols = [JINJER_COL_PUNCH_IN, JINJER_COL_PUNCH_OUT]
     missing = [col for col in required_cols if col not in headers]
@@ -523,9 +538,20 @@ def apply_approved_rows(
     break_end_col = headers.index(JINJER_COL_BREAK_1_END) if JINJER_COL_BREAK_1_END in headers else None
     break_total_col = headers.index(JINJER_COL_BREAK_TOTAL) if JINJER_COL_BREAK_TOTAL in headers else None
     sched_in_col = headers.index(JINJER_COL_SCHED_IN) if JINJER_COL_SCHED_IN in headers else None
+    sched_out_col = headers.index(JINJER_COL_SCHED_OUT) if JINJER_COL_SCHED_OUT in headers else None
+    # 勤務状況（0:未打刻1:欠勤）列。正式ヘッダーは注釈付きなので前方一致で解決する。
+    work_status_col = next(
+        (i for i, h in enumerate(headers) if str(h).startswith(JINJER_COL_WORK_STATUS_PREFIX)),
+        None,
+    )
 
     # 実績確定状況列があれば、上書きしたうち何件が実績確定済だったかを集計する（参考表示のみ）
     finalized_col = headers.index("実績確定状況") if "実績確定状況" in headers else None
+
+    # このツールが値を書いた (従業員ID, 日付ISO)。アップロードCSVには変更行だけを出力する。
+    changed_days: set[tuple[str, str]] = set()
+    # 打刻を空で上書き（削除）した日。後段で休憩の残りをクリアし、片側残りを警告する。
+    cleared_punch_days: set[tuple[str, str]] = set()
 
     # ---- 手入力休憩の反映（差異種別に依存しない・(従業員, 日付) 単位で1回） ----
     # 休憩は請求勤怠から自動推定せず、人間が差異一覧に入力した欄だけ反映する。
@@ -545,18 +571,21 @@ def apply_approved_rows(
             else:
                 rows[idx][break_start_col] = mb.start
                 stats.overwritten_break_start += 1
+                changed_days.add(key)
         if mb.end:
             if break_end_col is None:
                 stats.warnings.append(f"行ID={mb.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_END}' 列がありません")
             else:
                 rows[idx][break_end_col] = mb.end
                 stats.overwritten_break_end += 1
+                changed_days.add(key)
         if mb.total:
             if break_total_col is None:
                 stats.warnings.append(f"行ID={mb.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_TOTAL}' 列がありません")
             else:
                 rows[idx][break_total_col] = mb.total
                 stats.overwritten_break_total += 1
+                changed_days.add(key)
 
     for app in approved:
         if app.kind == DIFF_KIND_BREAK:
@@ -601,9 +630,18 @@ def apply_approved_rows(
             new_in = app.manual_fix_value or app.auto_fix_value
             rows[idx][punch_in_col] = new_in
             stats.overwritten_punch_in += 1
+            changed_days.add(key)
+            if not new_in:
+                cleared_punch_days.add(key)
             # 人間判断で採用した就業開始時刻に、スケジュール開始（出勤予定時刻）も合わせる。
             # 採用値が空（jinjer打刻を消すケース）のときは予定を消さない。
-            if sched_in_col is not None and new_in:
+            # 退勤予定時刻が空（スケジュール未設定）の行に出勤予定だけ書くと、jinjerが
+            # 「退勤予定時刻が正しくありません」で行ごと弾くため、予定が揃っている行に限る。
+            if (
+                sched_in_col is not None and new_in
+                and sched_out_col is not None
+                and (rows[idx][sched_out_col] or "").strip()
+            ):
                 rows[idx][sched_in_col] = new_in
                 stats.overwritten_sched_in += 1
         elif app.kind == DIFF_KIND_PUNCH_OUT:
@@ -613,6 +651,18 @@ def apply_approved_rows(
             new_out = to_overnight_punch_out(rows[idx][punch_in_col], new_out)
             rows[idx][punch_out_col] = new_out
             stats.overwritten_punch_out += 1
+            changed_days.add(key)
+            if not new_out:
+                cleared_punch_days.add(key)
+
+        # 打刻を書き込んだ行に「勤務状況（0:未打刻1:欠勤）」フラグが残っていると、
+        # jinjerが「出勤1/退勤1/勤務状況が正しくありません」で弾くためクリアする。
+        if (
+            work_status_col is not None
+            and (rows[idx][punch_in_col] or rows[idx][punch_out_col])
+            and (rows[idx][work_status_col] or "").strip() in ("0", "1")
+        ):
+            rows[idx][work_status_col] = ""
 
         # 参考集計: 上書き対象が実績確定済だった件数
         if finalized_col is not None:
@@ -620,36 +670,53 @@ def apply_approved_rows(
             if finalized == "TRUE":
                 stats.overwritten_finalized += 1
 
+    # ---- 打刻を削除（空で上書き）した日の整合性 ----
+    # 出勤1・退勤1の両方が空になった日は、休憩の残り（休憩1/復帰1/休憩時間）も
+    # クリアする（打刻なしで休憩だけ残るとjinjerが弾く）。片側だけ空になった日は
+    # 自動では辻褄を合わせず、警告して人に判断してもらう。
+    for key in sorted(cleared_punch_days):
+        idx = row_index.get(key)
+        if idx is None:
+            continue
+        has_in = bool((rows[idx][punch_in_col] or "").strip())
+        has_out = bool((rows[idx][punch_out_col] or "").strip())
+        if not has_in and not has_out:
+            if key in manual_breaks:
+                continue  # 手入力休憩がある日はそちらを優先（矛盾は人が入力した値）
+            if break_start_col is not None:
+                rows[idx][break_start_col] = ""
+            if break_end_col is not None:
+                rows[idx][break_end_col] = ""
+            if break_total_col is not None and (rows[idx][break_total_col] or "").strip() not in ("", "0:00", "00:00"):
+                rows[idx][break_total_col] = "00:00"
+        else:
+            remain = JINJER_COL_PUNCH_IN if has_in else JINJER_COL_PUNCH_OUT
+            stats.warnings.append(
+                f"打刻の片側だけを削除したため {remain} が残っています。このままだと"
+                f"jinjerインポートに弾かれる可能性があります。両方消すか、残りの打刻も"
+                f"確認してください (emp={key[0]} date={key[1]})"
+            )
 
-def remove_held_day_rows(
+    return changed_days
+
+
+def filter_output_rows(
     headers: list[str],
     rows: list[list[str]],
-    approved: list[ApprovedRow],
-    manual_breaks: dict[tuple[str, str], ManualBreak],
+    changed_days: set[tuple[str, str]],
     held_days: set[tuple[str, str]],
     stats: Stats,
 ) -> list[list[str]]:
-    """人間判断=保留 の (従業員, 日付) の行をアップロードCSVから除外する。
+    """アップロードCSVに出力する行を「このツールが変更した (従業員, 日付)」だけに絞る。
 
-    保留=「この日はツールで触らない」という意思表示。汎用データのダウンロード後に
-    jinjer画面で手修正した日を保留にする運用があるため、DL時点の古い値を再インポート
-    して手修正を巻き戻さないよう、行ごと出力から外す（インポートファイルに行が
-    無ければ jinjer はその日を変更しない）。
-
-    同じ日に承認による書き戻し（出勤/退勤/手入力休憩）が混在する場合は行を残し、
-    保留側の項目にDL時点の値が入ることを警告する。
+    - 無変更の行を送り返しても意味がない上、jinjer側の既存不整合（休暇残数不足・
+      勤務状況フラグの矛盾など、jinjer自身がエクスポートした行でも再インポートで
+      弾かれるもの）でエラー通知が汚れるため、変更行だけを出力する。
+    - 保留の日は変更されないので自然に出力から外れる（DL後にjinjer画面で手修正した
+      日を保留にする運用の保護）。承認と保留が同じ日に混在する場合だけ行が残るため、
+      警告して人に確認してもらう。
     """
-    if not held_days:
-        return rows
-
-    write_days = {
-        (a.emp_id, a.target_date_iso)
-        for a in approved
-        if a.kind in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT)
-    }
-    write_days |= set((manual_breaks or {}).keys())
-
-    mixed = held_days & write_days
+    mixed = held_days & changed_days
     for emp_id, date_iso in sorted(mixed):
         stats.warnings.append(
             f"保留と承認(書き戻し)が同じ日に混在しています (emp={emp_id} date={date_iso})。"
@@ -657,21 +724,15 @@ def remove_held_day_rows(
             "この日をjinjer画面で手修正している場合は、インポート前に値を確認してください。"
         )
 
-    drop_days = held_days - write_days
-    if not drop_days:
-        return rows
-
     emp_col = headers.index(JINJER_COL_EMP_ID)
     date_col = headers.index(JINJER_COL_DATE)
     kept: list[list[str]] = []
-    removed = 0
     for row in rows:
         key = ((row[emp_col] or "").strip(), normalize_date_iso(row[date_col]))
-        if key in drop_days:
-            removed += 1
-            continue
-        kept.append(row)
-    stats.held_rows_removed = removed
+        if key in changed_days:
+            kept.append(row)
+    stats.unchanged_rows_removed = len(rows) - len(kept)
+    stats.held_rows_removed = len(held_days - changed_days)
     return kept
 
 
@@ -719,7 +780,8 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"  休憩時間 上書き      : {stats.overwritten_break_total}")
     print(f"  休憩スキップ         : {stats.skipped_break}")
     print(f"  総労働スキップ       : {stats.skipped_total}")
-    print(f"  保留日の行を除外     : {stats.held_rows_removed}（jinjer手修正の保護・インポートで触らない）")
+    print(f"  無変更行を除外       : {stats.unchanged_rows_removed}（変更した日の行だけを出力）")
+    print(f"  └ うち保留日        : {stats.held_rows_removed} 日分（jinjer手修正の保護・インポートで触らない）")
     print(f"  jinjer行 未マッチ    : {stats.not_matched}")
     print(f"  (うち実績確定済を上書き: {stats.overwritten_finalized} 件 / 参考)")
     print()
@@ -800,13 +862,17 @@ def run_quick_export(
         return result
     log_func(f"[info] (従業員ID, 年月日) インデックス {len(row_index)} 件")
 
-    apply_approved_rows(headers, rows, row_index, approved, stats, manual_breaks)
+    changed_days = apply_approved_rows(headers, rows, row_index, approved, stats, manual_breaks)
 
-    # 保留の日は行ごと除外（ダウンロード後のjinjer手修正を巻き戻さないため）
-    rows = remove_held_day_rows(headers, rows, approved, manual_breaks, held_days, stats)
+    # 変更した日の行だけを出力する（無変更行はjinjer側の既存不整合で弾かれて
+    # エラー通知が汚れるだけ。保留の日も変更されないので自然に出力から外れる＝
+    # ダウンロード後のjinjer手修正を巻き戻さない）。
+    rows = filter_output_rows(headers, rows, changed_days, held_days, stats)
     result.total_jinjer_rows = len(rows)
-    if stats.held_rows_removed:
-        log_func(f"[info] 保留日の行 {stats.held_rows_removed} 件を出力から除外（jinjer手修正の保護）")
+    log_func(
+        f"[info] 変更のあった {len(rows)} 行のみ出力"
+        f"（無変更 {stats.unchanged_rows_removed} 行を除外・うち保留 {stats.held_rows_removed} 日分）"
+    )
 
     if not dry_run:
         try:
