@@ -499,8 +499,13 @@ def test_run_quick_export_punch_uses_seikyu_value_when_proposal_is_label(tmp_pat
     assert result.stats.overwritten_punch_out == 1
 
 
-def test_run_quick_export_reverse_missing_punch_clears_when_seikyu_blank(tmp_path):
-    """逆向き片側欠落（請求勤怠値が空）を請求勤怠で承認したら、jinjer打刻を空で消す（意図どおり）。"""
+def test_run_quick_export_reverse_missing_punch_excluded_for_manual(tmp_path):
+    """逆向き片側欠落（請求勤怠値が空）の承認＝打刻の削除は、インポートで反映できない。
+
+    jinjerインポートは打刻セルの空を削除と解釈せず「出勤1が正しくありません」で
+    行ごと弾く（2026-07-08実測: 上原さん6/14）。削除を含む日はCSVから除外し、
+    jinjer画面での手動対応を警告で案内する。
+    """
     diff_path = tmp_path / "diff.xlsx"
     jinjer_path = tmp_path / "jinjer.csv"
     output_path = tmp_path / "out.csv"
@@ -508,14 +513,17 @@ def test_run_quick_export_reverse_missing_punch_clears_when_seikyu_blank(tmp_pat
     pd.DataFrame([{
         "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
         "対象日付": "2026-04-01", "差異種別": "退勤",
-        "請求勤怠値": "",               # 請求勤怠側に打刻なし → 消す
+        "請求勤怠値": "",               # 請求勤怠側に打刻なし → 消したい
         "自動修正提案値": "保留",
         "人間判断": "請求勤怠",
     }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
 
     result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
     assert result.ok
-    assert _read_output_row(output_path)["退勤1"] == ""
+    assert result.stats.manual_clear_days == 1
+    assert any("要手動対応" in w for w in result.stats.warnings)
+    with open(output_path, encoding="cp932", newline="") as f:
+        assert list(csv.DictReader(f)) == []  # 削除の日は出力しない（インポート不可のため）
 
 
 def _write_jinjer_csv_3days(path):
@@ -653,11 +661,11 @@ def test_work_status_flag_cleared_when_writing_punches():
     assert rows[0][headers.index("勤務状況（0:未打刻1:欠勤）")] == ""
 
 
-def test_clearing_both_punches_clears_break_leftovers():
-    """出勤1・退勤1を両方削除した日は休憩の残り（休憩1/復帰1/休憩時間）もクリアする。
+def test_clearing_both_punches_excludes_day_for_manual_delete():
+    """出勤1・退勤1を両方削除した日は変更対象から外し、手動削除の警告を出す。
 
-    塚本靖さん 2026-06-30 の実例: 打刻を消したのに休憩時間01:00が残り、
-    jinjerが「出勤1が正しくありません」で弾いた。
+    jinjerインポートは空の打刻を削除と解釈せず行ごと弾くため（上原さん6/14実測）、
+    削除はjinjer画面での手動対応とする。
     """
     from quick_export import apply_approved_rows, build_jinjer_row_index, Stats, DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT
 
@@ -665,19 +673,17 @@ def test_clearing_both_punches_clears_break_leftovers():
     rows = [["2020005", "2026/6/30", "9:00", "18:23", "12:00", "13:00", "01:00"]]
     idx = build_jinjer_row_index(headers, rows)
     stats = Stats()
-    apply_approved_rows(headers, rows, idx, [
+    changed = apply_approved_rows(headers, rows, idx, [
         _make_approved("2020005", "2026-06-30", DIFF_KIND_PUNCH_IN, ""),
         _make_approved("2020005", "2026-06-30", DIFF_KIND_PUNCH_OUT, "", row_id=2),
     ], stats)
-    assert rows[0][headers.index("出勤1")] == ""
-    assert rows[0][headers.index("退勤1")] == ""
-    assert rows[0][headers.index("休憩1")] == ""
-    assert rows[0][headers.index("復帰1")] == ""
-    assert rows[0][headers.index("休憩時間")] == "00:00"
+    assert ("2020005", "2026-06-30") not in changed  # 出力対象から除外
+    assert stats.manual_clear_days == 1
+    assert any("要手動対応" in w and "手動削除" in w for w in stats.warnings)
 
 
-def test_clearing_one_punch_warns_about_leftover():
-    """片側の打刻だけを削除して他方が残る場合は警告する（自動では辻褄を合わせない）。
+def test_clearing_one_punch_excludes_day_for_manual_fix():
+    """片側の打刻だけを削除する変更もインポートでは反映できないため除外＋警告する。
 
     塚本靖さん 2026-06-23 の実例: 退勤1だけ消して出勤1が残り、jinjerが
     「退勤1が正しくありません」で弾いた。
@@ -688,13 +694,12 @@ def test_clearing_one_punch_warns_about_leftover():
     rows = [["2020006", "2026/6/23", "9:00", "18:40", "01:00"]]
     idx = build_jinjer_row_index(headers, rows)
     stats = Stats()
-    apply_approved_rows(headers, rows, idx, [
+    changed = apply_approved_rows(headers, rows, idx, [
         _make_approved("2020006", "2026-06-23", DIFF_KIND_PUNCH_OUT, ""),
     ], stats)
-    assert rows[0][headers.index("退勤1")] == ""
-    assert rows[0][headers.index("出勤1")] == "9:00"  # 自動では消さない
-    assert rows[0][headers.index("休憩時間")] == "01:00"  # 触らない
-    assert any("片側だけ" in w for w in stats.warnings)
+    assert ("2020006", "2026-06-23") not in changed  # 出力対象から除外
+    assert stats.manual_clear_days == 1
+    assert any("要手動対応" in w and "片側だけ" in w for w in stats.warnings)
 
 
 def test_unchanged_rows_are_not_output(tmp_path):

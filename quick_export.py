@@ -154,6 +154,7 @@ class Stats:
     manual_break_conflicts: int = 0  # 同一 (従業員, 日付) で手入力休憩の値が食い違った件数
     held_rows_removed: int = 0  # 保留日のうち出力から外れた日数（jinjer手修正の保護）
     unchanged_rows_removed: int = 0  # 無変更のため出力しなかった行数
+    manual_clear_days: int = 0  # 打刻削除を含むため出力から除外した日数（jinjer画面で手動対応）
     not_matched: int = 0  # jinjer 行が見つからない承認行
     overwritten_finalized: int = 0  # 上書きしたうち実績確定済みだった件数（参考表示）
     recovered_misplaced: int = 0  # 「人間判断」列以外に入っていた判断を回収した件数
@@ -740,31 +741,31 @@ def apply_approved_rows(
             if finalized == "TRUE":
                 stats.overwritten_finalized += 1
 
-    # ---- 打刻を削除（空で上書き）した日の整合性 ----
-    # 出勤1・退勤1の両方が空になった日は、休憩の残り（休憩1/復帰1/休憩時間）も
-    # クリアする（打刻なしで休憩だけ残るとjinjerが弾く）。片側だけ空になった日は
-    # 自動では辻褄を合わせず、警告して人に判断してもらう。
+    # ---- 打刻を削除（空で上書き）した日の扱い ----
+    # jinjerインポートは打刻セルの「空」を削除とは解釈せず「出勤1が正しくありません」で
+    # 行ごと弾く（2026-07-08実測: 上原さん6/14）。つまり打刻の削除はインポートでは
+    # 反映できないため、削除を含む日はアップロードCSVから除外し、jinjer画面での
+    # 手動対応を警告で案内する。
     for key in sorted(cleared_punch_days):
         idx = row_index.get(key)
         if idx is None:
             continue
         has_in = bool((rows[idx][punch_in_col] or "").strip())
         has_out = bool((rows[idx][punch_out_col] or "").strip())
+        changed_days.discard(key)
+        stats.manual_clear_days += 1
         if not has_in and not has_out:
-            if key in manual_breaks:
-                continue  # 手入力休憩がある日はそちらを優先（矛盾は人が入力した値）
-            if break_start_col is not None:
-                rows[idx][break_start_col] = ""
-            if break_end_col is not None:
-                rows[idx][break_end_col] = ""
-            if break_total_col is not None and (rows[idx][break_total_col] or "").strip() not in ("", "0:00", "00:00"):
-                rows[idx][break_total_col] = "00:00"
+            stats.warnings.append(
+                f"⚠️要手動対応: 打刻の削除(空での上書き)はjinjerインポートでは反映できない"
+                f"ため、この日はアップロードCSVから除外しました。jinjer画面で打刻を"
+                f"手動削除してください (emp={key[0]} date={key[1]})"
+            )
         else:
             remain = JINJER_COL_PUNCH_IN if has_in else JINJER_COL_PUNCH_OUT
             stats.warnings.append(
-                f"打刻の片側だけを削除したため {remain} が残っています。このままだと"
-                f"jinjerインポートに弾かれる可能性があります。両方消すか、残りの打刻も"
-                f"確認してください (emp={key[0]} date={key[1]})"
+                f"⚠️要手動対応: 打刻の片側だけを削除する変更({remain}は残る)はjinjer"
+                f"インポートでは反映できないため、この日はアップロードCSVから除外しました。"
+                f"jinjer画面でこの日の打刻を手動修正してください (emp={key[0]} date={key[1]})"
             )
 
     return changed_days
@@ -852,6 +853,8 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"  総労働スキップ       : {stats.skipped_total}")
     print(f"  無変更行を除外       : {stats.unchanged_rows_removed}（変更した日の行だけを出力）")
     print(f"  └ うち保留日        : {stats.held_rows_removed} 日分（jinjer手修正の保護・インポートで触らない）")
+    if stats.manual_clear_days:
+        print(f"  ⚠️ 打刻削除の日を除外 : {stats.manual_clear_days} 日分（インポートでは削除不可。jinjer画面で手動対応→警告参照）")
     print(f"  jinjer行 未マッチ    : {stats.not_matched}")
     print(f"  (うち実績確定済を上書き: {stats.overwritten_finalized} 件 / 参考)")
     print()
