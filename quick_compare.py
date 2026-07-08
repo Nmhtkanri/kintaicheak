@@ -837,15 +837,22 @@ def compute_diffs(
         # （総労働時間は手順3で書き戻し対象外のため、誤操作しても打刻が消えない）。
         tokki = clean_cell(krow.get("特記"))
         skip_in = skip_out = skip_total = False
+        month_end_sched = False
         tokki_note = ""
+        tokki_note_level = LEVEL_WARN
         if tokki:
             if "月末日跨ぎ" in tokki:
-                # 請求側の24:00は暦日打切りで実退勤ではない。出勤のみ通常突合。
+                # 請求側の24:00は暦日打切りで実退勤ではない。出勤のみ通常突合し、
+                # 退勤は退勤予定時刻（スケジュール）を暫定の正として別途突合する
+                # （月末の日跨ぎ勤務はスケジュール勤怠を暫定で働いたとみなし当月計上する運用ルール）。
                 skip_out = skip_total = True
+                month_end_sched = True
                 tokki_note = tokki
             elif "前月末夜勤の後半" in tokki and "自動書戻し不可" in tokki:
+                # 前月分でスケジュール暫定計上済み＝当月の判断は不要。参考の注記のみ出す。
                 skip_in = skip_out = skip_total = True
                 tokki_note = tokki
+                tokki_note_level = LEVEL_INFO
             elif "前月末夜勤の後半" in tokki:
                 # 前月末日で突合済み: 退勤（24時超表記で前月末日へ書き戻し）は通常突合。
                 # 総労働は後半のみの値のため突合しない。
@@ -963,6 +970,51 @@ def compute_diffs(
             ))
             next_id += 1
 
+        # ----- 月末日跨ぎ: スケジュール退勤を暫定の正として突合 -----
+        # jinjerは月をまたぐ範囲の汎用データを出せないため、月末夜勤の後半（翌月1日
+        # 0:00〜）を翌月に突合することはできない。運用ルール: 月末の日跨ぎ勤務は
+        # スケジュールの勤怠を暫定で働いたとみなし、当月勤怠として計上する。
+        # そのため退勤は退勤予定時刻（24時超表記）を暫定の正として jinjer実績と突合し、
+        # 採用時はその値を開始日の行へ書き戻す。
+        if month_end_sched:
+            sched_out_disp = overnight_display_value(
+                extra["sched_out"], k_in or j_in, extra["sched_out"], extra["sched_in"]
+            )
+            sched_min = parse_hhmm(sched_out_disp)
+            j_min = parse_hhmm(j_out_disp)
+            if sched_min is not None and j_min is not None:
+                tokki_note_level = LEVEL_INFO  # 退勤を突合できたので注記は参考扱い
+                diff_sched = sched_min - j_min
+                if diff_sched != 0:
+                    level, reason = classify_punch_diff(diff_sched, "out")
+                    rows.append(DiffRow(
+                        row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                        kind=DIFF_KIND_PUNCH_OUT,
+                        kintai_value=sched_out_disp, jinjer_value=j_out_disp,
+                        diff_minutes=str(diff_sched),
+                        warn_level=level,
+                        warn_reason=f"月末日跨ぎ: スケジュール退勤を暫定の正として突合(当月計上) / {reason}",
+                        auto_fix_value=sched_out_disp,
+                        finalized=finalized,
+                        source_file=source_file,
+                        **extra,
+                    ))
+                    next_id += 1
+            elif sched_min is not None and not j_out:
+                rows.append(DiffRow(
+                    row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                    kind=DIFF_KIND_PUNCH_OUT,
+                    kintai_value=sched_out_disp, jinjer_value="", diff_minutes="",
+                    warn_level=LEVEL_WARN,
+                    warn_reason="月末日跨ぎ: jinjer退勤なし / スケジュール退勤(暫定)あり",
+                    auto_fix_value=sched_out_disp,
+                    finalized=finalized,
+                    source_file=source_file,
+                    **extra,
+                ))
+                next_id += 1
+            # スケジュール未設定の場合は注記行(要確認)のみ＝手動確認
+
         # ----- 総労働時間差異 -----
         # 「休憩」の突合は廃止（総労働時間が正味で突合されるため不要）。
         if jrow is not None and not skip_total:
@@ -1024,7 +1076,7 @@ def compute_diffs(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
                 kind=DIFF_KIND_TOTAL,
                 kintai_value=k_span, jinjer_value=j_span, diff_minutes="",
-                warn_level=LEVEL_WARN, warn_reason=reason,
+                warn_level=tokki_note_level, warn_reason=reason,
                 auto_fix_value="",
                 finalized=finalized,
                 source_file=source_file,
@@ -1061,9 +1113,10 @@ def compute_diffs(
     # トリアージ: 各差異行を 要確認/自動採用/自動OK に分類し、既定の人間判断を付ける
     _TOKKI_KEYWORDS = ("月末日跨ぎ", "前月末夜勤の後半", "Fieldglass時刻なし", "jinjer側2行分割登録")
     for r in rows:
-        # 特記の注記行は必ず人が見る（休暇情報等で自動OKに紛れて見落とされないように）
+        # 特記の注記行は休暇情報等で自動OK/自動採用に紛れさせない。
+        # WARN（要対応の可能性）は要確認、INFO（説明だけの注記）は参考のみに固定する。
         if r.kind == DIFF_KIND_TOTAL and any(k in (r.warn_reason or "") for k in _TOKKI_KEYWORDS):
-            r.triage = TRIAGE_NEEDS_CHECK
+            r.triage = TRIAGE_NEEDS_CHECK if r.warn_level in (LEVEL_DANGER, LEVEL_WARN) else TRIAGE_INFO_ONLY
             r.judge_default = ""
             r.recommend_judge = ""
             continue

@@ -972,3 +972,99 @@ def test_fieldglass_no_time_tokki_note_only():
     from services.triage import TRIAGE_NEEDS_CHECK
     assert rows[0].triage == TRIAGE_NEEDS_CHECK
     assert rows[0].recommend_judge == ""
+
+
+def test_month_end_sched_deemed_punch_out_comparison():
+    """月末日跨ぎ: 退勤予定（スケジュール）を暫定の正としてjinjer実績と突合する。
+
+    運用ルール: 月末の日跨ぎ勤務はスケジュール勤怠を暫定で働いたとみなし当月計上。
+    jinjerは月をまたぐ範囲をダウンロードできないため、翌月送りにはしない。
+    """
+    from services.triage import TRIAGE_INFO_ONLY
+
+    kintai_df = pd.DataFrame([{
+        "氏名": "山口 太雅", "日付": date(2026, 6, 30),
+        "勤務表_出勤": "16:45", "jinjer_出勤": "17:15", "出勤差分(分)": 30,
+        "勤務表_退勤": "00:00", "jinjer_退勤": "09:33", "退勤差分(分)": None,
+        "勤務表_実働時間": "6:30",
+        "特記": "月末日跨ぎ勤務(請求側の翌月分は取得不可。スケジュール勤怠を暫定の正として当月計上)",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "17:15",
+        JINJER_HEADERS["punch_out_1"]: "33:33",
+        JINJER_HEADERS["total_work"]: "15:03",
+        "出勤予定時刻": "16:45",
+        "退勤予定時刻": "33:30",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-30"): jrow},
+        {"山口 太雅": "2018057", "山口太雅": "2018057"},
+        logs, extra_cols,
+    )
+    # 出勤は通常突合（30分差）
+    in_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_IN]
+    assert len(in_rows) == 1
+    # 退勤はスケジュール(33:30) vs jinjer実績(33:33) の暫定突合
+    out_rows = [r for r in rows if r.kind == DIFF_KIND_PUNCH_OUT]
+    assert len(out_rows) == 1
+    assert out_rows[0].kintai_value == "33:30"   # 承認するとこの値が書き戻される
+    assert out_rows[0].jinjer_value == "33:33"
+    assert out_rows[0].diff_minutes == "-3"
+    assert "スケジュール退勤を暫定の正" in out_rows[0].warn_reason
+    # 注記行は参考のみ（退勤を突合できたため判断不要）
+    note_rows = [r for r in rows if r.kind == DIFF_KIND_TOTAL]
+    assert len(note_rows) == 1
+    assert note_rows[0].triage == TRIAGE_INFO_ONLY
+
+
+def test_month_end_sched_equal_emits_no_punch_out_row():
+    """月末日跨ぎでスケジュール退勤とjinjer実績が一致していれば退勤行は出ない。"""
+    kintai_df = pd.DataFrame([{
+        "氏名": "及川 航平", "日付": date(2026, 6, 30),
+        "勤務表_出勤": "16:45", "jinjer_出勤": "16:45", "出勤差分(分)": 0,
+        "勤務表_退勤": "00:00", "jinjer_退勤": "09:30", "退勤差分(分)": None,
+        "特記": "月末日跨ぎ勤務(請求側の翌月分は取得不可。スケジュール勤怠を暫定の正として当月計上)",
+        "_source_file": "x.xlsx",
+    }])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "16:45",
+        JINJER_HEADERS["punch_out_1"]: "33:30",
+        "出勤予定時刻": "16:45",
+        "退勤予定時刻": "33:30",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-06-30"): jrow},
+        {"及川 航平": "2018057", "及川航平": "2018057"},
+        logs, extra_cols,
+    )
+    kinds = [r.kind for r in rows]
+    assert DIFF_KIND_PUNCH_IN not in kinds
+    assert DIFF_KIND_PUNCH_OUT not in kinds  # スケジュールどおり → 差異なし
+    assert kinds.count(DIFF_KIND_TOTAL) == 1  # 参考の注記のみ
+
+
+def test_prev_month_tail_note_is_info_only():
+    """前月末夜勤の後半（前月分で暫定計上済み）の注記は参考のみ＝判断不要。"""
+    from services.triage import TRIAGE_INFO_ONLY
+
+    kintai_df = pd.DataFrame([{
+        "氏名": "大堀 広智", "日付": date(2026, 7, 1),
+        "勤務表_出勤": "00:00", "jinjer_出勤": "", "出勤差分(分)": None,
+        "勤務表_退勤": "09:30", "jinjer_退勤": "", "退勤差分(分)": None,
+        "特記": "前月末夜勤の後半(前月分でスケジュール勤怠により暫定計上済み・自動書戻し不可)",
+        "_source_file": "x.xlsx",
+    }])
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-07-01"): _jinjer_row()},
+        {"大堀 広智": "2018057", "大堀広智": "2018057"},
+        logs,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_TOTAL]
+    assert rows[0].triage == TRIAGE_INFO_ONLY
+    assert rows[0].recommend_judge == ""
