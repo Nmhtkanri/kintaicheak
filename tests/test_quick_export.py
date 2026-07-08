@@ -721,3 +721,51 @@ def test_unchanged_rows_are_not_output(tmp_path):
     assert [r["*年月日"] for r in rows] == ["2026/4/2"]  # 変更した日だけ
     assert result.stats.unchanged_rows_removed == 2
 
+
+def test_strip_time_seconds():
+    """ExcelでCSVを保存すると付く秒（10:00:00/33:30:00）を H:MM に正規化する。"""
+    from quick_export import strip_time_seconds
+    assert strip_time_seconds("10:00:00") == "10:00"
+    assert strip_time_seconds("33:30:00") == "33:30"
+    assert strip_time_seconds("9:05:00") == "9:05"
+    assert strip_time_seconds("16:45") == "16:45"       # 秒なしはそのまま
+    assert strip_time_seconds("") == ""
+    assert strip_time_seconds("テレワーク") == "テレワーク"
+    # セル全体が時刻のときだけ対象（日時文字列は触らない）
+    assert strip_time_seconds("2026-06-01 10:00:00") == "2026-06-01 10:00:00"
+
+
+def test_excel_saved_csv_seconds_are_normalized(tmp_path):
+    """Excelで上書き保存され秒が付いた汎用データCSVでも、出力は H:MM に正規化される。
+
+    大堀さん 2026-06 の実例: アップロードCSVをExcelで保存したところ 33:30→33:30:00 等に
+    変わり、jinjerが受け付けなかった。
+    """
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+
+    headers = ["名前", "*従業員ID", "*年月日", "出勤予定時刻", "退勤予定時刻",
+               "出勤1", "退勤1", "休憩1", "復帰1", "休憩時間", "実績確定状況"]
+    with open(jinjer_path, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(headers)
+        # Excel保存で秒が付いた状態を再現（24時超の時刻・予定・休憩すべて）
+        w.writerow(["大堀 広智", "2024042", "2026/6/2", "16:45", "33:30:00",
+                    "16:45", "33:33:00", "24:00:00", "25:45:00", "01:30", "FALSE"])
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2024042", "氏名": "大堀 広智",
+        "対象日付": "2026-06-02", "差異種別": "退勤",
+        "請求勤怠値": "33:30", "自動修正提案値": "33:30", "人間判断": "請求勤怠",
+        "打刻修正": "33:30:00",  # Excel編集で秒が付いた手入力値も正規化される
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    row = _read_output_row(output_path)
+    assert row["退勤1"] == "33:30"        # 手入力値の秒も除去して書き戻し
+    assert row["退勤予定時刻"] == "33:30"  # 元データ由来の秒も除去
+    assert row["休憩1"] == "24:00"
+    assert row["復帰1"] == "25:45"

@@ -193,6 +193,18 @@ def iso_to_jinjer_date(date_iso: str) -> str:
 
 
 _HHMM_RE = re.compile(r"^(\d{1,3}):(\d{2})")
+# 秒付き時刻（10:00:00 / 33:30:00 等）。ExcelでCSVを開いて上書き保存すると、
+# 24時超の時刻が [h]:mm:ss 形式になり秒が付く。jinjerは秒付きを受け付けないため
+# H:MM に正規化する。日時文字列（"2026-06-01 10:00:00"）はセル全体が一致しないので対象外。
+_TIME_WITH_SECONDS_RE = re.compile(r"^(\d{1,3}:\d{2}):\d{2}$")
+
+
+def strip_time_seconds(value: str) -> str:
+    """'10:00:00'/'33:30:00' → '10:00'/'33:30'。時刻でない値はそのまま返す。"""
+    if not value:
+        return value
+    m = _TIME_WITH_SECONDS_RE.match(value.strip())
+    return m.group(1) if m else value
 
 
 def _hhmm_to_minutes(value: Any) -> int | None:
@@ -240,7 +252,8 @@ def clean_excel_text(value: Any) -> str:
     s = str(value).strip()
     if not s or s.lower() in ("nan", "none", "nat"):
         return ""
-    return s
+    # Excel編集で秒が付いた時刻（10:00:00等）はjinjerが弾くため H:MM へ正規化
+    return strip_time_seconds(s)
 
 
 # ----------------------------------------------------------------------
@@ -476,6 +489,21 @@ def load_jinjer_csvs(jinjer_dir: Path) -> tuple[list[str], list[list[str]]]:
         print(f"[info] jinjer CSV 読込: {path.name} (累計 {len(all_rows)} 行)")
 
     assert all_headers is not None
+
+    # ExcelでCSVを開いて上書き保存すると、24時超の時刻(33:30等)に秒が付いて
+    # 「33:30:00」形式になる（Excelが経過時間 [h]:mm:ss として保存するため）。
+    # jinjerのインポートは秒付き時刻を弾くので、読み込み時に H:MM へ正規化する。
+    normalized = 0
+    for row in all_rows:
+        for c, v in enumerate(row):
+            if v and ":" in v:
+                nv = strip_time_seconds(v)
+                if nv != v:
+                    row[c] = nv
+                    normalized += 1
+    if normalized:
+        print(f"[info] 秒付き時刻 {normalized} セルを H:MM 形式へ正規化（Excel保存されたCSV対策）")
+
     return all_headers, all_rows
 
 
