@@ -769,3 +769,44 @@ def test_excel_saved_csv_seconds_are_normalized(tmp_path):
     assert row["退勤予定時刻"] == "33:30"  # 元データ由来の秒も除去
     assert row["休憩1"] == "24:00"
     assert row["復帰1"] == "25:45"
+
+
+def test_iso_dates_normalized_to_jinjer_format(tmp_path):
+    """ISO形式の年月日(2026-06-01)をjinjerインポート形式(2026/6/1)へ正規化する。
+
+    jinjerのエクスポートはISO形式で出すのに、インポートはスラッシュ形式しか
+    受け付けず「年月日が正しくありません」で全行弾かれる（2026-07-08実測）。
+    従来はExcel保存で日付が変換されて通っていたが、Excel保存は24時超の時刻に
+    秒を付けて壊すため、ツール側で直接インポート可能な形にする。
+    """
+    from quick_export import iso_date_to_jinjer
+    assert iso_date_to_jinjer("2026-06-01") == "2026/6/1"
+    assert iso_date_to_jinjer("2026-12-31") == "2026/12/31"
+    assert iso_date_to_jinjer("2026/6/1") == "2026/6/1"      # 既にスラッシュはそのまま
+    # Excel保存で化けた米国式(M/D/YYYY)も救済する（2026-07-08実測）
+    assert iso_date_to_jinjer("6/1/2026") == "2026/6/1"
+    assert iso_date_to_jinjer("6/30/2026") == "2026/6/30"
+    assert iso_date_to_jinjer("30/6/2026") == "2026/6/30"    # D/M/YYYYの入れ違いも救済
+    assert iso_date_to_jinjer("2026-06-01 10:00") == "2026-06-01 10:00"  # 日時は触らない
+    assert iso_date_to_jinjer("") == ""
+
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    with open(jinjer_path, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(HEADERS)
+        w.writerow(["上原 奏吾", "2018057", "2026-04-01", "9:00", "18:00", "", "", "0:00", "TRUE"])
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01", "差異種別": "退勤",
+        "請求勤怠値": "18:15", "自動修正提案値": "18:15", "人間判断": "請求勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    row = _read_output_row(output_path)
+    assert row["*年月日"] == "2026/4/1"   # ISO→スラッシュ・0パディングなし
+    assert row["退勤1"] == "18:15"

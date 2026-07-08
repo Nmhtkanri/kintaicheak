@@ -207,6 +207,36 @@ def strip_time_seconds(value: str) -> str:
     return m.group(1) if m else value
 
 
+# 日付の正規化。jinjerのインポートはスラッシュ形式（2026/6/1・0パディングなし）しか
+# 受け付けず、それ以外は「年月日が正しくありません」で全行弾かれる（2026-07-08実測）。
+# 実際に遭遇した壊れ方:
+# - ISO形式(2026-06-01): jinjer自身のエクスポートがこの形式で出す
+# - 米国式(6/1/2026): ExcelでCSVを開いて上書き保存すると変換されることがある
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+_US_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+
+
+def iso_date_to_jinjer(value: str) -> str:
+    """日付セルを jinjerインポート形式 'YYYY/M/D' へ正規化する。日付でない値はそのまま。
+
+    '2026-06-01' → '2026/6/1'（ISO・jinjerエクスポート形式）
+    '6/1/2026'   → '2026/6/1'（米国式・Excel保存で化けた形式。月>12なら日/月を入替）
+    """
+    if not value:
+        return value
+    s = value.strip()
+    m = _ISO_DATE_RE.match(s)
+    if m:
+        return f"{int(m.group(1))}/{int(m.group(2))}/{int(m.group(3))}"
+    m = _US_DATE_RE.match(s)
+    if m:
+        mm, dd, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if mm > 12 and dd <= 12:  # 実はD/M/YYYYだった場合の救済
+            mm, dd = dd, mm
+        return f"{yyyy}/{mm}/{dd}"
+    return value
+
+
 def _hhmm_to_minutes(value: Any) -> int | None:
     """'H:MM' / 'HH:MM'（24時超表記含む）を分に変換。不正値は None。"""
     if value is None:
@@ -490,19 +520,31 @@ def load_jinjer_csvs(jinjer_dir: Path) -> tuple[list[str], list[list[str]]]:
 
     assert all_headers is not None
 
-    # ExcelでCSVを開いて上書き保存すると、24時超の時刻(33:30等)に秒が付いて
-    # 「33:30:00」形式になる（Excelが経過時間 [h]:mm:ss として保存するため）。
-    # jinjerのインポートは秒付き時刻を弾くので、読み込み時に H:MM へ正規化する。
-    normalized = 0
+    # jinjerインポートが受け付ける形式へ正規化する:
+    # - 秒付き時刻(33:30:00等): ExcelでCSVを上書き保存すると24時超の時刻に秒が付く
+    #   （Excelが経過時間 [h]:mm:ss として保存するため）。jinjerは秒付きを弾く。
+    # - ISO日付(2026-06-01): jinjerのエクスポートはISO形式なのに、インポートは
+    #   スラッシュ形式(2026/6/1)しか受け付けず「年月日が正しくありません」で弾く。
+    time_fixed = 0
+    date_fixed = 0
     for row in all_rows:
         for c, v in enumerate(row):
-            if v and ":" in v:
+            if not v:
+                continue
+            if ":" in v:
                 nv = strip_time_seconds(v)
                 if nv != v:
                     row[c] = nv
-                    normalized += 1
-    if normalized:
-        print(f"[info] 秒付き時刻 {normalized} セルを H:MM 形式へ正規化（Excel保存されたCSV対策）")
+                    time_fixed += 1
+            elif "-" in v or "/" in v:
+                nv = iso_date_to_jinjer(v)
+                if nv != v:
+                    row[c] = nv
+                    date_fixed += 1
+    if time_fixed:
+        print(f"[info] 秒付き時刻 {time_fixed} セルを H:MM 形式へ正規化（Excel保存されたCSV対策）")
+    if date_fixed:
+        print(f"[info] ISO日付 {date_fixed} セルを jinjerインポート形式(YYYY/M/D)へ正規化")
 
     return all_headers, all_rows
 
