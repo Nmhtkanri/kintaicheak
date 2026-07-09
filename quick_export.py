@@ -13,6 +13,8 @@
      - 退勤差異 → 退勤1（23列目）
      - 手入力休憩1 / 手入力復帰1 / 手入力休憩時間 → 差異種別（出勤/退勤/休憩/総労働時間）を
        問わず、入力があれば (従業員, 日付) 単位で休憩1/復帰1/休憩時間へ反映（保留の行は除く）
+     - 手入力セルがExcelの経過時間(timedelta: 31:00等の24時超入力)や時刻(time)で
+       保存されていても、jinjerが受ける H:MM 表記（24時超はそのまま31:00形式）へ正規化
      - 総労働時間差異 → 手入力休憩が無い場合は警告のみ、上書きしない
   4. このツールが値を変更した (従業員, 日付) の行だけをアップロード用CSVとして書き出す
      - 無変更行を送り返すと、jinjer側の既存不整合（休暇残数不足・勤務状況フラグの矛盾
@@ -44,7 +46,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +210,21 @@ def strip_time_seconds(value: str) -> str:
     return m.group(1) if m else value
 
 
+def timedelta_to_hhmm(td: timedelta) -> str:
+    """Excelの経過時間セルを jinjer の H:MM 表記（24時超そのまま）へ変換する。
+
+    差異一覧xlsxの手入力セルに 31:00 のような24時超時刻を入力すると、Excelが
+    [h]:mm:ss の経過時間として保存し、openpyxl が timedelta(days=1, seconds=25200)
+    で返す。str() の '1 day, 7:00:00' はjinjerが受け付けないため、総分に換算して
+    '31:00' 形式にする（加藤さん 2026-06 夜勤の復帰1で実際にインポートが弾かれた）。
+    """
+    total_sec = int(td.total_seconds())
+    if total_sec < 0:  # Excelの手入力セルでは負の経過時間は作れない（念のため素通し）
+        return str(td)
+    total_min = (total_sec + 30) // 60  # 30秒以上は分へ繰り上げ
+    return f"{total_min // 60}:{total_min % 60:02d}"
+
+
 # 日付の正規化。jinjerのインポートはスラッシュ形式（2026/6/1・0パディングなし）しか
 # 受け付けず、それ以外は「年月日が正しくありません」で全行弾かれる（2026-07-08実測）。
 # 実際に遭遇した壊れ方:
@@ -265,8 +282,32 @@ def to_overnight_punch_out(punch_in: Any, punch_out: str) -> str:
     return f"{adjusted // 60:02d}:{adjusted % 60:02d}"
 
 
+def _warn_if_not_hhmm(
+    stats: Stats, row_id: int, col_label: str, value: str,
+    emp_id: str, date_iso: str, name: str,
+) -> None:
+    """jinjerの時刻列へ書き込む値が H:MM 形式でなければ警告する（書き込みは行う）。
+
+    実例: 手入力休憩時間に数値 1 を入力（'1時間' のつもり）→ '1' のまま出力される。
+    数値の時刻への自動解釈は、'30'（30分のつもり）を30時間と取り違える危険があるため
+    行わず、差異一覧xlsx側の入力を直してもらう。
+    """
+    if value and not _HHMM_RE.fullmatch(value):
+        stats.warnings.append(
+            f"⚠️行ID={row_id} {col_label}='{value}' は時刻形式(H:MM)ではないため、"
+            f"jinjerインポートで弾かれる可能性があります。差異一覧の該当セルを "
+            f"1:00 や 31:00 のような時刻で入力し直して再出力してください "
+            f"(emp={emp_id} date={date_iso} {name})"
+        )
+
+
 def clean_excel_text(value: Any) -> str:
-    """Excel由来の値を、jinjer汎用データCSVへ書く文字列に正規化する。"""
+    """Excel由来の値を、jinjer汎用データCSVへ書く文字列に正規化する。
+
+    時刻はjinjerエクスポートと同じ 0埋めなしの H:MM に揃える。Excelは同じ列でも
+    入力のされ方でセル型が変わる（31:00→経過時間timedelta / 7:00→time /
+    先頭'付き→文字列）ため、どの型で保存されていても同じ表記に落とす。
+    """
     if value is None:
         return ""
     try:
@@ -274,10 +315,13 @@ def clean_excel_text(value: Any) -> str:
             return ""
     except (TypeError, ValueError):
         pass
+    if isinstance(value, timedelta):
+        # 24時超の時刻入力（31:00等）はExcelが経過時間として保存しtimedeltaで返る
+        return timedelta_to_hhmm(value)
     if isinstance(value, datetime):
-        return value.strftime("%H:%M")
+        return f"{value.hour}:{value.minute:02d}"
     if isinstance(value, time):
-        return value.strftime("%H:%M")
+        return f"{value.hour}:{value.minute:02d}"
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     s = str(value).strip()
@@ -636,6 +680,10 @@ def apply_approved_rows(
                 f"(emp={mb.emp_id} date={mb.date_iso} {mb.name})"
             )
             continue
+        # 時刻形式でない手入力値（数値の 1 など）は書き込む前に警告しておく
+        _warn_if_not_hhmm(stats, mb.source_diff_row_id, "手入力休憩1", mb.start, mb.emp_id, mb.date_iso, mb.name)
+        _warn_if_not_hhmm(stats, mb.source_diff_row_id, "手入力復帰1", mb.end, mb.emp_id, mb.date_iso, mb.name)
+        _warn_if_not_hhmm(stats, mb.source_diff_row_id, "手入力休憩時間", mb.total, mb.emp_id, mb.date_iso, mb.name)
         if mb.start:
             if break_start_col is None:
                 stats.warnings.append(f"行ID={mb.source_diff_row_id} 汎用データに '{JINJER_COL_BREAK_1_START}' 列がありません")
@@ -699,6 +747,8 @@ def apply_approved_rows(
         # 上書き（実績確定済かどうかに関わらず、承認されたものは上書きする）
         if app.kind == DIFF_KIND_PUNCH_IN:
             new_in = app.manual_fix_value or app.auto_fix_value
+            _warn_if_not_hhmm(stats, app.source_diff_row_id, "出勤1への書込値", new_in,
+                              app.emp_id, app.target_date_iso, app.name)
             rows[idx][punch_in_col] = new_in
             stats.overwritten_punch_in += 1
             changed_days.add(key)
@@ -720,6 +770,8 @@ def apply_approved_rows(
             # 夜勤で翌朝退勤の場合、jinjer は 24時超表記でないとインポートできないため
             # 現在の出勤1と突き合わせて 08:15→32:15 のように補正する（冪等・安全網）。
             new_out = to_overnight_punch_out(rows[idx][punch_in_col], new_out)
+            _warn_if_not_hhmm(stats, app.source_diff_row_id, "退勤1への書込値", new_out,
+                              app.emp_id, app.target_date_iso, app.name)
             rows[idx][punch_out_col] = new_out
             stats.overwritten_punch_out += 1
             changed_days.add(key)
