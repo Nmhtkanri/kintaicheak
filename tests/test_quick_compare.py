@@ -510,6 +510,49 @@ def test_human_judgment_conditional_formatting(tmp_path):
     assert decoded.count('type="cellIs"') >= 2
 
 
+def test_manual_input_columns_have_text_format(tmp_path):
+    """手入力列（打刻修正/手入力休憩1/手入力復帰1/手入力休憩時間）は文字列書式('@')。
+
+    既定の書式だと Excel が「31:00」を経過時間、「7:00」を時刻型へ自動変換して保存し、
+    openpyxl 経由で timedelta/time になって quick_export の転記が壊れる（2026-07-09 の事故）。
+    生成時に '@' を設定しておけば入力値がそのまま文字列で保存される。
+    """
+    from openpyxl import load_workbook
+    from quick_compare import write_excel, DiffRow, MANUAL_INPUT_TEXT_COLUMNS
+
+    drows = [
+        DiffRow(
+            row_id=i, emp_id=f"100{i}", name="山田 太郎", target_date=f"2026-05-0{i}", kind="出勤",
+            kintai_value="9:00", jinjer_value="9:30", diff_minutes="30",
+            warn_level="INFO", warn_reason="", auto_fix_value="9:00",
+            finalized="", source_file="x.xlsx",
+        )
+        for i in (1, 2)
+    ]
+    out = tmp_path / "d.xlsx"
+    write_excel(out, drows, [], "2026-05")
+
+    wb = load_workbook(out)
+    ws = wb["差異一覧"]
+    assert MANUAL_INPUT_TEXT_COLUMNS == ["打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間"]
+    for header in MANUAL_INPUT_TEXT_COLUMNS:
+        col_idx = DIFF_COLUMNS.index(header) + 1
+        # 全データ行（人間判断プルダウンと同じ範囲 = 2行目〜1+件数行目）に設定される
+        for r_idx in (2, 3):
+            assert ws.cell(row=r_idx, column=col_idx).number_format == "@", (header, r_idx)
+        # ヘッダー行は対象外
+        assert ws.cell(row=1, column=col_idx).number_format == "General"
+    # 手入力列以外は文字列書式にしない（時刻・数値の見た目を変えない）
+    judge_col = DIFF_COLUMNS.index("人間判断") + 1
+    assert ws.cell(row=2, column=judge_col).number_format == "General"
+    # 既存のデータ検証（人間判断プルダウン）が壊れていないこと
+    dvs = ws.data_validations.dataValidation
+    assert len(dvs) == 1
+    assert dvs[0].formula1 == '"請求勤怠,jinjer勤怠,保留"'
+    judge_letter = ws.cell(row=1, column=judge_col).column_letter
+    assert str(dvs[0].sqref) == f"{judge_letter}2:{judge_letter}3"
+
+
 def test_recommend_judge_label_new_rule():
     """新ルール: コメントあり→jinjer勤怠 / 差分≧しきい値or片側欠落→保留 / それ以外→請求勤怠。"""
     # コメントなし & 差分がしきい値(10)未満 → 請求勤怠
