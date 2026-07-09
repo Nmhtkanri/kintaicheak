@@ -73,10 +73,14 @@ class Config:
     JINJER_BASE_URL = os.environ.get("JINJER_BASE_URL", "https://api.jinjer.biz")
 
     # 手順③ API直接投入（kintai-imports）
-    # executor = jinjer標準の完了通知メール宛先（勤怠管理者権限が必要）。
-    # 9999999（石橋・テストアカウント）のメールアドレスは管理部宛のため、
-    # 谷津さん・江成さんの両方に通知が届く（2026-07-09 谷津さん指定。SMTP実装不要）。
-    JINJER_IMPORT_EXECUTOR_ID = os.environ.get("JINJER_IMPORT_EXECUTOR_ID", "9999999")
+    # executor = jinjer標準の完了通知メール宛先。
+    # ⚠️ 明示指定できるのは「勤怠管理者権限ロール」を持つ社員番号のみ。
+    #    ロールが無い番号を指定すると POST は 200 でも予約がサイレント破棄される
+    #    （2026-07-09 実測: 9999999・2026007 とも現状ロール無しで破棄。
+    #      未指定ならマスタ扱いで通り、通知は 2018013 宛に届く）。
+    # 管理部メール（9999999）宛にしたい場合は、jinjer画面で 9999999 に
+    # 勤怠管理者ロールを付与してから .env に JINJER_IMPORT_EXECUTOR_ID=9999999 を設定する。
+    JINJER_IMPORT_EXECUTOR_ID = os.environ.get("JINJER_IMPORT_EXECUTOR_ID", "")
 
     # jinjer CSV カラムマッピング候補
     # ※先頭に置くほど優先度が高い（完全一致を試みたあと部分一致）

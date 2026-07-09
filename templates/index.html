@@ -287,7 +287,7 @@
                 <div class="hint" style="margin-top:4px">突合の打刻照合にも、差異一覧の集計列にも、この1本を使います（別CSVは不要）。</div>
             </label>
             <label>
-                jinjer 申請データ（打刻修正申請）CSV（任意）:
+                jinjer 申請データ（打刻修正申請）CSV<span style="color:#c00; font-weight:bold">（必須）</span>:
                 <input type="text" id="bc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
                 <div class="hint" style="margin-top:4px">指定すると「打刻修正時コメント」列に申請理由を併記します。空欄でもOK。</div>
@@ -378,6 +378,18 @@
             <a id="qe-download-link" href="#" class="btn btn-download" style="display:none; margin-top:10px">
                 📥 アップロード用CSVをダウンロード
             </a>
+            <div id="qe-api-area" style="display:none; margin-top:14px; padding-top:12px; border-top:1px dashed #bbb">
+                <div style="font-weight:bold">🚀 jinjerへAPI直接投入（画面アップロードの代わり）</div>
+                <p class="hint" style="margin:4px 0 8px">
+                    API（kintai-imports）で投入し、反映を1行ずつ自動検証します。休暇登録がある日の行は
+                    自動で除外して「手動対応リスト」（Excel）に載せます。
+                    完了通知メールの宛先は .env の JINJER_IMPORT_EXECUTOR_ID（勤怠管理者ロール必須・未設定ならマスタ扱い）。
+                </p>
+                <button type="button" class="btn btn-primary" id="qe-api-btn">🚀 APIでjinjerへ投入する</button>
+                <span id="qe-api-status" style="margin-left:12px; color:#666"></span>
+                <pre id="qe-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; border:1px solid #ddd; padding:8px; font-size:12px; margin-top:8px; white-space:pre-wrap"></pre>
+                <div id="qe-api-result" style="display:none; margin-top:8px; font-size:13px"></div>
+            </div>
             <div id="qe-warnings-area" style="display:none; margin-top:10px">
                 <div style="font-weight:bold; margin-bottom:4px">⚠️ 警告 (<span id="qe-warn-count">0</span> 件)</div>
                 <ul id="qe-warnings-list" style="margin:0; padding-left:20px; font-size:12px; max-height:160px; overflow:auto"></ul>
@@ -590,6 +602,13 @@
             } else {
                 dl.style.display = 'none';
             }
+            // 本実行で CSV ができたら API 直接投入ボタンを出す
+            qeApiCsvFilename = data.output_filename || null;
+            document.getElementById('qe-api-area').style.display = qeApiCsvFilename ? 'block' : 'none';
+            document.getElementById('qe-api-log').style.display = 'none';
+            document.getElementById('qe-api-log').textContent = '';
+            document.getElementById('qe-api-result').style.display = 'none';
+            document.getElementById('qe-api-status').textContent = '';
             const warnList = document.getElementById('qe-warnings-list');
             warnList.innerHTML = (data.warnings || []).map(w => '<li>' + w + '</li>').join('');
             document.getElementById('qe-warn-count').textContent = (data.warnings || []).length;
@@ -606,6 +625,65 @@
     }
     qeDryRunBtn.addEventListener('click', () => runQuickExport(false));
     qeExecuteBtn.addEventListener('click', () => runQuickExport(true));
+
+    // ----- 手順③ 後工程: jinjerへのAPI直接投入 -----
+    let qeApiCsvFilename = null;
+    const qeApiBtn = document.getElementById('qe-api-btn');
+    qeApiBtn.addEventListener('click', async () => {
+        if (!qeApiCsvFilename) return;
+        if (!confirm('生成済みのアップロード用CSVを jinjer へAPI投入します。\n' +
+                     '（休暇日の行は自動除外→手動対応リストに出力されます）\n\nよろしいですか？')) return;
+        qeApiBtn.disabled = true;
+        const statusEl = document.getElementById('qe-api-status');
+        const logEl = document.getElementById('qe-api-log');
+        const resultEl = document.getElementById('qe-api-result');
+        statusEl.textContent = '投入開始…';
+        logEl.style.display = 'block';
+        logEl.textContent = '';
+        resultEl.style.display = 'none';
+        try {
+            const fd = new FormData();
+            fd.append('csv_filename', qeApiCsvFilename);
+            fd.append('execute', '1');
+            const res = await fetch('/api_import', {method: 'POST', body: fd});
+            const data = await res.json();
+            if (!data.success){
+                showError('qe-error-area', data.errors || ['API投入の開始に失敗しました']);
+                statusEl.textContent = '';
+                qeApiBtn.disabled = false;
+                return;
+            }
+            const jobId = data.job_id;
+            statusEl.textContent = '投入中…（ステータスは20秒間隔で確認します）';
+            const timer = setInterval(async () => {
+                try {
+                    const sres = await fetch('/api_import_status/' + jobId);
+                    const s = await sres.json();
+                    if (!s.success){ return; }
+                    logEl.textContent = (s.log || []).join('\n');
+                    logEl.scrollTop = logEl.scrollHeight;
+                    if (s.done){
+                        clearInterval(timer);
+                        qeApiBtn.disabled = false;
+                        const r = s.result || {};
+                        statusEl.textContent = s.ok ? '✅ 完了（全行反映OK）' : '⚠️ 完了（要確認あり）';
+                        let html = `投入 ${r.submitted_rows ?? '-'} 行 ／ 反映OK ${r.verified_ok ?? '-'} ／ ` +
+                                   `NG ${r.verified_ng ?? '-'} ／ 手動対応 ${r.excluded_count ?? '-'} 件`;
+                        if (r.report_url){
+                            html += `<br><a class="btn btn-download" style="margin-top:6px" href="${r.report_url}">` +
+                                    '📥 投入結果レポート（手動対応リスト）をダウンロード</a>';
+                        }
+                        resultEl.innerHTML = html;
+                        resultEl.style.display = 'block';
+                    }
+                } catch (e) { /* ポーリング失敗は次回に任せる */ }
+            }, 3000);
+        } catch (e) {
+            showError('qe-error-area', ['通信エラー: ' + e.message]);
+            statusEl.textContent = '';
+            qeApiBtn.disabled = false;
+        }
+    });
 
     // ----- 経費チェック（テレワーク日数）-----
     const exRunBtn = document.getElementById('ex-run-btn');

@@ -35,10 +35,13 @@ from services.jinjer_schedule_csv_exporter import (
 )
 from services.multi_year_shift_parser import parse_structured_files
 
+import threading
+
 # 月次集約 MVP（quick_compare / quick_export）
 from pathlib import Path as _Path
 from quick_compare import run_quick_compare
 from quick_export import run_quick_export
+from services.kintai_import_runner import run_api_import
 from services.batch_runner import run_batch_compare
 from services.expense_check import run_telework_export
 
@@ -860,6 +863,9 @@ def route_quick_compare():
         errors.append("手順1で出力した勤怠突合結果xlsx、またはその保存フォルダのパスを入力してください")
     if not jinjer_dir_str:
         errors.append("jinjer 汎用データCSV、またはその保存フォルダのパスを入力してください")
+    if not application_csv_str:
+        errors.append("jinjer 申請データ（打刻修正申請）CSVのパスを入力してください"
+                      "（必須：打刻修正の申請理由を差異一覧に載せるため）")
     if not month_label:
         errors.append("対象月（YYYY-MM）を入力してください")
 
@@ -874,7 +880,7 @@ def route_quick_compare():
         errors.append(f"jinjer 汎用データCSVまたはフォルダが見つかりません: {jinjer_dir}")
     elif jinjer_dir and jinjer_dir.is_file() and jinjer_dir.suffix.lower() not in [".csv", ".xlsx"]:
         errors.append(f"jinjer 汎用データは .csv または .xlsx ファイルを指定してください: {jinjer_dir}")
-    # 申請データCSVは任意。指定された場合のみ存在チェック。
+    # 申請データCSVは必須（2026-07-09〜）。存在もチェックする。
     if application_csv and not application_csv.exists():
         errors.append(f"申請データCSVまたはフォルダが見つかりません: {application_csv}")
 
@@ -936,10 +942,12 @@ def route_batch_compare():
     フォーム:
       - timesheet_dir   : 請求勤怠フォルダ（または単一ファイル）の絶対パス
       - jinjer_dir      : jinjer 汎用データCSV（ファイル or フォルダ）
-      - application_csv : jinjer 申請データ（打刻修正申請）CSV（任意）
+      - application_csv : jinjer 申請データ（打刻修正申請）CSV（必須）
       - month           : YYYY-MM
       - output_filename : 任意
     手順1(突合)を内部で実行し、手順2(差異一覧＋トリアージ)まで一括で行う。
+    申請データCSVは打刻修正の「申請理由」を差異一覧に載せるために必須
+    （2026-07-09 谷津さん指定。入れ忘れると判断材料が欠けるため）。
     """
     timesheet_dir_str = _clean_path_input(request.form.get("timesheet_dir"))
     jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
@@ -957,6 +965,9 @@ def route_batch_compare():
         errors.append("請求勤怠フォルダ（またはファイル）のパスを入力してください")
     if not jinjer_dir_str:
         errors.append("jinjer 汎用データCSV（またはフォルダ）のパスを入力してください")
+    if not application_csv_str:
+        errors.append("jinjer 申請データ（打刻修正申請）CSVのパスを入力してください"
+                      "（必須：打刻修正の申請理由を差異一覧に載せるため）")
     if not month_label:
         errors.append("対象月（YYYY-MM）を入力してください")
 
@@ -1120,6 +1131,91 @@ def route_quick_export():
         payload["errors"] = [result.error] if result.error else ["CSV 生成に失敗しました"]
         return jsonify(payload), 500
     return jsonify(payload)
+
+
+# ----------------------------------------------------------------------
+# 手順③ 後工程: jinjer への API 直接投入（kintai-imports）
+#   画面の汎用データインポートがスケジュール列をサイレントに反映しない
+#   不具合(2026-07-09)の恒久回避。docs/PLAN_手順3_API直接投入.md 参照。
+#   投入はバッチ処理で数分かかるためスレッドで実行し、ジョブIDでポーリングする。
+#   jinjer側の同時予約は1件までのため、実行中ジョブがあれば新規投入を拒否する。
+# ----------------------------------------------------------------------
+_api_import_jobs: dict = {}
+_api_import_guard = threading.Lock()
+
+
+@app.route("/api_import", methods=["POST"])
+def route_api_import():
+    """quick_export で生成済みのアップロード用CSVを API で jinjer へ投入する。
+
+    フォーム:
+      - csv_filename : OUTPUT_FOLDER 内のアップロード用CSVファイル名
+      - execute      : "1" なら本投入、未指定/0 は dry-run（ガードと件数のみ）
+      - month        : 検証対象月 YYYY-MM（省略時はCSVから自動判定）
+    """
+    csv_filename = os.path.basename((request.form.get("csv_filename") or "").strip())
+    execute_flag = request.form.get("execute") == "1"
+    month = (request.form.get("month") or "").strip()
+
+    if not csv_filename:
+        return jsonify({"success": False, "errors": ["CSVファイル名が指定されていません"]}), 400
+    csv_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, csv_filename)))
+    if not csv_path.is_file():
+        return jsonify({"success": False,
+                        "errors": [f"アップロード用CSVが見つかりません: {csv_filename}。先に手順③の本実行でCSVを生成してください"]}), 400
+
+    with _api_import_guard:
+        if any(not j["done"] for j in _api_import_jobs.values()):
+            return jsonify({"success": False,
+                            "errors": ["別のAPI投入が実行中です（jinjer側も同時予約1件の制限があります）。完了を待ってください"]}), 409
+        job_id = uuid.uuid4().hex
+        job = {"done": False, "ok": False, "log": [], "result": None}
+        _api_import_jobs[job_id] = job
+
+    def _worker():
+        try:
+            r = run_api_import(
+                upload_csv=csv_path,
+                output_dir=_Path(Config.OUTPUT_FOLDER),
+                executor_id=Config.JINJER_IMPORT_EXECUTOR_ID,
+                dry_run=not execute_flag,
+                month=month,
+                log_func=lambda m: job["log"].append(m),
+            )
+            report_name = os.path.basename(r.report_path) if r.report_path else ""
+            job["ok"] = r.ok
+            job["result"] = {
+                "dry_run": r.dry_run,
+                "total_rows": r.total_rows,
+                "submitted_rows": r.submitted_rows,
+                "excluded_count": len(r.excluded),
+                "verified_ok": r.verified_ok,
+                "verified_ng": r.verified_ng,
+                "report_url": f"/download/{report_name}" if report_name else None,
+            }
+        except Exception as e:  # noqa: BLE001 — ジョブ内の失敗はログで返す
+            logger.exception("api_import failed")
+            job["log"].append(f"[ERROR] {e}")
+        finally:
+            job["done"] = True
+
+    threading.Thread(target=_worker, daemon=True).start()
+    logger.info("api_import job %s 開始 (csv=%s execute=%s)", job_id, csv_filename, execute_flag)
+    return jsonify({"success": True, "job_id": job_id})
+
+
+@app.route("/api_import_status/<job_id>")
+def route_api_import_status(job_id):
+    job = _api_import_jobs.get(job_id)
+    if not job:
+        return jsonify({"success": False, "errors": ["ジョブが見つかりません"]}), 404
+    return jsonify({
+        "success": True,
+        "done": job["done"],
+        "ok": job["ok"],
+        "log": job["log"][-200:],
+        "result": job["result"],
+    })
 
 
 @app.route("/expense_telework", methods=["POST"])

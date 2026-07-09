@@ -272,8 +272,10 @@ def run_api_import(
         w.writerows(chunk)
         csv_bytes = buf.getvalue().encode("cp932")
         file_name = f"API投入_{month.replace('-', '')}_{ts}_{n}.csv"
-        log(f"投入 {n}/{len(chunks)}: {file_name} （{len(chunk)}行, {len(csv_bytes):,} bytes）")
-        cli.post_kintai_import(csv_bytes, file_name, executor_id=executor_id or None)
+        log(f"投入 {n}/{len(chunks)}: {file_name} （{len(chunk)}行, {len(csv_bytes):,} bytes）"
+            f" executor={executor_id or '(未指定=マスタ)'}")
+        resp = cli.post_kintai_import(csv_bytes, file_name, executor_id=executor_id or None)
+        log(f"  POST応答: executor={resp.get('executor')} type={resp.get('type')}")
 
         status = _poll_status(cli, file_name, log)
         result.import_statuses.append(status)
@@ -338,15 +340,30 @@ def run_api_import(
 
 
 def _poll_status(cli: JinjerClient, file_name: str, log) -> str:
-    """インポートステータスを確定までポーリングする。'1'=成功 '2'=失敗 ''=タイムアウト"""
+    """インポートステータスを確定までポーリングする。'1'=成功 '2'=失敗 ''=タイムアウト
+
+    POSTが200でも、executor に勤怠管理者権限が無い場合などは予約がキューに
+    現れないまま破棄されることがある（2026-07-09 executor=9999999 で実測）。
+    キューに一度も現れないまま NOT_SEEN_LIMIT 回経過したら早期に打ち切る。
+    """
     label = {"0": "予約", "1": "成功", "2": "失敗"}
+    NOT_SEEN_LIMIT = 6  # 20秒×6=約2分キューに現れなければ異常とみなす
+    not_seen = 0
+    seen_once = False
     deadline = time.time() + POLL_MAX_SEC
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL_SEC)
         item = cli.find_kintai_import(file_name)
         if not item:
+            not_seen += 1
             log("  （キューに未反映…再確認）")
+            if not seen_once and not_seen >= NOT_SEEN_LIMIT:
+                log("  [ERROR] 投入予約がキューに現れません。executor の社員番号に"
+                    "勤怠管理者権限が無い可能性があります（--executor で管理者の"
+                    "社員番号を指定して再実行してください）")
+                return ""
             continue
+        seen_once = True
         status = str(item.get("status") or "")
         log(f"  status={status}({label.get(status, '?')}) updated={item.get('updated_at')}")
         if status in ("1", "2"):
