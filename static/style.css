@@ -199,6 +199,10 @@ body {
     transition: background 0.2s, opacity 0.2s;
 }
 .btn:hover { opacity: 0.85; }
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
 .btn-primary {
     background: #2980b9;
     color: #fff;

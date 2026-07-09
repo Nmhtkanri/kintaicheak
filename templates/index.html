@@ -329,13 +329,15 @@
             <div>
                 <div class="step-number">2</div>
                 <div class="step-copy">
-                    <div class="section-title">アップロード用CSVを作る</div>
-                    <p class="hint">差異一覧で承認・却下・保留を入力した後、jinjerに戻すCSVを生成します。</p>
+                    <div class="section-title">アップロード用CSVを作る → APIでjinjerへ投入</div>
+                    <p class="hint">差異一覧で承認・却下・保留を入力した後、jinjerに戻すCSVを生成し、そのままAPIで投入まで行えます。</p>
                 </div>
             </div>
         </div>
         <p class="hint" style="padding:0 14px">
-            一発生成で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値だけ汎用データへ反映します。
+            一発生成で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値だけ汎用データへ反映します。<br>
+            <b>流れ: ① 本実行（CSV出力） → ② 下の「🚀 APIでjinjerへ投入する」でそのまま投入・反映検証。</b>
+            jinjer画面での手動アップロードは不要です（CSVは控え・監査用にダウンロードも可能）。
         </p>
         <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
             <label>
@@ -378,22 +380,23 @@
             <a id="qe-download-link" href="#" class="btn btn-download" style="display:none; margin-top:10px">
                 📥 アップロード用CSVをダウンロード
             </a>
-            <div id="qe-api-area" style="display:none; margin-top:14px; padding-top:12px; border-top:1px dashed #bbb">
-                <div style="font-weight:bold">🚀 jinjerへAPI直接投入（画面アップロードの代わり）</div>
-                <p class="hint" style="margin:4px 0 8px">
-                    API（kintai-imports）で投入し、反映を1行ずつ自動検証します。休暇登録がある日の行は
-                    自動で除外して「手動対応リスト」（Excel）に載せます。
-                    完了通知メールの宛先は .env の JINJER_IMPORT_EXECUTOR_ID（勤怠管理者ロール必須・未設定ならマスタ扱い）。
-                </p>
-                <button type="button" class="btn btn-primary" id="qe-api-btn">🚀 APIでjinjerへ投入する</button>
-                <span id="qe-api-status" style="margin-left:12px; color:#666"></span>
-                <pre id="qe-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; border:1px solid #ddd; padding:8px; font-size:12px; margin-top:8px; white-space:pre-wrap"></pre>
-                <div id="qe-api-result" style="display:none; margin-top:8px; font-size:13px"></div>
-            </div>
             <div id="qe-warnings-area" style="display:none; margin-top:10px">
                 <div style="font-weight:bold; margin-bottom:4px">⚠️ 警告 (<span id="qe-warn-count">0</span> 件)</div>
                 <ul id="qe-warnings-list" style="margin:0; padding-left:20px; font-size:12px; max-height:160px; overflow:auto"></ul>
             </div>
+        </div>
+        <div id="qe-api-area" style="margin:8px 14px 12px; padding:12px; border:1px solid #cfe2ff; border-radius:6px; background:#f6faff">
+            <div style="font-weight:bold">🚀 jinjerへAPI直接投入（画面アップロードの代わり）</div>
+            <p class="hint" style="margin:4px 0 8px">
+                本実行で生成したCSVを API（kintai-imports）で投入し、反映を1行ずつ自動検証します。
+                休暇登録がある日の行は自動で除外して「手動対応リスト」（Excel）に載せます。
+                完了通知メールの宛先は .env の JINJER_IMPORT_EXECUTOR_ID（勤怠管理者ロール必須・未設定ならマスタ扱い）。
+            </p>
+            <button type="button" class="btn btn-primary" id="qe-api-btn" disabled>🚀 APIでjinjerへ投入する</button>
+            <span id="qe-api-hint" style="margin-left:10px; color:#888; font-size:12px">← 先に「📤 本実行（CSV出力）」を行うと押せるようになります</span>
+            <span id="qe-api-status" style="margin-left:12px; color:#666"></span>
+            <pre id="qe-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; border:1px solid #ddd; padding:8px; font-size:12px; margin-top:8px; white-space:pre-wrap"></pre>
+            <div id="qe-api-result" style="display:none; margin-top:8px; font-size:13px"></div>
         </div>
         <div id="qe-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
@@ -602,9 +605,10 @@
             } else {
                 dl.style.display = 'none';
             }
-            // 本実行で CSV ができたら API 直接投入ボタンを出す
+            // 本実行で CSV ができたら API 直接投入ボタンを有効化する
             qeApiCsvFilename = data.output_filename || null;
-            document.getElementById('qe-api-area').style.display = qeApiCsvFilename ? 'block' : 'none';
+            qeApiBtn.disabled = !qeApiCsvFilename;
+            document.getElementById('qe-api-hint').style.display = qeApiCsvFilename ? 'none' : 'inline';
             document.getElementById('qe-api-log').style.display = 'none';
             document.getElementById('qe-api-log').textContent = '';
             document.getElementById('qe-api-result').style.display = 'none';
