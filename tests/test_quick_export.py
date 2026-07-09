@@ -776,6 +776,84 @@ def test_excel_saved_csv_seconds_are_normalized(tmp_path):
     assert row["復帰1"] == "25:45"
 
 
+def test_timedelta_to_hhmm():
+    """Excelの経過時間セル（openpyxlがtimedeltaで返す）を H:MM（24時超あり）へ変換する。"""
+    from datetime import timedelta
+
+    from quick_export import timedelta_to_hhmm
+    assert timedelta_to_hhmm(timedelta(days=1, seconds=25200)) == "31:00"  # 31:00 と入力したセル
+    assert timedelta_to_hhmm(timedelta(hours=30)) == "30:00"
+    assert timedelta_to_hhmm(timedelta(hours=33, minutes=30)) == "33:30"
+    assert timedelta_to_hhmm(timedelta(hours=7)) == "7:00"     # 24時未満も同じ表記
+    assert timedelta_to_hhmm(timedelta(minutes=90)) == "1:30"
+    assert timedelta_to_hhmm(timedelta(0)) == "0:00"
+    assert timedelta_to_hhmm(timedelta(hours=31, seconds=40)) == "31:01"  # 30秒以上は分へ繰り上げ
+
+
+def test_clean_excel_text_normalizes_excel_time_types():
+    """同じ列でも入力のされ方でセル型が変わる（timedelta/time/文字列/数値）が、
+    どの型でも jinjer が受ける表記に揃うこと。"""
+    from datetime import datetime as dt, time as t, timedelta
+
+    from quick_export import clean_excel_text
+    assert clean_excel_text(timedelta(days=1, seconds=25200)) == "31:00"
+    assert clean_excel_text(t(7, 0)) == "7:00"                 # h:mm セル（24時未満）
+    assert clean_excel_text(dt(1900, 1, 1, 6, 0)) == "6:00"    # datetimeに化けたセル
+    assert clean_excel_text("30:00") == "30:00"                # 文字列はそのまま
+    assert clean_excel_text(1) == "1"    # 数値は時刻に解釈しない（書込時に警告される）
+    assert clean_excel_text(None) == ""
+
+
+def test_run_quick_export_normalizes_timedelta_manual_cells(tmp_path):
+    """24時超の手入力時刻をExcelが経過時間(timedelta)として保存しても H:MM で転記する。
+
+    加藤英人さん 2026-06 の実例: 手入力復帰1 に 31:00 と入力したセルが [h]:mm:ss の
+    経過時間になり、'1 day, 7:00:00' のまま出力されて jinjer が
+    「「復帰1」 が正しくありません」で弾いた（2026-07-09 実測・8日分）。
+    同じ行の 手入力休憩時間 には数値の 1（1時間のつもり）が入っており、こちらは
+    時刻に自動解釈せず '1' のまま出力して警告する。
+    """
+    from datetime import timedelta
+
+    import openpyxl
+
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+
+    with open(jinjer_path, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(HEADERS)
+        # 夜勤 20:00-翌9:01（jinjer側の退勤打刻ずれ）
+        w.writerow(["加藤 英人", "2024050", "2026/6/4", "20:00", "9:01", "", "", "0:00", "FALSE"])
+
+    # pd.DataFrame.to_excel ではセル型を制御できないため openpyxl で直接作る。
+    # 実ファイル(e-staffing差異一覧_谷津.xlsx)と同じセル型:
+    #   手入力休憩1=文字列 / 手入力復帰1=経過時間timedelta([h]:mm:ss) / 手入力休憩時間=数値
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "差異一覧"
+    cols = ["行ID", "従業員ID", "氏名", "対象日付", "差異種別", "請求勤怠値",
+            "自動修正提案値", "人間判断", "手入力休憩1", "手入力復帰1", "手入力休憩時間"]
+    ws.append(cols)
+    ws.append([1, "2024050", "加藤 英人", "2026-06-04", "退勤", "32:30",
+               "jinjer勤怠", "請求勤怠", "30:00", timedelta(days=1, seconds=25200), 1])
+    ws.cell(row=2, column=cols.index("手入力復帰1") + 1).number_format = "[h]:mm:ss"
+    wb.save(diff_path)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    row = _read_output_row(output_path)
+    assert row["退勤1"] == "32:30"
+    assert row["休憩1"] == "30:00"
+    assert row["復帰1"] == "31:00"  # '1 day, 7:00:00' にならない
+    # 数値 1 はそのまま出力し、警告で差異一覧側の修正を促す
+    # （'30' を30分のつもりで入れた場合に30時間と取り違えないよう自動解釈しない）
+    assert row["休憩時間"] == "1"
+    assert any("手入力休憩時間" in w and "時刻形式" in w for w in result.stats.warnings)
+
+
 def test_iso_dates_normalized_to_jinjer_format(tmp_path):
     """ISO形式の年月日(2026-06-01)をjinjerインポート形式(2026/6/1)へ正規化する。
 
