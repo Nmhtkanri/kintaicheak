@@ -92,6 +92,13 @@ DIFF_COLUMNS = [
     "実績確定状況",
 ]
 
+# 手入力欄（時刻を手で打つ列）。差異一覧の生成時に文字列書式('@')を事前設定する。
+# 既定の書式のままだと Excel が「31:00」を経過時間([h]:mm:ss)、「7:00」を時刻型へ
+# 自動変換して保存し、openpyxl 経由で timedelta/time となって quick_export の転記が
+# 壊れる（2026-07-09 の事故。quick_export 側の正規化と二重の防御）。
+# 文字列書式なら入力値がそのまま保存され、入力者にも「31:00」のまま見える。
+MANUAL_INPUT_TEXT_COLUMNS = ["打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間"]
+
 # 汎用データから転記する予定・有休 列のキャノニカル名 → (候補ヘッダー, 完全一致のみか)
 # 有休系は完全一致のみ（部分一致だと「有休」が「AM有休」「PM有休」を誤ヒットするため）。
 JINJER_EXTRA_COLUMNS: dict[str, tuple[list[str], bool]] = {
@@ -1345,6 +1352,13 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         tfill = TRIAGE_FILL.get(drow.triage)
         if tfill:
             ws.cell(row=r_idx, column=DIFF_COLUMNS.index("確認区分") + 1).fill = tfill
+
+    # 手入力列に文字列書式('@')を事前設定（人間判断プルダウンと同じデータ行範囲）。
+    # 理由は MANUAL_INPUT_TEXT_COLUMNS 定義部のコメント参照（Excel の時刻自動変換防止）。
+    for header in MANUAL_INPUT_TEXT_COLUMNS:
+        col_idx = DIFF_COLUMNS.index(header) + 1
+        for r_idx in range(2, 2 + len(diff_rows)):
+            ws.cell(row=r_idx, column=col_idx).number_format = "@"
 
     # データ検証プルダウン: 人間判断
     judge_col_letter = get_column_letter(DIFF_COLUMNS.index("人間判断") + 1)
