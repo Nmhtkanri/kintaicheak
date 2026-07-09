@@ -26,6 +26,17 @@ class JinjerAPIError(Exception):
     """jinjer API 関連の例外"""
 
 
+def _strip_seconds(v) -> str:
+    """'09:15:00' → '9:15'。24時超（'33:30:00'）もそのまま扱う。不正値は空文字。"""
+    import re as _re
+
+    s = str(v or "").strip()
+    m = _re.match(r"^(\d{1,3}):(\d{2})(?::\d{2})?$", s)
+    if not m:
+        return ""
+    return f"{int(m.group(1))}:{m.group(2)}"
+
+
 class JinjerClient:
     """jinjer API への薄いクライアント。
 
@@ -267,6 +278,177 @@ class JinjerClient:
 
         logger.info("jinjer 通勤情報取得: %d 件", len(all_items))
         return all_items
+
+    # ------------------------------------------------------------------
+    # 勤怠インポート（汎用データCSVのAPI投入）と日別スケジュール
+    #   背景: 画面の汎用データインポートがスケジュール列をサイレントに
+    #   反映しない不具合(2026-07-09)を、POST /v1/kintai-imports で回避できる
+    #   ことを実証済み（docs/PLAN_手順3_API直接投入.md）。
+    # ------------------------------------------------------------------
+    def post_kintai_import(
+        self, csv_bytes: bytes, file_name: str, executor_id: str | None = None
+    ) -> dict:
+        """汎用データCSVを `POST /v1/kintai-imports`（種別5=新規登録・編集）で投入予約する。
+
+        Args:
+            csv_bytes: Shift_JIS(CP932) でエンコード済みの汎用データCSV（5000行以内）
+            file_name: インポートファイル名（70字以内。jinjer側で一意IDが付与される）
+            executor_id: 実行者の社員番号（勤怠管理者権限が必要。完了通知メールの宛先。
+                         未指定時はマスタアカウント扱い）
+
+        Returns:
+            レスポンス JSON の ``data``（``executor`` / ``type`` を含む）
+
+        Raises:
+            JinjerAPIError: 認証失敗・投入予約の失敗（同時予約は1件までの制限あり）
+        """
+        import base64 as _base64
+
+        headers = dict(self._auth_headers())
+        body: dict[str, Any] = {
+            "type": {"id": "5"},
+            "input_file": {
+                "name": file_name,
+                "encoded_string": _base64.b64encode(csv_bytes).decode("ascii"),
+            },
+        }
+        if executor_id:
+            body["executor"] = {"id": str(executor_id)}
+        try:
+            r = requests.post(
+                f"{self.base_url}/v1/kintai-imports",
+                headers=headers, json=body, timeout=120,
+            )
+        except requests.RequestException as e:
+            raise JinjerAPIError(f"勤怠インポートの投入に失敗: {e}") from e
+        if r.status_code != 200:
+            raise JinjerAPIError(
+                f"勤怠インポートの投入に失敗 (status={r.status_code}): {r.text[:300]}"
+            )
+        logger.info("kintai-imports 投入予約 OK: %s", file_name)
+        return r.json().get("data") or {}
+
+    def find_kintai_import(self, file_name: str) -> dict | None:
+        """`GET /v1/kintai-imports` を全ページ走査し、ファイル名が一致する最新レコードを返す。
+
+        jinjer は登録時にファイル名へ一意IDを付与するため、拡張子を除いた
+        ベース名の部分一致で照合する。見つからなければ None。
+        ``status``: "0"=予約 / "1"=成功 / "2"=失敗。
+        """
+        base_name = file_name.rsplit(".", 1)[0]
+        headers = self._auth_headers()
+        found: dict | None = None
+        page = 1
+        while page <= 100:
+            try:
+                r = requests.get(
+                    f"{self.base_url}/v1/kintai-imports",
+                    headers=headers, params={"page": page}, timeout=30,
+                )
+            except requests.RequestException as e:
+                raise JinjerAPIError(f"勤怠インポート状況の取得に失敗: {e}") from e
+            if r.status_code != 200:
+                raise JinjerAPIError(
+                    f"勤怠インポート状況の取得に失敗 (status={r.status_code})"
+                )
+            items = r.json().get("data", []) or []
+            if not items:
+                break
+            for item in items:
+                name = str((item.get("input_file") or {}).get("name") or "")
+                if base_name in name:
+                    found = item  # 後のページほど新しい想定で上書き
+            page += 1
+            _time.sleep(0.1)
+        return found
+
+    def get_work_schedules(self, employee_id: str, month: str) -> dict[str, dict]:
+        """`/v1/employees/work-schedules` から日別スケジュールを取得する。
+
+        Returns:
+            ``{date_iso: {"start": "9:00", "end": "17:30", "breaks": [("12:00","13:00"), ...],
+                          "store": 打刻グループ名}}``
+            夜勤は 24時超表記（例 "33:30"）のまま返る。スケジュールがない日はキーごと無い。
+        """
+        headers = self._auth_headers()
+        try:
+            r = requests.get(
+                f"{self.base_url}/v1/employees/work-schedules",
+                headers=headers,
+                params={"employee-id": str(employee_id), "month": month},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise JinjerAPIError(f"スケジュール取得に失敗 emp={employee_id}: {e}") from e
+        result: dict[str, dict] = {}
+        if r.status_code != 200:
+            logger.warning("work-schedules 取得失敗 emp=%s status=%s", employee_id, r.status_code)
+            return result
+        data = r.json().get("data") or {}
+        for w in data.get("work_schedules", []) or []:
+            d = str(w.get("date") or "").strip()
+            if not d:
+                continue
+            sched = w.get("work_schedule") or {}
+            breaks = []
+            for b in w.get("break_schedules", []) or []:
+                bs = _strip_seconds(b.get("start"))
+                be = _strip_seconds(b.get("end"))
+                if bs and be:
+                    breaks.append((bs, be))
+            result[d] = {
+                "start": _strip_seconds(sched.get("start")),
+                "end": _strip_seconds(sched.get("end")),
+                "breaks": breaks,
+                "store": str((w.get("store") or {}).get("name") or ""),
+            }
+        return result
+
+    def get_attendance_times(self, employee_id: str, month: str) -> dict[str, dict]:
+        """`/v1/employees/attendances` から日別の出退勤時刻を取得する。
+
+        Returns:
+            ``{date_iso: {"in": "16:45", "out": "33:30", "absent": bool}}``
+            退勤が翌日以降の場合は 24時超表記へ補正する。重複レコードは先勝ちで除去。
+        """
+        import re as _re
+        from datetime import date as _date
+
+        headers = self._auth_headers()
+        try:
+            r = requests.get(
+                f"{self.base_url}/v1/employees/attendances",
+                headers=headers,
+                params={"employee-id": str(employee_id), "month": month},
+                timeout=60,
+            )
+        except requests.RequestException as e:
+            raise JinjerAPIError(f"勤怠実績取得に失敗 emp={employee_id}: {e}") from e
+        result: dict[str, dict] = {}
+        if r.status_code != 200:
+            logger.warning("attendances 取得失敗 emp=%s status=%s", employee_id, r.status_code)
+            return result
+        data = r.json().get("data") or {}
+
+        def _ts_to_time(ts: str, base_iso: str) -> str:
+            m = _re.match(r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})", (ts or "").strip())
+            if not m:
+                return ""
+            dt_date = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            base = _date.fromisoformat(base_iso)
+            hh = int(m.group(4)) + (dt_date - base).days * 24
+            return f"{hh}:{m.group(5)}"
+
+        for day in data.get("attendances", []) or []:
+            d = str(day.get("date") or "").strip()
+            if not d or d in result:  # 同一日の完全同一レコード二重返却対策
+                continue
+            result[d] = {
+                "in": _ts_to_time(day.get("attended_at") or "", d),
+                "out": _ts_to_time(day.get("left_at") or "", d),
+                "absent": bool(day.get("is_absent")),
+            }
+        return result
 
     # ------------------------------------------------------------------
     # 日次勤怠の打刻コメント（打刻修正申請の理由など）

@@ -72,6 +72,12 @@ class Config:
     JINJER_SECRET_KEY = os.environ.get("JINJER_SECRET_KEY")
     JINJER_BASE_URL = os.environ.get("JINJER_BASE_URL", "https://api.jinjer.biz")
 
+    # 手順③ API直接投入（kintai-imports）
+    # executor = jinjer標準の完了通知メール宛先（勤怠管理者権限が必要）。
+    # 9999999（石橋・テストアカウント）のメールアドレスは管理部宛のため、
+    # 谷津さん・江成さんの両方に通知が届く（2026-07-09 谷津さん指定。SMTP実装不要）。
+    JINJER_IMPORT_EXECUTOR_ID = os.environ.get("JINJER_IMPORT_EXECUTOR_ID", "9999999")
+
     # jinjer CSV カラムマッピング候補
     # ※先頭に置くほど優先度が高い（完全一致を試みたあと部分一致）
     JINJER_COLUMN_MAPPING = {
