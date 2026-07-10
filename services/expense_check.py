@@ -378,6 +378,143 @@ def add_commute_sheet(wb: Workbook, commute_rows: list[dict]) -> None:
 
 
 # ----------------------------------------------------------------------
+# 通勤費申請なしリスト（手動Excelをインポートして自動整備）
+# ----------------------------------------------------------------------
+
+NO_COMMUTE_SHEET = "通勤費申請なし"
+NO_COMMUTE_HEADERS = ["社員番号", "氏名", "通勤費", "区分", "利用交通機関(参考)", "備考"]
+# 支給間隔 → 区分のマッピング。毎月＝定期代支給、毎日＝出社日ごとの実費。
+# それ以外（3ヶ月・6ヶ月等）は空欄にして目視判断に委ねる。
+_INTERVAL_TO_KUBUN = {"毎月": "通勤定期代", "毎日": "通勤費"}
+
+
+def _norm_emp_id(v) -> str:
+    """社員番号を文字列に正規化する（Excelの数値セル 2026013.0 → '2026013'）。"""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, int):
+        return str(v)
+    return str(v).strip()
+
+
+def read_no_commute_list(path: "str | Path") -> list[dict]:
+    """手動整備の「通勤費申請なし」Excelブックを読み [{id, name}] を返す。
+
+    シート名「通勤費申請なし」があればそれを、無ければ先頭シートを使う。
+    A列=社員番号・B列=氏名。「社員番号」ヘッダー行・空行・重複IDはスキップする。
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb[NO_COMMUTE_SHEET] if NO_COMMUTE_SHEET in wb.sheetnames else wb.worksheets[0]
+        entries: list[dict] = []
+        seen: set[str] = set()
+        for row in ws.iter_rows(values_only=True):
+            emp = _norm_emp_id(row[0] if row else None)
+            if not emp or emp == "社員番号" or emp in seen:
+                continue
+            seen.add(emp)
+            name = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            entries.append({"id": emp, "name": name})
+        return entries
+    finally:
+        wb.close()
+
+
+def build_no_commute_rows(
+    entries: list[dict],
+    summary_rows: list[dict],
+    commute_rows: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """「通勤費申請なし」リストを自動整備する（経費チェックモードの改修案 STEP2/3）。
+
+    STEP2: 出勤日数=テレワーク日数（＝出社日数0＝完全在宅）の社員をリストから除外。
+           ただし出勤0（テレワーク0＝出社0の両方ゼロ）は実質非該当のため残す。
+    STEP3: 通勤費の経路行から支給金額を合算し（複数経路は合算）、
+           先頭経路（経路No最小）の支給間隔を 毎月→通勤定期代／毎日→通勤費 に
+           マッピングする。通勤費未登録は金額0・区分空欄、金額0登録ありは区分のみ入る。
+
+    Returns:
+        (整備済み行, 除外した行)。行キー: id / name / amount / kubun / kikan / remark
+    """
+    att = {str(r["id"]).strip(): (r["work_days"], len(r["telework_days"])) for r in summary_rows}
+    names = {str(r["id"]).strip(): r["name"] for r in summary_rows}
+    routes_by_emp: dict[str, list[dict]] = {}
+    for c in commute_rows:
+        routes_by_emp.setdefault(_norm_emp_id(c.get("社員番号")), []).append(c)
+
+    kept: list[dict] = []
+    removed: list[dict] = []
+    for e in entries:
+        emp = e["id"]
+        name = e["name"] or names.get(emp, "")
+        work_tw = att.get(emp)
+        if work_tw is not None:
+            work, tw = work_tw
+            if work > 0 and work == tw:
+                removed.append({"id": emp, "name": name})
+                continue
+            remark = "出勤0" if work == 0 else ""
+        else:
+            remark = "勤怠データなし"
+
+        routes = sorted(routes_by_emp.get(emp, []), key=lambda c: c.get("経路No") or 0)
+        amount = 0
+        for c in routes:
+            v = c.get("支給金額")
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                amount += int(v)
+        interval = str(routes[0].get("支給間隔") or "").strip() if routes else ""
+        kept.append({
+            "id": emp,
+            "name": name,
+            "amount": amount,
+            "kubun": _INTERVAL_TO_KUBUN.get(interval, ""),
+            "kikan": str(routes[0].get("利用交通機関") or "") if routes else "",
+            "remark": remark,
+        })
+    return kept, removed
+
+
+def add_no_commute_sheet(wb: Workbook, rows: list[dict]) -> None:
+    """wb に整備済み「通勤費申請なし」シートを追加する。"""
+    header_font = Font(name=FONT, bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", start_color="C55A11")
+    body_font = Font(name=FONT)
+    right = Alignment(horizontal="right")
+
+    ws = wb.create_sheet(NO_COMMUTE_SHEET)
+    ws.append(NO_COMMUTE_HEADERS)
+    for r in rows:
+        ws.append([r["id"], r["name"], r["amount"], r["kubun"], r["kikan"], r["remark"]])
+    n = len(rows)
+    if n:
+        total_row = n + 2
+        ws.cell(row=total_row, column=2, value="合計").font = Font(name=FONT, bold=True)
+        c = ws.cell(row=total_row, column=3, value=f"=SUM(C2:C{n + 1})")
+        c.font = Font(name=FONT, bold=True)
+        c.alignment = right
+
+    for col, width in zip("ABCDEF", [12, 18, 12, 14, 16, 16]):
+        ws.column_dimensions[col].width = width
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+    for row in ws.iter_rows(min_row=2, max_row=max(n + 1, 2)):
+        for cell in row:
+            if cell.font.bold is not True:
+                cell.font = body_font
+            if cell.column == 3:
+                cell.alignment = right
+    ws.freeze_panes = "A2"
+    if n:
+        ws.auto_filter.ref = f"A1:F{n + 1}"
+
+
+# ----------------------------------------------------------------------
 # 従業員フィルタ連動ビュー（Excel 365 の FILTER で全シート連動）
 # ----------------------------------------------------------------------
 
@@ -594,6 +731,8 @@ class TeleworkResult:
     telework_total: int = 0
     no_data_count: int = 0
     commute_count: int = 0
+    no_commute_kept: int = 0
+    no_commute_removed: int = 0
     error: str = ""
     logs: list[str] = field(default_factory=list)
 
@@ -604,6 +743,7 @@ def run_telework_export(
     log_func=print,
     limit: int | None = None,
     commute_csv: "str | Path | None" = None,
+    no_commute_xlsx: "str | Path | None" = None,
 ) -> TeleworkResult:
     """指定月のテレワーク日数・出社日数を集計して Excel を出力する。
 
@@ -611,6 +751,9 @@ def run_telework_export(
     limit: 動作確認用に先頭 N 名だけ処理する（本番は None）。
     commute_csv: jinjer「人事データ出力（通勤費）」CSV のパス（任意）。指定すると
                  同じブックに「通勤費」シートを追加する。
+    no_commute_xlsx: 手動整備の「通勤費申請なし」リスト Excel のパス（任意）。
+                 指定すると完全在宅者を除外し通勤費・区分を転記した
+                 「通勤費申請なし」シートを同じブックに追加する。
     """
     result = TeleworkResult(ok=False, output_path=output_path, month=month)
 
@@ -656,6 +799,7 @@ def run_telework_export(
     wb = Workbook()
     _build_telework_sheets(wb, month, rows)
     commute_count = 0
+    commute_rows: list[dict] = []
     try:
         if commute_csv:
             commute_rows = read_commute_csv(commute_csv)
@@ -670,6 +814,26 @@ def run_telework_export(
     except Exception as e:
         # 通勤費が取れなくてもテレワーク集計は出す
         log_func(f"[warn] 通勤費シートの作成に失敗（スキップ）: {e}")
+        commute_rows = []
+
+    # 通勤費申請なしリスト（手動Excel）を読み込み、整備済みシートを追加
+    if no_commute_xlsx:
+        try:
+            entries = read_no_commute_list(no_commute_xlsx)
+            kept, removed = build_no_commute_rows(entries, rows, commute_rows)
+            add_no_commute_sheet(wb, kept)
+            result.no_commute_kept = len(kept)
+            result.no_commute_removed = len(removed)
+            log_func(
+                f"[info] 通勤費申請なしリスト: {len(entries)} 名読込 → "
+                f"完全在宅 {len(removed)} 名を除外 / {len(kept)} 名を整備"
+            )
+            if removed:
+                log_func("[info] 除外（完全在宅）: " + "、".join(
+                    f"{r['id']} {r['name']}".strip() for r in removed))
+        except Exception as e:
+            # リストが読めなくてもテレワーク集計・通勤費は出す
+            log_func(f"[warn] 通勤費申請なしシートの作成に失敗（スキップ）: {e}")
 
     # 従業員選択で全シート連動するビューを追加（サマリのプルダウン＋(選択者)シート）
     try:

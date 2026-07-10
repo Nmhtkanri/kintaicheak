@@ -1225,11 +1225,14 @@ def route_expense_telework():
     フォーム:
       - month           : YYYY-MM
       - output_filename : 任意
+      - no_commute_xlsx : 任意。手動整備の「通勤費申請なし」リストExcelのパス。
+                          指定すると整備済み「通勤費申請なし」シートを追加する。
     在籍者全員の勤怠を1名ずつ取得するため数分かかる。
     """
     month_label = (request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
     commute_csv_str = _clean_path_input(request.form.get("commute_csv"))
+    no_commute_str = _clean_path_input(request.form.get("no_commute_xlsx"))
 
     errors = []
     if not re.fullmatch(r"\d{4}-\d{2}", month_label):
@@ -1237,6 +1240,9 @@ def route_expense_telework():
     commute_csv = _Path(commute_csv_str) if commute_csv_str else None
     if commute_csv and not commute_csv.exists():
         errors.append(f"通勤費CSVが見つかりません: {commute_csv}")
+    no_commute_xlsx = _Path(no_commute_str) if no_commute_str else None
+    if no_commute_xlsx and not no_commute_xlsx.exists():
+        errors.append(f"通勤費申請なしリストが見つかりません: {no_commute_xlsx}")
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
 
@@ -1253,7 +1259,8 @@ def route_expense_telework():
 
     try:
         result = run_telework_export(
-            month=month_label, output_path=output_path, log_func=_log, commute_csv=commute_csv
+            month=month_label, output_path=output_path, log_func=_log,
+            commute_csv=commute_csv, no_commute_xlsx=no_commute_xlsx,
         )
     except Exception as e:
         logger.exception("expense_telework failed")
@@ -1268,6 +1275,8 @@ def route_expense_telework():
             "telework_total": result.telework_total,
             "no_data_count": result.no_data_count,
             "commute_count": result.commute_count,
+            "no_commute_kept": result.no_commute_kept,
+            "no_commute_removed": result.no_commute_removed,
         },
         "console": log_lines,
     }

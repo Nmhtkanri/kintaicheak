@@ -424,6 +424,11 @@
                 <input type="text" id="ex-output-filename" placeholder="経費チェック_2026年05月.xlsx"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
+            <label>
+                通勤費申請なしリスト(Excel・任意): 手動整備したブックのパスを指定すると、完全在宅者を除外し通勤費・区分を転記した「通勤費申請なし」シートを追加します（A列=社員番号、B列=氏名）
+                <input type="text" id="ex-no-commute" placeholder="例: Z:\経費\通勤費申請なしリスト.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ex-run-btn" style="background:#548235">💴 経費集計を実行</button>
                 <span id="ex-status" style="margin-left:12px; color:#666"></span>
@@ -435,6 +440,7 @@
                 <div class="summary-card"><div class="card-label">テレワーク延べ日数</div><div class="card-value" id="ex-cnt-tw">0</div></div>
                 <div class="summary-card"><div class="card-label">勤怠データなし</div><div class="card-value" id="ex-cnt-nodata">0</div></div>
                 <div class="summary-card"><div class="card-label">通勤費(件)</div><div class="card-value" id="ex-cnt-commute">0</div></div>
+                <div class="summary-card"><div class="card-label">申請なしリスト(整備/除外)</div><div class="card-value" id="ex-cnt-nocommute">—</div></div>
             </div>
             <a id="ex-download-link" href="#" class="btn btn-download" style="display:none">📥 経費チェックxlsxをダウンロード</a>
             <pre id="ex-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
@@ -701,6 +707,7 @@
             const fd = new FormData();
             fd.append('month', document.getElementById('ex-month').value);
             fd.append('commute_csv', '');
+            fd.append('no_commute_xlsx', document.getElementById('ex-no-commute').value);
             fd.append('output_filename', document.getElementById('ex-output-filename').value);
 
             try {
@@ -715,6 +722,10 @@
                 document.getElementById('ex-cnt-tw').textContent = data.stats.telework_total;
                 document.getElementById('ex-cnt-nodata').textContent = data.stats.no_data_count;
                 document.getElementById('ex-cnt-commute').textContent = data.stats.commute_count;
+                const ncKept = data.stats.no_commute_kept || 0;
+                const ncRemoved = data.stats.no_commute_removed || 0;
+                document.getElementById('ex-cnt-nocommute').textContent =
+                    (ncKept || ncRemoved) ? (ncKept + '名 / ' + ncRemoved + '除外') : '—';
                 const dl = document.getElementById('ex-download-link');
                 dl.href = data.download_url;
                 dl.style.display = 'inline-block';
