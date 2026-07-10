@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from quick_compare import (  # noqa: E402
     DIFF_COLUMNS,
+    DIFF_KIND_ABSENCE,
     DIFF_KIND_PUNCH_IN,
     DIFF_KIND_PUNCH_OUT,
     DIFF_KIND_TOTAL,
@@ -1111,3 +1112,230 @@ def test_prev_month_tail_note_is_info_only():
     assert [r.kind for r in rows] == [DIFF_KIND_TOTAL]
     assert rows[0].triage == TRIAGE_INFO_ONLY
     assert rows[0].recommend_judge == ""
+
+
+# ---- 欠勤転記・全日休暇/法休所休の行抑制（2026-07-10 谷津指定） ----
+
+# jinjer 汎用データの実ヘッダー（注記付きの長い名前）
+ABSENCE_HEADER = "勤務状況（0:未打刻1:欠勤）"
+HOLIDAY_KIND_HEADER = (
+    "休日（0:法定休日1:所定休日2:法休(振替休出)3:所休(振替休出)"
+    "4:法休(時間外休出)5:所休(時間外休出)）"
+)
+
+_NAME_MAP = {"上原 奏吾": "2018057", "上原奏吾": "2018057"}
+
+
+def _kintai_row(**overrides):
+    row = {
+        "氏名": "上原 奏吾",
+        "日付": date(2026, 4, 1),
+        "勤務表_出勤": "", "jinjer_出勤": "", "出勤差分(分)": None,
+        "勤務表_退勤": "", "jinjer_退勤": "", "退勤差分(分)": None,
+        "_source_file": "x.xlsx",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_resolve_jinjer_extra_columns_absence_and_holiday_kind():
+    """勤務状況(CT列)・休日区分(U列)は注記付きの実ヘッダーに部分一致で解決する。"""
+    resolved = resolve_jinjer_extra_columns(["名前", ABSENCE_HEADER, HOLIDAY_KIND_HEADER])
+    assert resolved["勤務状況"] == ABSENCE_HEADER
+    assert resolved["休日区分"] == HOLIDAY_KIND_HEADER
+
+
+def test_compute_diffs_transcribes_jinjer_absence_row():
+    """勤務状況=1（欠勤）の日は、突合結果に行が無くても欠勤行として転記する。"""
+    from services.triage import TRIAGE_NEEDS_CHECK
+
+    # 突合結果には 4/2 の差異なし行だけがあり、欠勤日 4/1 の行は無い
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "日付": date(2026, 4, 2),
+        "勤務表_出勤": "9:00", "jinjer_出勤": "9:00", "出勤差分(分)": 0,
+        "勤務表_退勤": "18:00", "jinjer_退勤": "18:00", "退勤差分(分)": 0,
+    })])
+    absent = _jinjer_row(**{ABSENCE_HEADER: "1"})
+    normal = _jinjer_row(**{
+        JINJER_HEADERS["date"]: "2026/4/2",
+        JINJER_HEADERS["punch_in_1"]: "9:00",
+        JINJER_HEADERS["punch_out_1"]: "18:00",
+        ABSENCE_HEADER: "0",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(absent.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df,
+        {("2018057", "2026-04-01"): absent, ("2018057", "2026-04-02"): normal},
+        _NAME_MAP, logs, extra_cols,
+    )
+    ab = [r for r in rows if r.kind == DIFF_KIND_ABSENCE]
+    assert len(ab) == 1
+    assert ab[0].target_date == "2026-04-01"
+    assert ab[0].jinjer_value == "欠勤"
+    assert ab[0].warn_level == "INFO"  # 請求勤怠にも勤務なし＝整合
+    assert ab[0].triage == TRIAGE_NEEDS_CHECK  # ただし欠勤の妥当性は人が見る
+    assert ab[0].recommend_judge == ""
+    assert ab[0].auto_fix_value == ""
+
+
+def test_compute_diffs_absence_with_billing_work_relabels_punch_rows():
+    """欠勤なのに請求勤怠に勤務がある日: 出退勤の片側欠落行の差異種別（D列）が「欠勤」になる。
+
+    日単位の転記行は重複するため追加しない。書き戻し先は警告理由と punch_side で保持する。
+    """
+    from services.triage import TRIAGE_NEEDS_CHECK, JUDGE_HOLD
+
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "勤務表_出勤": "9:00", "勤務表_退勤": "18:00",
+    })])
+    jrow = _jinjer_row(**{ABSENCE_HEADER: "1"})
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_ABSENCE, DIFF_KIND_ABSENCE]
+    in_row, out_row = rows
+    assert (in_row.punch_side, out_row.punch_side) == ("in", "out")
+    assert in_row.warn_reason.startswith("jinjer出勤なし(欠勤・未払いの恐れ)")
+    assert out_row.warn_reason.startswith("jinjer退勤なし(欠勤・未払いの恐れ)")
+    assert (in_row.kintai_value, out_row.kintai_value) == ("9:00", "18:00")
+    # 書き戻し値・トリアージ・提案は出勤/退勤の片側欠落と同じ扱い
+    assert (in_row.auto_fix_value, out_row.auto_fix_value) == ("9:00", "18:00")
+    assert all(r.triage == TRIAGE_NEEDS_CHECK for r in rows)
+    assert all(r.recommend_judge == JUDGE_HOLD for r in rows)
+
+
+def test_compute_diffs_no_punch_status_zero_relabels_punch_rows():
+    """勤務状況=0（未打刻）の日: 出退勤の片側欠落行の差異種別（D列）が「未打刻」になる。"""
+    from quick_compare import DIFF_KIND_NO_PUNCH
+    from services.triage import JUDGE_HOLD
+
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "勤務表_出勤": "9:00", "勤務表_退勤": "18:00",
+    })])
+    jrow = _jinjer_row(**{ABSENCE_HEADER: "0"})
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_NO_PUNCH, DIFF_KIND_NO_PUNCH]
+    assert rows[0].warn_reason.startswith("jinjer出勤なし(未打刻)")
+    assert rows[1].warn_reason.startswith("jinjer退勤なし(未打刻)")
+    assert all(r.recommend_judge == JUDGE_HOLD for r in rows)
+    # 欠勤の日単位転記行は出ない
+    assert [r for r in rows if r.kind == DIFF_KIND_ABSENCE] == []
+
+
+def test_compute_diffs_blank_status_keeps_punch_kinds():
+    """勤務状況が空（打刻あり等）の片側欠落は従来どおり出勤/退勤のまま。"""
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "勤務表_出勤": "9:00", "勤務表_退勤": "18:00",
+    })])
+    jrow = _jinjer_row(**{ABSENCE_HEADER: ""})
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT]
+    assert rows[0].warn_reason == "jinjer出勤なし / 請求勤怠側に時刻あり"
+
+
+def test_compute_diffs_suppresses_fullday_leave_when_billing_zero():
+    """振休/代休/年次有給の全日で請求勤怠が0/記載なしの日は差異行を一切出さない。"""
+    for leave_name in ("振休", "代休", "年次有給"):
+        # SAP等が休暇日に出す 0:00 行（従来は「jinjer出勤なし/請求勤怠側に時刻あり」が出ていた）
+        kintai_df = pd.DataFrame([_kintai_row(**{
+            "勤務表_出勤": "00:00", "勤務表_退勤": "00:00", "勤務表_実働時間": "00:00",
+        })])
+        jrow = _jinjer_row(**{"休日休暇名1": leave_name, "休日休暇名1：種別": "全日"})
+        extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+        logs: list[LogEntry] = []
+        rows = compute_diffs(
+            kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+        )
+        assert rows == [], f"{leave_name}(全日)・請求勤怠0の日は行を出さない"
+
+
+def test_compute_diffs_keeps_rows_when_fullday_leave_but_billing_has_work():
+    """全日休暇でも請求勤怠に勤務があれば従来どおり差異行を出す（未払い防止）。"""
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "勤務表_出勤": "9:00", "勤務表_退勤": "18:00",
+    })])
+    jrow = _jinjer_row(**{"休日休暇名1": "年次有給", "休日休暇名1：種別": "全日"})
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT]
+
+
+def test_compute_diffs_keeps_rows_for_other_fullday_leave_names():
+    """指定外の全日休暇（生理休暇等）は従来どおり行を出す（triageの自動OKに任せる）。"""
+    from services.triage import TRIAGE_AUTO_OK
+
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "jinjer_出勤": "9:00", "jinjer_退勤": "18:00",
+    })])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "9:00", JINJER_HEADERS["punch_out_1"]: "18:00",
+        "休日休暇名1": "生理休暇", "休日休暇名1：種別": "全日",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert rows
+    assert all(r.triage == TRIAGE_AUTO_OK for r in rows if r.kind == DIFF_KIND_PUNCH_IN)
+
+
+def test_compute_diffs_suppresses_legal_and_scheduled_holiday_when_billing_zero():
+    """法休(0)/所休(1)で請求勤怠が0/記載なしの日は差異行を出さない（SAPの休日0:00行対策）。"""
+    for code in ("0", "1"):
+        kintai_df = pd.DataFrame([_kintai_row(**{
+            "勤務表_出勤": "00:00", "勤務表_退勤": "00:00", "勤務表_実働時間": "00:00",
+        })])
+        jrow = _jinjer_row(**{HOLIDAY_KIND_HEADER: code})
+        extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+        logs: list[LogEntry] = []
+        rows = compute_diffs(
+            kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+        )
+        assert rows == [], f"休日区分={code}・請求勤怠0の日は行を出さない"
+
+
+def test_compute_diffs_suppresses_holiday_jinjer_punch_when_billing_empty():
+    """法休/所休の日のjinjer打刻（請求勤怠なし）も行を出さない（谷津指定）。"""
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "jinjer_出勤": "9:00", "jinjer_退勤": "17:45",
+    })])
+    jrow = _jinjer_row(**{
+        HOLIDAY_KIND_HEADER: "1",
+        JINJER_HEADERS["punch_in_1"]: "9:00", JINJER_HEADERS["punch_out_1"]: "17:45",
+        JINJER_HEADERS["total_work"]: "7:45",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert rows == []
+
+
+def test_compute_diffs_keeps_holiday_work_codes():
+    """振替休出(2,3)・時間外休出(4,5)は働く日のため通常どおり突合する。"""
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "勤務表_出勤": "00:00", "勤務表_退勤": "00:00", "勤務表_実働時間": "00:00",
+    })])
+    jrow = _jinjer_row(**{HOLIDAY_KIND_HEADER: "3"})
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert rows, "休日区分=3（所休・振替休出）は抑制しない"

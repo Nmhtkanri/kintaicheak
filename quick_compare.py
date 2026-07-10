@@ -114,6 +114,11 @@ JINJER_EXTRA_COLUMNS: dict[str, tuple[list[str], bool]] = {
     "休日休暇名1：種別": (["休日休暇名1：種別"], True),
     # 打刻時コメント（汎用データ#96）。"出勤: ○○ , 退勤: ○○" 形式で出勤退勤両方を含む。
     "打刻時コメント": (["打刻時コメント"], True),
+    # 休日区分（U列）。実ヘッダーは「休日（0:法定休日1:所定休日2:法休(振替休出)…）」と
+    # 長い注記付きのため部分一致で解決する。値: 0=法定休日 / 1=所定休日 / 2〜5=振替・時間外休出。
+    "休日区分": (["休日（0:法定休日", "休日(0:法定休日"], False),
+    # 勤務状況（CT列）。実ヘッダーは「勤務状況（0:未打刻1:欠勤）」。値: 1=欠勤 / 0=未打刻。
+    "勤務状況": (["勤務状況"], False),
 }
 
 
@@ -150,6 +155,22 @@ DIFF_KIND_TOTAL = "総労働時間"
 # 氏名→従業員ID を解決できず（jinjer 未登録 or 氏名表記の不一致）、請求勤怠側には
 # 勤務がある人。従来は黙ってスキップしていたが、未払い見落とし防止のため要確認行で可視化する。
 DIFF_KIND_UNMATCHED = "jinjer未登録"
+# jinjer 汎用データの「勤務状況」(CT列: 0=未打刻/1=欠勤) の転記（2026-07-10 谷津指定）。
+# 新しい列は増やさず、差異種別（D列）にそのまま記載する:
+#   ・jinjer打刻なしの出勤/退勤行 → 勤務状況=1なら「欠勤」、0なら「未打刻」に種別を付け替える
+#     （書き戻し先が出勤1/退勤1のどちらかは punch_side と警告理由で保持し、quick_export が解決する）
+#   ・請求勤怠側にも勤務が無い欠勤日 → 行が無いので日単位の「欠勤」転記行を1行足す
+DIFF_KIND_ABSENCE = "欠勤"
+DIFF_KIND_NO_PUNCH = "未打刻"
+
+# 差異行を出さない日の条件（2026-07-10 谷津指定）:
+#   ・休日休暇名1 が振休/代休/年次有給の「全日」で、請求勤怠が記載なしまたは0
+#   ・休日区分(U列)が法定休日(0)/所定休日(1)で、請求勤怠が記載なしまたは0
+#     （SAPの請求勤怠は休日にも0:00の行を出すため、そのままだと休日ぶんの
+#       「jinjer出勤なし/請求勤怠側に時刻あり」等のノイズ行が大量に出る）
+# 振替休出(2,3)・時間外休出(4,5)は働く日のため対象外。AM/PM半休も対象外（全日のみ）。
+SUPPRESS_FULLDAY_LEAVE_KEYWORDS = ("振休", "振替休", "代休", "年次有給")
+SUPPRESS_HOLIDAY_CODES = ("0", "1")  # 0:法定休日 / 1:所定休日
 
 # 既存 kintai-checker の services パスを通す（氏名正規化を借りる場合用）
 KINTAI_CHECKER_ROOT = Path(__file__).resolve().parent
@@ -159,6 +180,7 @@ if str(KINTAI_CHECKER_ROOT) not in sys.path:
 # トリアージ（要確認/自動採用/自動OK の分類）
 from services.triage import (  # noqa: E402
     classify as triage_classify,
+    is_zero_or_empty,
     TRIAGE_NEEDS_CHECK,
     TRIAGE_AUTO_KINTAI,
     TRIAGE_AUTO_OK,
@@ -183,9 +205,9 @@ def recommend_judge_label(
       - コメントなし & 差分が許容しきい値以上、または片側欠落（差分なし）→ 保留
       - コメントなし & 差分が許容しきい値未満 → 請求勤怠
     総労働時間は手順3で書き戻せない計算値のため対象外＝従来通り jinjer勤怠（変更なし）。
-    jinjer未登録は採用ラベルを付けない（書き戻し対象外・人が登録要否を判断する）。
+    jinjer未登録・欠勤は採用ラベルを付けない（書き戻し対象外・人が確認する）。
     """
-    if kind == DIFF_KIND_UNMATCHED:
+    if kind in (DIFF_KIND_UNMATCHED, DIFF_KIND_ABSENCE):
         return ""
     if kind == DIFF_KIND_TOTAL:
         return JUDGE_JINJER
@@ -240,6 +262,9 @@ class DiffRow:
     # 自動修正提案値（採用ラベル）。差分が許容しきい値内→請求勤怠 / 超過→jinjer勤怠 /
     # 総労働・休憩・差分なし→jinjer勤怠。
     recommend_judge: str = ""
+    # 内部用（xlsxには出さない）: 片側欠落の打刻行がどちらの打刻か（"in"/"out"）。
+    # 差異種別を欠勤/未打刻へ付け替えても、トリアージ・提案・書き戻し先は出勤/退勤として扱う。
+    punch_side: str = ""
 
 
 @dataclass
@@ -424,6 +449,20 @@ def kintai_total_minutes(krow: pd.Series) -> tuple[int | None, str]:
     end = first_present(krow, ["勤務表_退勤", "勤務表_退勤時刻"])
     total = elapsed_minutes_from_values(start, end)
     return total, format_minutes_as_hhmm(total)
+
+
+def kintai_day_zero_or_empty(krow: pd.Series) -> bool:
+    """請求勤怠側の1日ぶんが「記載なし、または0」か。
+
+    出勤・退勤とも空/0:00 で、かつ請求勤怠ファイル記載の実働・総労働も空/0 のとき True。
+    全日休暇・法休/所休の行抑制と、欠勤転記の勤務有無判定に使う。
+    """
+    if not is_zero_or_empty(clean_cell(krow.get("勤務表_出勤"))):
+        return False
+    if not is_zero_or_empty(clean_cell(krow.get("勤務表_退勤"))):
+        return False
+    total_min, _ = kintai_total_minutes(krow)
+    return total_min in (None, 0)
 
 
 def normalize_date_iso(value: Any) -> str | None:
@@ -786,6 +825,36 @@ def compute_diffs(
     # 氏名→従業員ID を解決できなかった人を黙って捨てず、請求勤怠側に勤務がある日を
     # 集計して後で「jinjer未登録」要確認行にまとめる（未払いの静かな見落としを防ぐ）。
     unresolved: dict[str, dict] = {}
+    # 欠勤転記用: 請求勤怠側の1日ぶんの状態（勤務の有無と表示用の時刻範囲）
+    billing_day: dict[tuple[str, str], dict] = {}
+    # 差異種別を「欠勤」に付け替えた打刻行を出した日（日単位の欠勤転記行と重複させない）
+    absence_punch_days: set[tuple[str, str]] = set()
+    # 行を出さなかった日（取込ログ用）: 全日休暇（振休/代休/年次有給）・法休/所休
+    suppressed_leave_days: set[tuple[str, str]] = set()
+    suppressed_holiday_days: set[tuple[str, str]] = set()
+
+    def _extra_of(jrow_, canonical: str) -> str:
+        """汎用データ行から予定・休暇等の転記値を取り出す（列未解決・行なしは空欄）。"""
+        if jrow_ is None:
+            return ""
+        header = extra_cols.get(canonical)
+        return clean_cell(jrow_.get(header)) if header else ""
+
+    def _collect_extras(jrow_, emp_id_: str, date_iso_: str) -> dict:
+        """同一 emp/date のすべての差異行に併記する参考情報（予定・有休・コメント）。"""
+        return {
+            "sched_in": _extra_of(jrow_, "出勤予定"),
+            "sched_out": _extra_of(jrow_, "退勤予定"),
+            "sched_break": _extra_of(jrow_, "休憩予定"),
+            "sched_break_end": _extra_of(jrow_, "復帰予定"),
+            "yukyu": _extra_of(jrow_, "有休"),
+            "am_yukyu": _extra_of(jrow_, "AM有休"),
+            "pm_yukyu": _extra_of(jrow_, "PM有休"),
+            "holiday_name1": _extra_of(jrow_, "休日休暇名1"),
+            "holiday_name1_type": _extra_of(jrow_, "休日休暇名1：種別"),
+            "punch_comment": clean_punch_comment(_extra_of(jrow_, "打刻時コメント")),
+            "jinjer_stamp_comment": format_stamp_comments(stamp_comments.get((emp_id_, date_iso_))),
+        }
 
     for _, krow in kintai_df.iterrows():
         name = str(krow.get("氏名") or "").strip()
@@ -818,25 +887,37 @@ def compute_diffs(
 
         # 汎用データから予定・有休を転記（同一 emp/date のすべての差異行に併記する参考情報）。
         # 列が解決できない / jinjer 行が無いときは空欄。
-        def _extra(canonical: str) -> str:
-            if jrow is None:
-                return ""
-            header = extra_cols.get(canonical)
-            return clean_cell(jrow.get(header)) if header else ""
+        extra = _collect_extras(jrow, emp_id, date_iso)
 
-        extra = {
-            "sched_in": _extra("出勤予定"),
-            "sched_out": _extra("退勤予定"),
-            "sched_break": _extra("休憩予定"),
-            "sched_break_end": _extra("復帰予定"),
-            "yukyu": _extra("有休"),
-            "am_yukyu": _extra("AM有休"),
-            "pm_yukyu": _extra("PM有休"),
-            "holiday_name1": _extra("休日休暇名1"),
-            "holiday_name1_type": _extra("休日休暇名1：種別"),
-            "punch_comment": clean_punch_comment(_extra("打刻時コメント")),
-            "jinjer_stamp_comment": format_stamp_comments(stamp_comments.get((emp_id, date_iso))),
-        }
+        # 出退勤の値（行生成と、休暇・休日の行抑制の両方で使う）
+        k_in = clean_cell(krow.get("勤務表_出勤"))
+        j_in = clean_cell(krow.get("jinjer_出勤"))
+        k_out = clean_cell(krow.get("勤務表_退勤"))
+        j_out = clean_cell(krow.get("jinjer_退勤"))
+
+        # 欠勤転記用に請求勤怠側の状態を記録（同一日に複数行あれば勤務ありを優先）
+        billing_empty = kintai_day_zero_or_empty(krow)
+        day_state = billing_day.setdefault((emp_id, date_iso), {"has_work": False, "span": ""})
+        if not billing_empty:
+            day_state["has_work"] = True
+            if not day_state["span"]:
+                day_state["span"] = f"{k_in}〜{k_out}" if (k_in and k_out) else (k_in or k_out)
+
+        # ----- 全日休暇・法休/所休の行抑制（2026-07-10 谷津指定） -----
+        # 請求勤怠が「記載なし、または0」の日は、jinjer側が
+        #   ・法定休日(0)/所定休日(1) → SAPの請求勤怠が休日に出す0:00行等のノイズを出さない
+        #     （振替休出・時間外休出(2〜5)は働く日のため通常どおり突合する）
+        #   ・振休/代休/年次有給の「全日」 → 休暇として整合しているため差異行を出さない
+        # DANGER含め当日の全行を出さない（billing_empty かつ全日休暇/休日の日に限る）。
+        if jrow is not None and billing_empty:
+            if _extra_of(jrow, "休日区分") in SUPPRESS_HOLIDAY_CODES:
+                suppressed_holiday_days.add((emp_id, date_iso))
+                continue
+            if extra["holiday_name1_type"] == "全日" and any(
+                kw in extra["holiday_name1"] for kw in SUPPRESS_FULLDAY_LEAVE_KEYWORDS
+            ):
+                suppressed_leave_days.add((emp_id, date_iso))
+                continue
 
         # 突合結果の「特記」（月末日跨ぎ・前月末後半・Fieldglass時刻なし等）。
         # 種別ごとに出す行を変え、誤った自動書き戻し提案（打切り24:00での上書きや
@@ -877,9 +958,20 @@ def compute_diffs(
                 skip_in = skip_out = skip_total = True
                 tokki_note = tokki
 
+        # jinjer打刻なしの行の差異種別（D列）: 勤務状況=1→欠勤 / 0→未打刻 / それ以外→出勤・退勤。
+        # 書き戻し先（出勤1/退勤1）は punch_side と警告理由の「jinjer出勤なし/退勤なし」で保持する。
+        kinmu_status = _extra_of(jrow, "勤務状況")
+        if kinmu_status == "1":
+            missing_kind = DIFF_KIND_ABSENCE
+            missing_note = "(欠勤・未払いの恐れ)"
+        elif kinmu_status == "0":
+            missing_kind = DIFF_KIND_NO_PUNCH
+            missing_note = "(未打刻)"
+        else:
+            missing_kind = None
+            missing_note = ""
+
         # ----- 出勤差異 -----
-        k_in = clean_cell(krow.get("勤務表_出勤"))
-        j_in = clean_cell(krow.get("jinjer_出勤"))
         diff_in = to_int_diff(krow.get("出勤差分(分)"))
         if skip_in:
             pass
@@ -897,15 +989,18 @@ def compute_diffs(
             ))
             next_id += 1
         elif diff_in is None and k_in and not j_in:
+            if missing_kind == DIFF_KIND_ABSENCE:
+                absence_punch_days.add((emp_id, date_iso))
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
-                kind=DIFF_KIND_PUNCH_IN,
+                kind=missing_kind or DIFF_KIND_PUNCH_IN,
                 kintai_value=k_in, jinjer_value="", diff_minutes="",
                 warn_level=LEVEL_WARN,
-                warn_reason="jinjer出勤なし / 請求勤怠側に時刻あり",
+                warn_reason=f"jinjer出勤なし{missing_note} / 請求勤怠側に時刻あり",
                 auto_fix_value=k_in,
                 finalized=finalized,
                 source_file=source_file,
+                punch_side="in",
                 **extra,
             ))
             next_id += 1
@@ -927,8 +1022,6 @@ def compute_diffs(
             next_id += 1
 
         # ----- 退勤差異 -----
-        k_out = clean_cell(krow.get("勤務表_退勤"))
-        j_out = clean_cell(krow.get("jinjer_退勤"))
         diff_out = to_int_diff(krow.get("退勤差分(分)"))
         # 夜勤など深夜跨ぎの退勤は 24時超表記(33:00 等)で表示する（差分は両側同値補正で不変）。
         k_out_disp = overnight_display_value(k_out, k_in, extra["sched_out"], extra["sched_in"])
@@ -949,15 +1042,18 @@ def compute_diffs(
             ))
             next_id += 1
         elif diff_out is None and k_out and not j_out:
+            if missing_kind == DIFF_KIND_ABSENCE:
+                absence_punch_days.add((emp_id, date_iso))
             rows.append(DiffRow(
                 row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
-                kind=DIFF_KIND_PUNCH_OUT,
+                kind=missing_kind or DIFF_KIND_PUNCH_OUT,
                 kintai_value=k_out_disp, jinjer_value="", diff_minutes="",
                 warn_level=LEVEL_WARN,
-                warn_reason="jinjer退勤なし / 請求勤怠側に時刻あり",
+                warn_reason=f"jinjer退勤なし{missing_note} / 請求勤怠側に時刻あり",
                 auto_fix_value=to_jinjer_overnight_punch_out(k_in, k_out),
                 finalized=finalized,
                 source_file=source_file,
+                punch_side="out",
                 **extra,
             ))
             next_id += 1
@@ -1117,9 +1213,64 @@ def compute_diffs(
             f"jinjer未登録の可能性: {uname} 請求勤怠 勤務{len(dates)}日（{span}）→ 差異一覧に要確認行を追加",
         ))
 
+    # ----- jinjer欠勤（勤務状況=1）の日単位転記 -----
+    # 欠勤日はjinjer側に打刻が無く、請求勤怠側にも何も無いと突合結果に行が現れない
+    # ことがあるため、突合結果ではなく汎用データ全体を走査する。
+    # 対象はチェック対象（突合結果に登場し従業員IDを解決できた）の従業員のみ。
+    # 打刻行を「欠勤」種別で出した日は情報が重複するため、日単位の行は足さない。
+    status_header = extra_cols.get("勤務状況")
+    if status_header:
+        scope_emp_ids = {e for e, _ in seen_emp_date}
+        absence_rows = 0
+        for (emp_id, date_iso), jrow in jinjer_index.items():
+            if emp_id not in scope_emp_ids:
+                continue
+            if clean_cell(jrow.get(status_header)) != "1":
+                continue
+            if (emp_id, date_iso) in absence_punch_days:
+                continue  # 打刻行（差異種別=欠勤）で表示済み
+            day_state = billing_day.get((emp_id, date_iso)) or {}
+            name = clean_cell(jrow.get(JINJER_HEADERS["name"])) or emp_id
+            if day_state.get("has_work"):
+                level = LEVEL_WARN
+                reason = "jinjer欠勤だが請求勤怠に勤務あり（未払いの恐れ）。欠勤登録と請求勤怠を確認"
+            else:
+                level = LEVEL_INFO
+                reason = "jinjer欠勤（請求勤怠に勤務なし）。欠勤で正しいか確認"
+            rows.append(DiffRow(
+                row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                kind=DIFF_KIND_ABSENCE,
+                kintai_value=day_state.get("span") or "",
+                jinjer_value="欠勤", diff_minutes="",
+                warn_level=level, warn_reason=reason,
+                auto_fix_value="",
+                finalized=clean_cell(jrow.get(JINJER_HEADERS["finalized"])),
+                source_file="",
+                **_collect_extras(jrow, emp_id, date_iso),
+            ))
+            next_id += 1
+            absence_rows += 1
+        if absence_rows:
+            logs.append(LogEntry(
+                "INFO", f"jinjer欠勤（勤務状況=1）を差異一覧へ転記: {absence_rows} 件"))
+
+    if suppressed_leave_days or suppressed_holiday_days:
+        logs.append(LogEntry(
+            "INFO",
+            "請求勤怠が記載なし/0のため差異行を出さない日: "
+            f"全日休暇(振休/代休/年次有給) {len(suppressed_leave_days)}日 / "
+            f"法休・所休 {len(suppressed_holiday_days)}日",
+        ))
+
     # トリアージ: 各差異行を 要確認/自動採用/自動OK に分類し、既定の人間判断を付ける
     _TOKKI_KEYWORDS = ("月末日跨ぎ", "前月末夜勤の後半", "Fieldglass時刻なし", "jinjer側2行分割登録")
     for r in rows:
+        # 欠勤の日単位転記行は必ず人が見る（手順3の書き戻し対象外のため提案値も付けない）
+        if r.kind == DIFF_KIND_ABSENCE and not r.punch_side:
+            r.triage = TRIAGE_NEEDS_CHECK
+            r.judge_default = ""
+            r.recommend_judge = ""
+            continue
         # 特記の注記行は休暇情報等で自動OK/自動採用に紛れさせない。
         # WARN（要対応の可能性）は要確認、INFO（説明だけの注記）は参考のみに固定する。
         if r.kind == DIFF_KIND_TOTAL and any(k in (r.warn_reason or "") for k in _TOKKI_KEYWORDS):
@@ -1127,8 +1278,15 @@ def compute_diffs(
             r.judge_default = ""
             r.recommend_judge = ""
             continue
+        # 差異種別を欠勤/未打刻へ付け替えた打刻行は、従来どおり出勤/退勤として分類・提案する
+        if r.punch_side == "in":
+            eff_kind = DIFF_KIND_PUNCH_IN
+        elif r.punch_side == "out":
+            eff_kind = DIFF_KIND_PUNCH_OUT
+        else:
+            eff_kind = r.kind
         r.triage, r.judge_default = triage_classify(
-            kind=r.kind,
+            kind=eff_kind,
             warn_level=r.warn_level,
             punch_comment=r.punch_comment,
             stamp_comment=r.jinjer_stamp_comment,
@@ -1140,7 +1298,7 @@ def compute_diffs(
         # 差分≧しきい値or片側欠落→保留 / それ以外→請求勤怠（総労働は対象外）。
         has_comment = bool((r.punch_comment or "").strip() or (r.jinjer_stamp_comment or "").strip())
         r.recommend_judge = recommend_judge_label(
-            r.kind, r.diff_minutes, threshold_minutes, has_comment
+            eff_kind, r.diff_minutes, threshold_minutes, has_comment
         )
 
     return rows
@@ -1204,7 +1362,8 @@ def classify_total_work(jrow: dict) -> tuple[str, str, str] | None:
        ここでは集計不整合（出勤打刻あり/総労働0:00）のみを検出する。
     """
     j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
-    j_punch_in = str(jrow.get(JINJER_HEADERS["punch_in_1"]) or "").strip()
+    # 空セルは CSV 読込で NaN になり `or ""` では拾えない（"nan"が打刻あり扱いになる）ため clean_cell で判定
+    j_punch_in = clean_cell(jrow.get(JINJER_HEADERS["punch_in_1"]))
     j_total_min = parse_hhmm(j_total_str)
 
     reasons: list[str] = []
@@ -1232,7 +1391,8 @@ def classify_total_work_diff(diff_minutes: int, jrow: dict) -> tuple[str, str]:
         level = LEVEL_WARN
 
     j_total_str = str(jrow.get(JINJER_HEADERS["total_work"]) or "").strip()
-    j_punch_in = str(jrow.get(JINJER_HEADERS["punch_in_1"]) or "").strip()
+    # 空セルの NaN を「打刻あり」と誤判定しないよう clean_cell で判定（欠勤・未打刻日の誤DANGER防止）
+    j_punch_in = clean_cell(jrow.get(JINJER_HEADERS["punch_in_1"]))
     j_total_min = parse_hhmm(j_total_str)
     # 長時間労働(>10h)の昇格は廃止。集計不整合のみ DANGER に昇格する。
     if j_total_min == 0 and j_punch_in:
@@ -1285,6 +1445,8 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         ("出勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_IN)),
         ("退勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_OUT)),
         ("総労働時間差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_TOTAL)),
+        ("欠勤件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_ABSENCE)),
+        ("未打刻件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_NO_PUNCH)),
         ("DANGER 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_DANGER)),
         ("WARN 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_WARN)),
         ("INFO 件数", sum(1 for r in diff_rows if r.warn_level == LEVEL_INFO)),

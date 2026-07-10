@@ -30,10 +30,14 @@ _HALF_DAY_TYPES = ("AM有休", "PM有休")
 _FULL_DAY = "全日"
 
 
-def _is_zero_or_empty(value) -> bool:
-    """請求勤怠の打刻が「0」または空か（全日休暇の判定用）。"""
+def is_zero_or_empty(value) -> bool:
+    """請求勤怠の値が「0」または空か（全日休暇・休日の判定用）。"""
     s = str(value or "").strip()
-    return s in ("", "0", "0:00", "00:00", "0:00:00", "-")
+    return s in ("", "0", "0:00", "00:00", "0:00:00", "00:00:00", "-")
+
+
+# 旧名の別名（後方互換）
+_is_zero_or_empty = is_zero_or_empty
 
 
 def classify(
@@ -65,7 +69,7 @@ def classify(
 
     if warn_level == LEVEL_DANGER:
         return (TRIAGE_NEEDS_CHECK, "")
-    if hol and hol_type == _FULL_DAY and _is_zero_or_empty(kintai_value):
+    if hol and hol_type == _FULL_DAY and is_zero_or_empty(kintai_value):
         return (TRIAGE_AUTO_OK, JUDGE_JINJER)
     if has_comment:
         return (TRIAGE_NEEDS_CHECK, "")

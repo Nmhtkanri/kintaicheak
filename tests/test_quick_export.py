@@ -893,3 +893,70 @@ def test_iso_dates_normalized_to_jinjer_format(tmp_path):
     row = _read_output_row(output_path)
     assert row["*年月日"] == "2026/4/1"   # ISO→スラッシュ・0パディングなし
     assert row["退勤1"] == "18:15"
+
+
+def test_run_quick_export_writes_back_absence_and_no_punch_kinds(tmp_path):
+    """差異種別が「欠勤」「未打刻」の打刻行は、警告理由から出勤/退勤を解決して書き戻す。
+
+    2026-07-10: jinjer打刻なしの行はD列が出勤/退勤ではなく欠勤/未打刻と表示されるため、
+    quick_compare が警告理由に埋める「jinjer出勤なし…/jinjer退勤なし…」で書き戻し先を決める。
+    書き込み時に勤務状況フラグ(0/1)がクリアされることも確認する。
+    """
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+
+    status_col = "勤務状況（0:未打刻1:欠勤）"
+    with open(jinjer_path, "w", encoding="cp932", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(HEADERS + [status_col])
+        writer.writerow(["上原 奏吾", "2018057", "2026/4/1", "", "", "", "", "0:00", "", "1"])
+        writer.writerow(["上原 奏吾", "2018057", "2026/4/2", "", "", "", "", "0:00", "", "0"])
+
+    common = {"従業員ID": "2018057", "氏名": "上原 奏吾"}
+    pd.DataFrame([
+        {"行ID": 1, "対象日付": "2026-04-01", "差異種別": "欠勤",
+         "警告理由": "jinjer出勤なし(欠勤・未払いの恐れ) / 請求勤怠側に時刻あり",
+         "請求勤怠値": "9:00", "自動修正提案値": "保留", "人間判断": "請求勤怠", **common},
+        {"行ID": 2, "対象日付": "2026-04-01", "差異種別": "欠勤",
+         "警告理由": "jinjer退勤なし(欠勤・未払いの恐れ) / 請求勤怠側に時刻あり",
+         "請求勤怠値": "18:00", "自動修正提案値": "保留", "人間判断": "請求勤怠", **common},
+        {"行ID": 3, "対象日付": "2026-04-02", "差異種別": "未打刻",
+         "警告理由": "jinjer出勤なし(未打刻) / 請求勤怠側に時刻あり",
+         "請求勤怠値": "8:30", "自動修正提案値": "保留", "人間判断": "請求勤怠", **common},
+    ]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    with open(output_path, encoding="cp932", newline="") as f:
+        rows = {r["*年月日"]: r for r in csv.DictReader(f)}
+    assert rows["2026/4/1"]["出勤1"] == "9:00"
+    assert rows["2026/4/1"]["退勤1"] == "18:00"
+    assert rows["2026/4/1"][status_col] == ""  # 欠勤フラグはクリア（インポートエラー防止）
+    assert rows["2026/4/2"]["出勤1"] == "8:30"
+    assert rows["2026/4/2"][status_col] == ""
+    assert result.stats.overwritten_punch_in == 2
+    assert result.stats.overwritten_punch_out == 1
+
+
+def test_run_quick_export_ignores_day_level_absence_row(tmp_path):
+    """日単位の欠勤転記行（警告理由に出勤/退勤の別が無い）は書き戻し対象外として無視する。"""
+    diff_path = tmp_path / "diff.xlsx"
+    jinjer_path = tmp_path / "jinjer.csv"
+    output_path = tmp_path / "out.csv"
+    _write_jinjer_csv(jinjer_path)
+
+    pd.DataFrame([{
+        "行ID": 1, "従業員ID": "2018057", "氏名": "上原 奏吾",
+        "対象日付": "2026-04-01", "差異種別": "欠勤",
+        "警告理由": "jinjer欠勤（請求勤怠に勤務なし）。欠勤で正しいか確認",
+        "請求勤怠値": "", "自動修正提案値": "", "人間判断": "請求勤怠",
+    }]).to_excel(diff_path, sheet_name="差異一覧", index=False)
+
+    result = run_quick_export(diff_path, jinjer_path, output_path, dry_run=False, log_func=lambda _: None)
+
+    assert result.ok
+    with open(output_path, encoding="cp932", newline="") as f:
+        assert list(csv.DictReader(f)) == []  # 何も書き戻さない
+    assert any("書き戻し対象外" in w for w in result.stats.warnings)

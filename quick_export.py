@@ -72,6 +72,12 @@ DIFF_KIND_PUNCH_IN = "出勤"
 DIFF_KIND_PUNCH_OUT = "退勤"
 DIFF_KIND_BREAK = "休憩"
 DIFF_KIND_TOTAL = "総労働時間"
+# jinjer打刻なしの行は、汎用データの勤務状況により差異種別が「欠勤」「未打刻」と
+# 表示される（2026-07-10）。書き戻し先（出勤1/退勤1）は quick_compare が生成する
+# 警告理由の「jinjer出勤なし…／jinjer退勤なし…」から解決する。
+# 警告理由で解決できない「欠勤」は日単位の転記行＝書き戻し対象外。
+DIFF_KIND_ABSENCE = "欠勤"
+DIFF_KIND_NO_PUNCH = "未打刻"
 
 # 人間判断の値。新ラベル: 「請求勤怠」=請求勤怠を正としてjinjerへ書き戻す（旧「承認」）/
 # 「jinjer勤怠」=jinjerを正（書き戻さない・旧「却下」）/「保留」。
@@ -400,6 +406,14 @@ def load_approved_rows(
         emp_id = str(row.get("従業員ID") or "").strip()
         date_iso = normalize_date_iso(row.get("対象日付"))
         kind = str(row.get("差異種別") or "").strip()
+        # 差異種別が欠勤/未打刻の打刻行は、警告理由から出勤/退勤どちらの書き戻しかを解決する。
+        # どちらの語も無ければ日単位の欠勤転記行＝書き戻し対象外（種別のまま後段で無視される）。
+        if kind in (DIFF_KIND_ABSENCE, DIFF_KIND_NO_PUNCH):
+            reason = str(row.get("警告理由") or "")
+            if "jinjer出勤なし" in reason:
+                kind = DIFF_KIND_PUNCH_IN
+            elif "jinjer退勤なし" in reason:
+                kind = DIFF_KIND_PUNCH_OUT
         name = str(row.get("氏名") or "").strip()
         row_id_raw = row.get("行ID")
         try:
@@ -726,6 +740,13 @@ def apply_approved_rows(
                 )
             continue
 
+        if app.kind in (DIFF_KIND_ABSENCE, DIFF_KIND_NO_PUNCH):
+            # 警告理由から出勤/退勤を解決できなかった行（日単位の欠勤転記行）は書き戻し対象外
+            stats.warnings.append(
+                f"行ID={app.source_diff_row_id} 欠勤/未打刻の転記行は書き戻し対象外のため無視 "
+                f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
+            )
+            continue
         if app.kind not in (DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT):
             stats.warnings.append(
                 f"行ID={app.source_diff_row_id} 未知の差異種別 '{app.kind}' を無視 "
