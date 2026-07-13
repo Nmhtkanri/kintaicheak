@@ -52,6 +52,7 @@ POLL_MAX_SEC = 900
 KUBUN_KYUKA = "休暇日スキップ"
 KUBUN_NG = "検証NG"
 KUBUN_IMPORT_FAIL = "インポート失敗"
+KUBUN_GUARD = "送信前チェックNG"
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,72 @@ def norm_date_iso(v) -> str | None:
 
 def _truthy_flag(v: str) -> bool:
     return (v or "").strip() not in ("", "0", "FALSE", "false", "False")
+
+
+_DATE_JINJER_RE = re.compile(r"^\d{4}/\d{1,2}/\d{1,2}$")
+_SECONDS_CELL_RE = re.compile(r"^\d{1,3}:\d{2}:\d{2}$")
+
+
+def validate_upload_csv(
+    dict_rows: list[dict[str, str]],
+    target_month: str = "",
+    month_explicit: bool = False,
+    today: datetime | None = None,
+) -> list[str]:
+    """送信前の門番チェック。エラーメッセージのリストを返す（空なら合格）。
+
+    2026-07-08 の誤インポート事故の再発防止:
+    Excel上書き保存で米国式(6/7/2026)に化けた日付を jinjer が日/月/年と
+    誤解釈し、各月6日へ誤書込した（7/6法休化事故）。1件でも該当したら送信しない。
+
+    検査項目:
+      1. *年月日 が jinjer形式 (YYYY/M/D) か（ISO・米国式は化けの徴候）
+      2. 秒付き時刻セルが無いか（Excel保存の徴候。jinjerは秒付きを弾く）
+      3. 複数月の混在が無いか / target_month 指定時はその月だけか
+      4. 未来月が無いか（無条件NG）・当月と前月より古い月は明示指定時のみ許可
+    """
+    errors: list[str] = []
+    bad_dates: list[str] = []
+    sec_cells: list[str] = []
+    months: set[str] = set()
+    for i, d in enumerate(dict_rows, 2):
+        ds = (d.get(COL_DATE) or "").strip()
+        if _DATE_JINJER_RE.match(ds):
+            y, m, _day = ds.split("/")
+            months.add(f"{int(y):04d}-{int(m):02d}")
+        elif len(bad_dates) < 3:
+            bad_dates.append(f"{i}行目「{ds}」")
+        for col, v in d.items():
+            if v and _SECONDS_CELL_RE.match(v):
+                if len(sec_cells) < 3:
+                    sec_cells.append(f"{i}行目 {col}「{v}」")
+                break
+    if bad_dates:
+        errors.append(
+            "年月日が jinjer形式(YYYY/M/D) でない行があります: " + " / ".join(bad_dates)
+            + " …ISO形式(2026-06-01)や米国式(6/7/2026)はExcelで開いて保存した徴候です。"
+              "jinjerは米国式を日/月/年と誤解釈して別の月に書き込むため送信を中止しました。"
+              "quick_export でCSVを再生成してください")
+    if sec_cells:
+        errors.append(
+            "秒付き時刻セルがあります: " + " / ".join(sec_cells)
+            + " …Excelで開いて上書き保存した徴候です。quick_export でCSVを再生成してください")
+    if len(months) > 1:
+        errors.append(f"複数の月の日付が混在しています: {sorted(months)} → 月ごとに分けて投入してください")
+    if target_month and months and months != {target_month}:
+        errors.append(f"対象月 {target_month} 以外の日付が含まれています: {sorted(months)}")
+    now = today or datetime.now()
+    cur = f"{now.year:04d}-{now.month:02d}"
+    prev_y, prev_m = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+    prev = f"{prev_y:04d}-{prev_m:02d}"
+    for mo in sorted(months):
+        if mo > cur:
+            errors.append(f"未来の月({mo})の日付が含まれています。勤怠の書き戻しで未来月は"
+                          "あり得ないため送信を中止しました（日付化けの徴候）")
+        elif mo < prev and not month_explicit:
+            errors.append(f"当月・前月より古い月({mo})の日付が含まれています。遡及修正で"
+                          "意図的な場合は、対象月を明示指定して再実行してください")
+    return errors
 
 
 def is_kyuka_row(row: dict[str, str]) -> tuple[bool, str]:
@@ -220,12 +287,29 @@ def run_api_import(
     rows = [(r, row_dict(r)) for r in raw_rows]
     result.total_rows = len(rows)
     log(f"入力CSV: {upload_csv} （{len(rows)}行）")
+    log("※jinjer画面からの手動インポートは併用しないでください"
+        "（2026-07-08のファイル取り違え事故の再発防止。取り込みはこのAPI投入に一本化）")
 
+    month_explicit = bool(month)
     months = {norm_date_iso(d[COL_DATE])[:7] for _r, d in rows if norm_date_iso(d[COL_DATE])}
     if not month:
         month = sorted(months)[-1] if months else datetime.now().strftime("%Y-%m")
-    if len(months) > 1:
-        log(f"[WARN] 複数月の行が混在: {sorted(months)} → 検証は {month} を使用")
+
+    # ---- 1.5 送信前の門番チェック（2026-07-08事故の再発防止） ----
+    guard_errors = validate_upload_csv(
+        [d for _r, d in rows], target_month=month, month_explicit=month_explicit)
+    if guard_errors:
+        for e in guard_errors:
+            log(f"[中止] {e}")
+        log("送信前チェックNGのため、jinjerへは送信していません。")
+        for e in guard_errors:
+            result.excluded.append({
+                "従業員番号": "", "氏名": "", "日付": "",
+                "区分": KUBUN_GUARD, "備考": e,
+            })
+        result.ok = False
+        result.report_path = _write_report(output_dir, result, [], month, dry_run=dry_run)
+        return result
 
     # ---- 2. ガード（休暇日除外） ----
     submit_rows: list[list[str]] = []
@@ -412,7 +496,7 @@ def _write_report(
     _sheet(ws1, ["従業員番号", "氏名", "日付", "区分", "備考"],
            sorted(result.excluded, key=lambda r: (r["区分"], r["従業員番号"], r["日付"])),
            [12, 14, 12, 16, 80],
-           highlight=lambda r: r.get("区分") in (KUBUN_NG, KUBUN_IMPORT_FAIL))
+           highlight=lambda r: r.get("区分") in (KUBUN_NG, KUBUN_IMPORT_FAIL, KUBUN_GUARD))
 
     ws2 = wb.create_sheet("検証結果")
     _sheet(ws2, ["従業員番号", "氏名", "日付", "判定", "詳細"],

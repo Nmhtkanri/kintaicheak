@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """kintai_import_runner の純粋関数テスト"""
+from datetime import datetime
+
 import pytest
 
 from services.kintai_import_runner import (
@@ -8,6 +10,7 @@ from services.kintai_import_runner import (
     is_kyuka_row,
     norm_date_iso,
     t2m,
+    validate_upload_csv,
 )
 
 
@@ -125,3 +128,67 @@ class TestCompareRow:
         row = {"出勤予定時刻": "8:50", "出勤1": "8:50"}
         ngs = compare_row(row, None, None)
         assert {n[0] for n in ngs} == {"出勤予定", "出勤打刻"}
+
+
+class TestValidateUploadCsv:
+    """送信前の門番チェック（2026-07-08 誤インポート事故の再発防止）"""
+
+    TODAY = datetime(2026, 7, 13)
+
+    def _rows(self, dates, extra=None):
+        return [dict({"*年月日": d, "*従業員ID": "2011001", "出勤1": "9:00"},
+                     **(extra or {})) for d in dates]
+
+    def test_ok(self):
+        errs = validate_upload_csv(self._rows(["2026/6/1", "2026/6/30"]),
+                                   target_month="2026-06", month_explicit=True,
+                                   today=self.TODAY)
+        assert errs == []
+
+    def test_us_date_blocked(self):
+        """米国式(6/7/2026)はjinjerが日/月/年と誤解釈するため送信させない（事故の真因）"""
+        errs = validate_upload_csv(self._rows(["6/7/2026"]), today=self.TODAY)
+        assert any("米国式" in e for e in errs)
+
+    def test_iso_date_blocked(self):
+        errs = validate_upload_csv(self._rows(["2026-06-01"]), today=self.TODAY)
+        assert any("YYYY/M/D" in e for e in errs)
+
+    def test_seconds_cell_blocked(self):
+        rows = self._rows(["2026/6/1"], extra={"退勤1": "33:30:00"})
+        errs = validate_upload_csv(rows, target_month="2026-06",
+                                   month_explicit=True, today=self.TODAY)
+        assert any("秒付き" in e for e in errs)
+
+    def test_multi_month_blocked(self):
+        errs = validate_upload_csv(self._rows(["2026/6/30", "2026/7/1"]),
+                                   today=self.TODAY)
+        assert any("複数の月" in e for e in errs)
+
+    def test_target_month_mismatch(self):
+        errs = validate_upload_csv(self._rows(["2026/5/1"]),
+                                   target_month="2026-06", month_explicit=True,
+                                   today=self.TODAY)
+        assert any("対象月" in e for e in errs)
+
+    def test_future_month_blocked_even_if_explicit(self):
+        errs = validate_upload_csv(self._rows(["2026/8/6"]),
+                                   target_month="2026-08", month_explicit=True,
+                                   today=self.TODAY)
+        assert any("未来の月" in e for e in errs)
+
+    def test_old_month_needs_explicit(self):
+        errs = validate_upload_csv(self._rows(["2026/4/1"]), target_month="2026-04",
+                                   month_explicit=False, today=self.TODAY)
+        assert any("遡及" in e for e in errs)
+
+    def test_old_month_allowed_when_explicit(self):
+        errs = validate_upload_csv(self._rows(["2026/4/1"]), target_month="2026-04",
+                                   month_explicit=True, today=self.TODAY)
+        assert errs == []
+
+    def test_prev_month_ok_without_explicit(self):
+        """通常運用: 前月の締め修正は月指定なしで通る"""
+        errs = validate_upload_csv(self._rows(["2026/6/15"]),
+                                   target_month="2026-06", today=self.TODAY)
+        assert errs == []
