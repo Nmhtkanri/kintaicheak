@@ -361,7 +361,7 @@ def run_api_import(
         resp = cli.post_kintai_import(csv_bytes, file_name, executor_id=executor_id or None)
         log(f"  POST応答: executor={resp.get('executor')} type={resp.get('type')}")
 
-        status = _poll_status(cli, file_name, log)
+        status = poll_import_status(cli, file_name, log)
         result.import_statuses.append(status)
         if status != "1":
             log(f"[ERROR] インポートが成功しませんでした (status={status})")
@@ -423,12 +423,13 @@ def run_api_import(
     return result
 
 
-def _poll_status(cli: JinjerClient, file_name: str, log) -> str:
+def poll_import_status(cli: JinjerClient, file_name: str, log) -> str:
     """インポートステータスを確定までポーリングする。'1'=成功 '2'=失敗 ''=タイムアウト
 
     POSTが200でも、executor に勤怠管理者権限が無い場合などは予約がキューに
     現れないまま破棄されることがある（2026-07-09 executor=9999999 で実測）。
     キューに一度も現れないまま NOT_SEEN_LIMIT 回経過したら早期に打ち切る。
+    schedule_import_runner からも共有される（実証済みロジックを一本化）。
     """
     label = {"0": "予約", "1": "成功", "2": "失敗"}
     NOT_SEEN_LIMIT = 6  # 20秒×6=約2分キューに現れなければ異常とみなす
@@ -453,6 +454,9 @@ def _poll_status(cli: JinjerClient, file_name: str, log) -> str:
         if status in ("1", "2"):
             return status
     return ""
+
+
+_poll_status = poll_import_status  # 後方互換エイリアス（既存呼び出し・テスト用）
 
 
 # ---------------------------------------------------------------------------

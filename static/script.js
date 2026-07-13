@@ -1036,7 +1036,7 @@ function showCsvExportResult(data) {
     const splitNote = document.getElementById('csv-split-note');
     if (splitNote) {
         if ((csv_files || []).length > 1) {
-            splitNote.textContent = `📦 ${csv_files.length} ファイル に自動分割しました（jinjer の月次スケジュール CSV は 1 ファイルに別グループの従業員を混在させると全行エラーになるため、打刻グループごとに分けて出力しています）。それぞれを対応する打刻グループの画面でアップロードしてください。`;
+            splitNote.textContent = `📦 ${csv_files.length} ファイル に自動分割しました（画面インポート用の形式では別打刻グループの従業員を混在させると全行エラーになるため）。下の🚀「APIで直接投入」を使う場合はアップロード不要で、全ファイルまとめて投入できます。`;
             splitNote.style.display = 'block';
         } else {
             splitNote.style.display = 'none';
@@ -1093,6 +1093,9 @@ function showCsvExportResult(data) {
         tplMsg.style.display = 'none';
     }
 
+    // API直接投入ブロック（既定ルート）を対象月ごとに生成
+    renderScheduleApiBlocks(csv_files || []);
+
     csvExportArea.style.display = 'block';
     csvExportArea.scrollIntoView({ behavior: 'smooth' });
 }
@@ -1105,4 +1108,203 @@ function escapeHtml(s) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+// =============================================================================
+// スケジュールAPI直接投入（既定ルート）
+//   ①差分プレビュー(dry-run) → fingerprint取得 → ②投入(execute)
+//   投入ジョブはサーバー側でプランを再計算し、fingerprintが一致しないと中止する
+// =============================================================================
+function renderScheduleApiBlocks(csvFiles) {
+    const area = document.getElementById('sched-api-area');
+    const blocks = document.getElementById('sched-api-blocks');
+    if (!area || !blocks) return;
+    blocks.innerHTML = '';
+    const byMonth = new Map();
+    (csvFiles || []).forEach(f => {
+        if (!f.filename || !f.year || !f.month) return;
+        const key = `${f.year}-${String(f.month).padStart(2, '0')}`;
+        if (!byMonth.has(key)) byMonth.set(key, []);
+        byMonth.get(key).push(f.filename);
+    });
+    if (byMonth.size === 0) {
+        area.style.display = 'none';
+        return;
+    }
+    [...byMonth.keys()].sort().forEach(month => {
+        blocks.appendChild(buildScheduleApiBlock(month, byMonth.get(month)));
+    });
+    area.style.display = 'block';
+}
+
+function buildScheduleApiBlock(month, filenames) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'margin-top:10px; padding:10px; border:1px solid #cfe2ff; border-radius:6px; background:#fff';
+    wrap.innerHTML = `
+        <div style="font-weight:bold">対象月 ${escapeHtml(month)}（グリッド ${filenames.length} ファイル）</div>
+        <div style="margin:8px 0">
+            <button type="button" class="sched-api-preview-btn">① 差分プレビュー（書き込みなし）</button>
+            <button type="button" class="sched-api-execute-btn" disabled>② この内容で投入</button>
+            <span class="sched-api-status" style="margin-left:8px; font-size:13px"></span>
+        </div>
+        <pre class="sched-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; padding:8px; font-size:11px; margin:6px 0"></pre>
+        <div class="sched-api-result" style="display:none; margin-top:8px"></div>
+    `;
+    const state = { month, filenames, fingerprint: '', planRows: 0, running: false };
+    const previewBtn = wrap.querySelector('.sched-api-preview-btn');
+    const executeBtn = wrap.querySelector('.sched-api-execute-btn');
+    previewBtn.addEventListener('click', () => runScheduleApiImport(wrap, state, false));
+    executeBtn.addEventListener('click', () => {
+        if (!state.fingerprint) return;
+        const msg = `書込 ${state.planRows} 行を jinjer 本番へ投入します。\n` +
+            `対象月: ${state.month}\n\n差分プレビューの内容（特に「要手動確認」）を確認しましたか？`;
+        if (!confirm(msg)) return;
+        runScheduleApiImport(wrap, state, true);
+    });
+    return wrap;
+}
+
+async function runScheduleApiImport(wrap, state, execute) {
+    if (state.running) return;
+    state.running = true;
+    const previewBtn = wrap.querySelector('.sched-api-preview-btn');
+    const executeBtn = wrap.querySelector('.sched-api-execute-btn');
+    const statusEl = wrap.querySelector('.sched-api-status');
+    const logEl = wrap.querySelector('.sched-api-log');
+    const resultEl = wrap.querySelector('.sched-api-result');
+    previewBtn.disabled = true;
+    executeBtn.disabled = true;
+    if (!execute) state.fingerprint = '';  // プレビューやり直し → 前回の承認は無効化
+    statusEl.textContent = execute ? '⏳ 投入中…（ステータス確認込みで数分かかります）'
+                                   : '⏳ 差分プレビュー作成中…（jinjerの現状を取得しています）';
+    logEl.style.display = 'block';
+    logEl.textContent = '';
+    resultEl.style.display = 'none';
+
+    const fd = new FormData();
+    fd.append('csv_filenames', JSON.stringify(state.filenames));
+    fd.append('month', state.month);
+    fd.append('execute', execute ? '1' : '0');
+    if (execute) fd.append('fingerprint', state.fingerprint);
+
+    let jobId;
+    try {
+        const res = await fetch('/schedule_api_import', { method: 'POST', body: fd });
+        const j = await res.json();
+        if (!j.success) throw new Error((j.errors || ['開始に失敗しました']).join(' / '));
+        jobId = j.job_id;
+    } catch (e) {
+        statusEl.textContent = `❌ ${e.message}`;
+        previewBtn.disabled = false;
+        state.running = false;
+        return;
+    }
+
+    const timer = setInterval(async () => {
+        let s;
+        try {
+            const res = await fetch(`/api_import_status/${jobId}`);
+            s = await res.json();
+        } catch (e) {
+            return;  // 一時的な取得失敗は次のポーリングへ
+        }
+        if (s.log && s.log.length) {
+            logEl.textContent = s.log.join('\n');
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        if (!s.done) return;
+        clearInterval(timer);
+        state.running = false;
+        previewBtn.disabled = false;
+        const r = s.result;
+        if (!r) {
+            statusEl.textContent = '❌ 処理に失敗しました（上のログを確認してください）';
+            return;
+        }
+        if (r.dry_run) {
+            if (s.ok && r.fingerprint && r.plan_rows > 0) {
+                state.fingerprint = r.fingerprint;
+                state.planRows = r.plan_rows;
+                executeBtn.disabled = false;
+                statusEl.textContent =
+                    `✅ プレビュー完了: 書込 ${r.plan_rows} 行（一致 ${r.matched_rows} 日は書きません）` +
+                    (r.manual_count ? ` / 要手動確認 ${r.manual_count} 件` : '');
+            } else if (s.ok) {
+                statusEl.textContent = '✅ 差分なし（すべてjinjerと一致しています）' +
+                    (r.manual_count ? ` / 要手動確認 ${r.manual_count} 件` : '');
+            } else {
+                statusEl.textContent = '⚠️ 送信前チェックNGで中止しました（下の内容とレポートを確認）';
+            }
+            renderScheduleApiResult(resultEl, r);
+        } else {
+            statusEl.textContent = s.ok
+                ? `✅ 投入完了: 反映OK ${r.verified_ok} / NG ${r.verified_ng}`
+                : `⚠️ 投入結果に要確認あり（レポートの「要手動確認」を見てください）`;
+            state.fingerprint = '';
+            executeBtn.disabled = true;
+            renderScheduleApiResult(resultEl, r);
+        }
+    }, 3000);
+}
+
+function renderScheduleApiResult(el, r) {
+    const kubunColor = (k) => {
+        if (!k) return '#666';
+        if (k.indexOf('休日に予定残存') >= 0) return '#b45309';       // 手動削除が必要
+        if (k.indexOf('削除しないで確認') >= 0) return '#1d4ed8';     // 半休の可能性
+        if (k.indexOf('検証NG') >= 0 || k.indexOf('失敗') >= 0 || k.indexOf('中止') >= 0) return '#b91c1c';
+        return '#666';
+    };
+    let html = '';
+    if (r.report_url) {
+        html += `<div style="margin-bottom:8px"><a href="${escapeHtml(r.report_url)}" ` +
+            `style="font-weight:bold">📥 ${r.dry_run ? '承認用レポート（Excel）' : '投入結果レポート（Excel）'}をダウンロード</a></div>`;
+    }
+    if (r.manual && r.manual.length) {
+        html += `<div style="font-weight:bold; margin:6px 0 2px">要手動確認（${r.manual_count} 件）` +
+            `${r.manual_count > r.manual.length ? `（先頭 ${r.manual.length} 件を表示）` : ''}</div>`;
+        html += '<table style="border-collapse:collapse; font-size:12px; width:100%">' +
+            '<tr style="background:#eee"><th style="border:1px solid #ccc; padding:2px 6px">従業員</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">日付</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">区分</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">備考</th></tr>';
+        r.manual.forEach(m => {
+            html += `<tr>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap">${escapeHtml(m['従業員番号'] || '')} ${escapeHtml(m['氏名'] || '')}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap">${escapeHtml(m['日付'] || '')}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap; color:${kubunColor(m['区分'])}; font-weight:bold">${escapeHtml(m['区分'] || '')}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px">${escapeHtml(m['備考'] || '')}</td></tr>`;
+        });
+        html += '</table>';
+    }
+    if (r.dry_run && r.plan_preview && r.plan_preview.length) {
+        const shown = r.plan_preview.length;
+        html += `<div style="font-weight:bold; margin:10px 0 2px">書込予定 ${r.plan_rows} 行` +
+            `${r.plan_rows > shown ? `（先頭 ${shown} 行を表示。全量はレポート参照）` : ''}</div>`;
+        html += '<div style="max-height:300px; overflow:auto">' +
+            '<table style="border-collapse:collapse; font-size:12px; width:100%">' +
+            '<tr style="background:#eee"><th style="border:1px solid #ccc; padding:2px 6px">従業員</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">日付</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">区分</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">グリッド</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">新予定</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">新休憩</th>' +
+            '<th style="border:1px solid #ccc; padding:2px 6px">現状</th></tr>';
+        r.plan_preview.forEach(p => {
+            html += `<tr>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap">${escapeHtml(p.emp)} ${escapeHtml(p.name)}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap">${escapeHtml(p.date)}(${escapeHtml(p.youbi)})</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px">${escapeHtml(p.kind)}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px">${escapeHtml(p.cell)}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap; font-weight:bold">${escapeHtml(p.new)}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px; white-space:nowrap">${escapeHtml(p.breaks)}</td>` +
+                `<td style="border:1px solid #ccc; padding:2px 6px">${escapeHtml(p.cur)}</td></tr>`;
+        });
+        html += '</table></div>';
+    }
+    if (!r.dry_run) {
+        html += `<div style="margin-top:6px">投入 ${r.submitted_rows} 行 / 反映OK ${r.verified_ok} / NG ${r.verified_ng}</div>`;
+    }
+    el.innerHTML = html;
+    el.style.display = html ? 'block' : 'none';
 }

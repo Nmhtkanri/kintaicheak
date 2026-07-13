@@ -42,6 +42,7 @@ from pathlib import Path as _Path
 from quick_compare import run_quick_compare
 from quick_export import run_quick_export
 from services.kintai_import_runner import run_api_import
+from services.schedule_import_runner import run_schedule_api_import
 from services.batch_runner import run_batch_compare
 from services.expense_check import run_telework_export
 
@@ -1216,6 +1217,106 @@ def route_api_import_status(job_id):
         "log": job["log"][-200:],
         "result": job["result"],
     })
+
+
+# ----------------------------------------------------------------------
+# スケジュールアップロードモード後工程: グリッドCSVを API でスケジュール投入
+#   画面の月次スケジュールインポートが一部従業員にサイレントに反映されない
+#   問題(2026-07: 11名で実測)の恒久回避。docs/PLAN_スケジュールAPI投入.md 参照。
+#   ジョブ辞書・ロックは手順③(/api_import)と共有し、jinjer側の同時予約1件
+#   制限がモード横断で効くようにする。ステータス取得も /api_import_status を共用。
+# ----------------------------------------------------------------------
+@app.route("/schedule_api_import", methods=["POST"])
+def route_schedule_api_import():
+    """生成済みグリッドCSVを差分プラン化して API で jinjer へ投入する。
+
+    フォーム:
+      - csv_filenames : OUTPUT_FOLDER 内のグリッドCSVファイル名のJSON配列
+      - month         : 対象月 YYYY-MM（必須）
+      - execute       : "1" なら投入、未指定/0 は差分プレビュー（dry-run）
+      - fingerprint   : execute=1 のとき必須。差分プレビューが返した値
+    """
+    try:
+        names = json.loads(request.form.get("csv_filenames") or "[]")
+    except json.JSONDecodeError:
+        return jsonify({"success": False, "errors": ["csv_filenames が不正です"]}), 400
+    csv_filenames = [os.path.basename(str(n or "").strip()) for n in names]
+    csv_filenames = [n for n in csv_filenames if n]
+    month = (request.form.get("month") or "").strip()
+    execute_flag = request.form.get("execute") == "1"
+    fingerprint = (request.form.get("fingerprint") or "").strip()
+
+    if not csv_filenames:
+        return jsonify({"success": False, "errors": ["グリッドCSVが指定されていません"]}), 400
+    if not re.match(r"^\d{4}-\d{2}$", month):
+        return jsonify({"success": False, "errors": ["対象月(YYYY-MM)が不正です"]}), 400
+    if execute_flag and not fingerprint:
+        return jsonify({"success": False,
+                        "errors": ["投入には差分プレビューのfingerprintが必要です。"
+                                   "先に①差分プレビューを実行してください"]}), 400
+    csv_paths = []
+    for n in csv_filenames:
+        p = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, n)))
+        if not p.is_file():
+            return jsonify({"success": False,
+                            "errors": [f"グリッドCSVが見つかりません: {n}。"
+                                       "先にスケジュールCSVを作成してください"]}), 400
+        csv_paths.append(p)
+
+    with _api_import_guard:
+        if any(not j["done"] for j in _api_import_jobs.values()):
+            return jsonify({"success": False,
+                            "errors": ["別のAPI投入が実行中です（jinjer側も同時予約1件の"
+                                       "制限があります）。完了を待ってください"]}), 409
+        job_id = uuid.uuid4().hex
+        job = {"done": False, "ok": False, "log": [], "result": None}
+        _api_import_jobs[job_id] = job
+
+    def _worker():
+        try:
+            r = run_schedule_api_import(
+                grid_csvs=csv_paths,
+                output_dir=_Path(Config.OUTPUT_FOLDER),
+                month=month,
+                executor_id=Config.JINJER_IMPORT_EXECUTOR_ID,
+                dry_run=not execute_flag,
+                expected_fingerprint=fingerprint if execute_flag else "",
+                log_func=lambda m: job["log"].append(m),
+            )
+            report_name = os.path.basename(r.report_path) if r.report_path else ""
+            job["ok"] = r.ok
+            job["result"] = {
+                "mode": "schedule",
+                "dry_run": r.dry_run,
+                "month": r.month,
+                "plan_rows": r.plan_rows,
+                "matched_rows": r.matched_rows,
+                "plan_preview": [
+                    {"emp": p["emp"], "name": p["name"], "date": p["date_iso"],
+                     "youbi": p["youbi"], "kind": p["kind"], "cell": p["cell"],
+                     "new": f"{p['start']}-{p['end']}",
+                     "breaks": " ".join(f"{s}-{e}" for s, e in p["breaks"]) or "(なし)",
+                     "cur": p["cur"]}
+                    for p in r.plan[:300]
+                ],
+                "manual": r.manual[:300],
+                "manual_count": len(r.manual),
+                "fingerprint": r.fingerprint,
+                "submitted_rows": r.submitted_rows,
+                "verified_ok": r.verified_ok,
+                "verified_ng": r.verified_ng,
+                "report_url": f"/download/{report_name}" if report_name else None,
+            }
+        except Exception as e:  # noqa: BLE001 — ジョブ内の失敗はログで返す
+            logger.exception("schedule_api_import failed")
+            job["log"].append(f"[ERROR] {e}")
+        finally:
+            job["done"] = True
+
+    threading.Thread(target=_worker, daemon=True).start()
+    logger.info("schedule_api_import job %s 開始 (files=%s month=%s execute=%s)",
+                job_id, csv_filenames, month, execute_flag)
+    return jsonify({"success": True, "job_id": job_id})
 
 
 @app.route("/expense_telework", methods=["POST"])

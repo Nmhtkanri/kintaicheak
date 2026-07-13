@@ -12,6 +12,7 @@ CSV変換モードで「氏名 → 従業員ID」のマップを構築するた�
 from __future__ import annotations
 
 import logging
+import re
 import time as _time
 from typing import Any
 
@@ -28,13 +29,57 @@ class JinjerAPIError(Exception):
 
 def _strip_seconds(v) -> str:
     """'09:15:00' → '9:15'。24時超（'33:30:00'）もそのまま扱う。不正値は空文字。"""
-    import re as _re
-
     s = str(v or "").strip()
-    m = _re.match(r"^(\d{1,3}):(\d{2})(?::\d{2})?$", s)
+    m = re.match(r"^(\d{1,3}):(\d{2})(?::\d{2})?$", s)
     if not m:
         return ""
     return f"{int(m.group(1))}:{m.group(2)}"
+
+
+def parse_work_schedules_data(data: dict) -> dict[str, dict]:
+    """work-schedules レスポンスの data 部を日別 dict に変換する（純粋関数）。
+
+    jinjer は同一日のスケジュールを新旧2バージョンで二重返却することがある
+    （実測: 先頭が新しい方＝画面表示と一致）。**先頭レコードを採用**し、
+    2件目以降の同一日は捨てる。
+    """
+    result: dict[str, dict] = {}
+    for w in (data or {}).get("work_schedules", []) or []:
+        d = str(w.get("date") or "").strip()
+        if not d or d in result:
+            continue  # 同一日の2件目以降は旧バージョン → 先頭採用
+        sched = w.get("work_schedule") or {}
+        breaks = []
+        for b in w.get("break_schedules", []) or []:
+            bs = _strip_seconds(b.get("start"))
+            be = _strip_seconds(b.get("end"))
+            if bs and be:
+                breaks.append((bs, be))
+        result[d] = {
+            "start": _strip_seconds(sched.get("start")),
+            "end": _strip_seconds(sched.get("end")),
+            "breaks": breaks,
+            "store": str((w.get("store") or {}).get("name") or ""),
+        }
+    return result
+
+
+def parse_requested_day_offs_data(data: dict) -> dict[str, str]:
+    """requested-day-offs レスポンスの data 部を {date_iso: 説明文} に変換する（純粋関数）。
+
+    date は "2026/07/06" / "2026-7-6" のどちらでも ISO (YYYY-MM-DD) に正規化する。
+    説明文は「休暇名/status=N」形式（status の意味は jinjer 側仕様。表示用に残す）。
+    """
+    result: dict[str, str] = {}
+    for rec in (data or {}).get("requested_day_offs", []) or []:
+        d_raw = str(rec.get("date") or "").replace("/", "-")
+        m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", d_raw)
+        if not m:
+            continue
+        d_iso = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        name = ((rec.get("day_off_classification") or {}).get("name") or "休暇")
+        result[d_iso] = f"{name}/status={rec.get('status')}"
+    return result
 
 
 class JinjerClient:
@@ -369,6 +414,7 @@ class JinjerClient:
             ``{date_iso: {"start": "9:00", "end": "17:30", "breaks": [("12:00","13:00"), ...],
                           "store": 打刻グループ名}}``
             夜勤は 24時超表記（例 "33:30"）のまま返る。スケジュールがない日はキーごと無い。
+            同一日の新旧二重返却は先頭（新しい方）を採用する。
         """
         headers = self._auth_headers()
         try:
@@ -380,29 +426,43 @@ class JinjerClient:
             )
         except requests.RequestException as e:
             raise JinjerAPIError(f"スケジュール取得に失敗 emp={employee_id}: {e}") from e
-        result: dict[str, dict] = {}
         if r.status_code != 200:
             logger.warning("work-schedules 取得失敗 emp=%s status=%s", employee_id, r.status_code)
-            return result
-        data = r.json().get("data") or {}
-        for w in data.get("work_schedules", []) or []:
-            d = str(w.get("date") or "").strip()
-            if not d:
+            return {}
+        return parse_work_schedules_data(r.json().get("data") or {})
+
+    def get_requested_day_offs(self, employee_id: str, month: str) -> dict[str, str]:
+        """`/v1/employees/requested-day-offs` から休暇登録日を取得する。
+
+        休暇登録がある日はjinjerがスケジュール書込をサイレントに無視するため、
+        投入前ガードに使う。取得失敗は警告のみで空dictを返す
+        （失敗しても休暇日への書込はjinjerが無視 → 事後検証NGとして顕在化する）。
+
+        Returns:
+            ``{date_iso: "休暇名/status=N"}``
+        """
+        headers = self._auth_headers()
+        r = None
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    f"{self.base_url}/v1/employees/requested-day-offs",
+                    headers=headers,
+                    params={"employee-id": str(employee_id), "month": month},
+                    timeout=30,
+                )
+            except requests.RequestException as e:
+                logger.warning("requested-day-offs 取得失敗 emp=%s: %s", employee_id, e)
+                return {}
+            if r.status_code == 429 and attempt < 2:
+                _time.sleep(3 * (attempt + 1))
                 continue
-            sched = w.get("work_schedule") or {}
-            breaks = []
-            for b in w.get("break_schedules", []) or []:
-                bs = _strip_seconds(b.get("start"))
-                be = _strip_seconds(b.get("end"))
-                if bs and be:
-                    breaks.append((bs, be))
-            result[d] = {
-                "start": _strip_seconds(sched.get("start")),
-                "end": _strip_seconds(sched.get("end")),
-                "breaks": breaks,
-                "store": str((w.get("store") or {}).get("name") or ""),
-            }
-        return result
+            break
+        if r is None or r.status_code != 200:
+            logger.warning("requested-day-offs 取得失敗 emp=%s status=%s",
+                           employee_id, r.status_code if r is not None else "N/A")
+            return {}
+        return parse_requested_day_offs_data(r.json().get("data") or {})
 
     def get_attendance_times(self, employee_id: str, month: str) -> dict[str, dict]:
         """`/v1/employees/attendances` から日別の出退勤時刻を取得する。

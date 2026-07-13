@@ -258,6 +258,19 @@
         </div>
 
         <div id="csv-new-template-msg" class="new-template-msg" style="display:none"></div>
+
+        <!-- API直接投入（既定ルート）。グリッドCSVは控え・監査用として上に残す -->
+        <div id="sched-api-area" style="display:none; margin-top:16px; padding:12px 14px;
+             border:2px solid #2E75B6; border-radius:8px; background:#f6faff">
+            <div style="font-weight:bold; font-size:15px">🚀 APIでjinjerへ直接投入（推奨）</div>
+            <p class="hint" style="margin:6px 0 10px 0">
+                jinjer画面からのCSVインポートは一部従業員にサイレントに反映されない事象があるため、
+                API投入を標準ルートにしています（上のCSVは控え・監査用）。<br>
+                ① 差分プレビューで「誰の何日をどう変えるか」を確認 →
+                ② 投入（jinjerの現状と食い違う日だけ書き込み、反映を自動検証します）。
+            </p>
+            <div id="sched-api-blocks"></div>
+        </div>
     </div>
 
     <!-- ============================================================ -->
