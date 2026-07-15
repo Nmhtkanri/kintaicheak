@@ -459,6 +459,65 @@
             <pre id="ex-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
         </div>
         <div id="ex-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+
+        <!-- ==== 経費統合一覧表の生成（マクロ移植 P1a）==== -->
+        <div style="border-top:2px dashed #548235; margin:14px 0 0"></div>
+        <div class="step-header" style="margin-top:8px">
+            <div>
+                <div class="step-number" style="background:#2f5597">📋</div>
+                <div class="step-copy">
+                    <div class="section-title">経費統合一覧表の生成（4ソース取込 → 統合一覧表＋経路突合チェック）</div>
+                    <p class="hint">jinjer / e-staffing / SAP / freee の生CSVパスを入れて実行すると、社員番号照合・SAP税抜補正などの前処理をして34列の「経費統合一覧表」を作り、通勤経路と突合した「経路突合チェック」シートと合わせてExcel出力します。指定したソースだけ取り込みます（空欄は未取込）。</p>
+                </div>
+            </div>
+        </div>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label>
+                ① jinjer 経費CSV（仕訳データ <code>*仕訳データ.csv</code>）:
+                <input type="text" id="ki-jinjer" placeholder="例: Z:\経費\2026年07月07日仕訳データ.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label>
+                ② e-staffing 経費CSV（<code>勤怠データダウンロード_立替金_*.csv</code>）:
+                <input type="text" id="ki-estaffing" placeholder="例: Z:\経費\勤怠データダウンロード_立替金_20260702142834.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label>
+                ③ SAP Fieldglass 経費CSV（生CSV <code>経費月次出力_API連携用*.csv</code>・税抜補正の対象）:
+                <input type="text" id="ki-sap" placeholder="例: Z:\経費\経費月次出力_API連携用 (5).csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label>
+                ④ freee 経費CSV（本社経費 <code>経費精算-*.csv</code>）:
+                <input type="text" id="ki-freee" placeholder="例: Z:\経費\経費精算-20260707120832.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label>
+                出力ファイル名(任意・.xlsxは自動で付きます):
+                <input type="text" id="ki-output-filename" placeholder="経費統合一覧表_2026年06月.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px">
+                <input type="checkbox" id="ki-route-check" checked>
+                経路突合チェックシートを付ける（通勤経路は jinjer API から取得。要ネット接続）
+            </label>
+            <div style="margin-top:6px">
+                <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
+                <span id="ki-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="ki-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card"><div class="card-label">統合一覧表(行)</div><div class="card-value" id="ki-cnt-rows">0</div></div>
+                <div class="summary-card"><div class="card-label">ソース取込(jinjer/e-staffing/SAP/freee)</div><div class="card-value" id="ki-cnt-sources" style="font-size:14px">—</div></div>
+                <div class="summary-card"><div class="card-label">社員番号 未照合(行)</div><div class="card-value" id="ki-cnt-unmatched">0</div></div>
+                <div class="summary-card"><div class="card-label">★要確認(経路突合)</div><div class="card-value" id="ki-cnt-flagged">—</div></div>
+                <div class="summary-card"><div class="card-label">△逆要確認</div><div class="card-value" id="ki-cnt-rev">—</div></div>
+            </div>
+            <a id="ki-download-link" href="#" class="btn btn-download" style="display:none">📥 統合一覧表xlsxをダウンロード</a>
+            <pre id="ki-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+        </div>
+        <div id="ki-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
 </div>
@@ -752,6 +811,66 @@
                 document.getElementById('ex-status').textContent = '';
             } finally {
                 exRunBtn.disabled = false;
+            }
+        });
+    }
+
+    // ----- 経費統合一覧表の生成（4ソース取込・マクロ移植 P1a）-----
+    const kiRunBtn = document.getElementById('ki-run-btn');
+    if (kiRunBtn) {
+        kiRunBtn.addEventListener('click', async () => {
+            hideError('ki-error-area');
+            document.getElementById('ki-result-area').style.display = 'none';
+            const routeCheck = document.getElementById('ki-route-check').checked;
+            document.getElementById('ki-status').textContent =
+                routeCheck ? '処理中...（通勤経路をjinjer APIから取得するため少し時間がかかります）' : '処理中...';
+            kiRunBtn.disabled = true;
+
+            const fd = new FormData();
+            fd.append('jinjer_csv', document.getElementById('ki-jinjer').value);
+            fd.append('estaffing_csv', document.getElementById('ki-estaffing').value);
+            fd.append('sap_csv', document.getElementById('ki-sap').value);
+            fd.append('freee_csv', document.getElementById('ki-freee').value);
+            fd.append('output_filename', document.getElementById('ki-output-filename').value);
+            fd.append('route_check', routeCheck ? '1' : '0');
+
+            try {
+                const res = await fetch('/expense_integration', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success){
+                    showError('ki-error-area', data.errors || ['処理に失敗しました']);
+                    document.getElementById('ki-status').textContent = '';
+                    return;
+                }
+                const st = data.stats || {};
+                document.getElementById('ki-cnt-rows').textContent = st.integrated_rows || 0;
+                const sc = st.source_counts || {};
+                const fmt = (v) => (v === null || v === undefined) ? '未取込' : (v + '行');
+                document.getElementById('ki-cnt-sources').textContent =
+                    fmt(sc.jinjer) + ' / ' + fmt(sc.estaffing) + ' / ' + fmt(sc.sap) + ' / ' + fmt(sc.freee);
+                document.getElementById('ki-cnt-unmatched').textContent = st.unmatched_emp || 0;
+                const rs = st.route_summary || {};
+                document.getElementById('ki-cnt-flagged').textContent =
+                    (rs.flagged_rows !== undefined)
+                        ? (rs.flagged_rows + '行 / ' + rs.flagged_emps + '名')
+                        : '—';
+                document.getElementById('ki-cnt-rev').textContent =
+                    (rs.rev_rows !== undefined)
+                        ? (rs.rev_rows + '行 / ' + rs.rev_emps + '名')
+                        : '—';
+                const dl = document.getElementById('ki-download-link');
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+                const consoleEl = document.getElementById('ki-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                document.getElementById('ki-result-area').style.display = 'block';
+                document.getElementById('ki-status').textContent = '完了';
+            } catch (e) {
+                showError('ki-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('ki-status').textContent = '';
+            } finally {
+                kiRunBtn.disabled = false;
             }
         });
     }

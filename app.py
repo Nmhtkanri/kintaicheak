@@ -45,6 +45,7 @@ from services.kintai_import_runner import run_api_import
 from services.schedule_import_runner import run_schedule_api_import
 from services.batch_runner import run_batch_compare
 from services.expense_check import run_telework_export
+from services.keihi_summary import run_keihi_integration
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1383,6 +1384,82 @@ def route_expense_telework():
     }
     if not result.ok:
         payload["errors"] = [result.error] if result.error else ["テレワーク集計に失敗しました"]
+        return jsonify(payload), 500
+    return jsonify(payload)
+
+
+@app.route("/expense_integration", methods=["POST"])
+def route_expense_integration():
+    """経費統合一覧表の生成（経費マクロ移植 P1a）。
+
+    4ソース（jinjer / e-staffing / SAP / freee）の生CSVパスを受け取り、前処理・社員番号照合して
+    34列の経費統合一覧表を作り、経路突合チェックシートと合わせて Excel 出力する。
+    指定されたソースだけ取り込む（未指定は「未取込」）。
+
+    フォーム:
+      - jinjer_csv / estaffing_csv / sap_csv / freee_csv : 各生CSVパス（いずれか1つ以上必須）
+      - output_filename : 任意
+      - route_check     : "1"/"0"（既定 "1"。通勤経路は jinjer API から取得）
+    """
+    sources = {
+        "jinjer_csv": _clean_path_input(request.form.get("jinjer_csv")),
+        "estaffing_csv": _clean_path_input(request.form.get("estaffing_csv")),
+        "sap_csv": _clean_path_input(request.form.get("sap_csv")),
+        "freee_csv": _clean_path_input(request.form.get("freee_csv")),
+    }
+    output_filename = (request.form.get("output_filename") or "").strip()
+    route_check = (request.form.get("route_check") or "1").strip() != "0"
+
+    errors = []
+    paths: dict = {}
+    for key, val in sources.items():
+        if not val:
+            paths[key] = None
+            continue
+        p = _Path(val)
+        if not p.exists():
+            errors.append(f"{key} が見つかりません: {p}")
+        paths[key] = p
+    if not any(paths.values()):
+        errors.append("少なくとも1つのソースCSV（jinjer / e-staffing / SAP / freee）を指定してください。")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    if not output_filename:
+        output_filename = "経費統合一覧表.xlsx"
+    output_filename = _ensure_extension(os.path.basename(output_filename), ".xlsx")
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result = run_keihi_integration(
+            output_path=output_path,
+            jinjer_csv=paths["jinjer_csv"], estaffing_csv=paths["estaffing_csv"],
+            sap_csv=paths["sap_csv"], freee_csv=paths["freee_csv"],
+            route_check=route_check, log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("expense_integration failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    payload = {
+        "success": result.ok,
+        "download_url": f"/download/{output_filename}" if result.ok else None,
+        "output_filename": output_filename if result.ok else None,
+        "stats": {
+            "integrated_rows": result.integrated_rows,
+            "source_counts": result.source_counts,
+            "unmatched_emp": result.unmatched_emp,
+            "route_summary": result.route_summary,
+        },
+        "console": log_lines,
+    }
+    if not result.ok:
+        payload["errors"] = [result.error] if result.error else ["統合一覧表の生成に失敗しました"]
         return jsonify(payload), 500
     return jsonify(payload)
 
