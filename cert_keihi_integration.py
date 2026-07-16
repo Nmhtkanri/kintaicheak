@@ -32,6 +32,41 @@ from services.keihi_summary import (
 _DATE_COLS = {2, 5, 20}  # 申請日 / 利用日 / 計上日(yyyy/mm/dd)
 
 
+def _read_expected(path: str) -> list:
+    """正解の統合一覧表を CSV か xlsx から読み、ヘッダーを除いたデータ行(list[list])を返す。
+
+    xlsx はシート「経費統合一覧表」を優先、無ければ先頭シート。空行は落とす。
+    """
+    if str(path).lower().endswith((".xlsx", ".xlsm")):
+        from datetime import date as _date, datetime as _dt
+        from openpyxl import load_workbook
+
+        def _cellstr(v):
+            if v is None:
+                return ""
+            if isinstance(v, (_dt, _date)):
+                return f"{v.year}/{v.month}/{v.day}"
+            if isinstance(v, float) and v.is_integer():
+                return str(int(v))
+            return str(v)
+
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb["経費統合一覧表"] if "経費統合一覧表" in wb.sheetnames else wb.worksheets[0]
+            rows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i == 0:
+                    continue  # ヘッダー
+                cells = [_cellstr(v) for v in row]
+                if any(c.strip() for c in cells):
+                    rows.append(cells)
+            return rows
+        finally:
+            wb.close()
+    _, rows = read_csv_any_enc(path)
+    return rows
+
+
 def _norm_cell(i: int, v) -> str:
     s = "" if v is None else str(v).strip()
     if i in _DATE_COLS:
@@ -53,8 +88,8 @@ def main():
     ap.add_argument("--samples", type=int, default=10, help="差分の表示件数")
     args = ap.parse_args()
 
-    # --- 正解（expected）を読む ---
-    _, exp_rows = read_csv_any_enc(args.expected)
+    # --- 正解（expected）を読む（CSV / xlsx 両対応） ---
+    exp_rows = _read_expected(args.expected)
     exp_rows = [list(r) + [""] * (NCOL - len(r)) for r in exp_rows]
 
     # --- ロスター（expected + jinjer CSV の 社員番号↔氏名） ---

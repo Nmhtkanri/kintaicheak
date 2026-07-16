@@ -56,6 +56,18 @@ def test_normkey_and_night_duty():
     assert is_night_duty_text("交通費") is False
 
 
+def test_excel_coerce_jp_date():
+    from services.keihi_summary import excel_coerce_jp_date
+    # Excel が OpenText で「6月5日」を日付化する挙動（年は year_hint から）
+    assert excel_coerce_jp_date("6月5日", "2026/06/05") == "2026/06/05"
+    assert excel_coerce_jp_date("6/17", "2026/06/17") == "2026/06/17"
+    assert excel_coerce_jp_date("2026/6/4", "") == "2026/06/04"
+    # 日付でない説明は原文そのまま（前後空白も保持）
+    assert excel_coerce_jp_date("東京から潮見の往復", "2026/06/13") == "東京から潮見の往復"
+    assert excel_coerce_jp_date("その他の費用(10%) 6/4 ", "2026/06/04") == "その他の費用(10%) 6/4 "
+    assert excel_coerce_jp_date("", "2026/06/04") == ""
+
+
 def test_parse_amount_and_round():
     assert parse_amount("1,375") == "1375"
     assert parse_amount("￥2,750円") == "2750"
@@ -167,6 +179,29 @@ def test_transform_sap_8a_copies_desc_to_vendor():
     assert row[C_TOTAL] == "2500"
 
 
+def test_transform_sap_memo_coerces_date_desc():
+    # 説明が「6月5日」の行 → Excel日付化を再現し 備考(明細)は費用エントリ日で始まる
+    r = _sap_row(sei="将司", mei="大北", amt="2750", vendor="顧客対応当番16",
+                 desc="6月5日", cc="ＵＡＬＨＷ保守全般", sid="36828ES00003651")
+    row = transform_sap([], [r], {})[0]
+    # 費用エントリ日=2026/6/13 → 年は2026、6月5日→2026/06/05
+    assert row[C_MEMO_LINE] == "2026/06/05 / CC: ＵＡＬＨＷ保守全般 / ID: 36828ES00003651"
+    # 説明が日付でない通常行は原文（前後空白保持）
+    r2 = _sap_row(vendor="京葉線", amt="398", desc="東京から潮見の往復 ", cc="X", sid="Y")
+    row2 = transform_sap([], [r2], {})[0]
+    assert row2[C_MEMO_LINE] == "東京から潮見の往復  / CC: X / ID: Y"
+
+
+def test_transform_freee_preserves_newline_in_memo():
+    # freee 内容の埋め込み改行はそのまま保持する（マクロ CStr 相当）
+    head = [""] * 32
+    head[2], head[3], head[12], head[13] = "2026/7/3", "稲場　直哉", "6月分", "199"
+    head[18], head[22], head[23], head[25], head[29] = "2026/6/22", "交通費", "入：新橋駅\n出：品川駅", "199", ""
+    rows = transform_freee([], [head], roster={})
+    assert rows[0][C_MEMO_LINE] == "入：新橋駅\n出：品川駅"
+    assert rows[0][C_USEDATE] == "2026/06/22"
+
+
 def _freee_rows():
     # 32列。前方フィル対象: 申請日(2) 申請者(3) 申請タイトル(12) 合計金額(13)
     head = [""] * 32
@@ -185,10 +220,10 @@ def test_transform_freee_forward_fill_and_mapping():
     r0, r1 = rows
     # 名称変換（メール→氏名）＋社員番号照合
     assert r0[C_NAME] == "塩川 浩生" and r0[C_EMP] == "2019047"
-    # 内訳=経費科目、D=金額、仕訳区分=本社経費、利用日は空（Rev5準拠）
+    # 内訳=経費科目、D=金額、仕訳区分=本社経費、利用日=日付（Append_本社経費 標準経路）
     assert r0[C_DETAIL] == "会議接待費" and r0[C_TOTAL] == "1100"
     assert r0[C_ENTRY_TYPE] == "本社経費"
-    assert r0[C_USEDATE] == ""
+    assert r0[C_USEDATE] == "2026/06/30"       # F:利用日 ← 日付(ゼロ埋め)
     assert r0[C_MEMO_REQ] == "6月_経費精算"
     assert "森田との面談" in r0[C_MEMO_LINE] and "承認願います" in r0[C_MEMO_LINE]
     # 2行目は申請者/申請日/タイトルが前方フィルされる

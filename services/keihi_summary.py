@@ -151,6 +151,31 @@ def normkey(s) -> str:
     return re.sub(r"[\s　]", "", "" if s is None else str(s))
 
 
+def excel_coerce_jp_date(text: str, year_hint: str = "") -> str:
+    """Excel が OpenText で日付らしい文字列を日付シリアル化する挙動を再現する。
+
+    SAP CSV を `Workbooks.OpenText` で開くと、説明(F)の「6月5日」「6/5」等が日付に自動変換され、
+    yyyy/mm/dd（ゼロ埋め）で再表示される（→備考(明細)に入る）。これを文字列処理で模す。
+    年の無い「M月D日」「M/D」は year_hint（同行の費用エントリ日など）の年を使う。
+    日付でなければ元の文字列を返す。
+    """
+    if text is None:
+        return ""
+    d = str(text).strip()
+    if d:
+        year = year_hint.split("/")[0] if "/" in (year_hint or "") else ""
+        m = re.fullmatch(r"(\d{1,2})月(\d{1,2})日", d)
+        if m and year:
+            return f"{year}/{int(m.group(1)):02d}/{int(m.group(2)):02d}"
+        m = re.fullmatch(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", d)
+        if m:
+            return f"{int(m.group(1))}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+        m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})", d)
+        if m and year:
+            return f"{year}/{int(m.group(1)):02d}/{int(m.group(2)):02d}"
+    return str(text)   # 非日付は原文（前後空白も）そのまま（マクロ SafeStr=CStr 相当）
+
+
 def parse_amount(v) -> str:
     """金額文字列を正規化（カンマ/￥/円を除去し整数文字列に）。数値でなければそのまま。"""
     s = "" if v is None else str(v)
@@ -320,7 +345,10 @@ def transform_sap(headers: list[str], rows: list[list[str]], roster: dict) -> li
         sei, mei = (w[0] or "").strip(), (w[1] or "").strip()
         amt = parse_amount(w[2])
         vendor = (w[3] or "").strip()
-        desc = (w[5] or "").strip()
+        entry_date = norm_date_pad(w[4])       # 費用エントリ日 → 利用日
+        # 説明(F): Excel が OpenText で「6月5日」等を日付化するため、その挙動を再現して備考に入れる。
+        # 非日付は原文そのまま（前後空白も保持＝マクロ CStr 相当）
+        desc = excel_coerce_jp_date(w[5], entry_date)
         cc = (w[8] or "").strip()
         sap_id = (w[10] or "").strip()
 
@@ -334,7 +362,7 @@ def transform_sap(headers: list[str], rows: list[list[str]], roster: dict) -> li
         row[C_EMP] = roster.get(normkey(sei + mei)) or roster.get(normkey(mei + sei)) or ""
         row[C_NAME] = (sei + " " + mei).strip()
         row[C_APPDATE] = norm_date_pad(w[6])   # 申請日 ← 承認日
-        row[C_USEDATE] = norm_date_pad(w[4])   # 利用日 ← 費用エントリ日
+        row[C_USEDATE] = entry_date            # 利用日 ← 費用エントリ日
         row[C_DETAIL] = vendor[:80]            # 内訳 ← 業者名（80文字制限）
         row[C_MEMO_LINE] = memo                # 備考(明細)
         if any(k in vendor for k in NIGHT_DUTY_KEYWORDS):
@@ -357,8 +385,7 @@ def transform_freee(headers: list[str], rows: list[list[str]], roster: dict) -> 
 
     申請ヘッダ＋明細の縦持ち構造なので、申請日/申請者/申請タイトル/合計金額 を前方フィルする。
     名称変換（メール→氏名, ハードコード変換）後、社員番号を氏名照合で付与し、Append_本社経費 相当で
-    34列へ落とす（D=金額, H:内訳=経費科目, T:備考=内容/備考, Z:仕訳区分="本社経費"）。
-    ※ Rev5 実測では本社経費行の 利用日(6列目) は空のため入れない（現行運用の実挙動に合わせる）。
+    34列へ落とす（D=金額, F:利用日=日付, H:内訳=経費科目, T:備考=内容/備考, Z:仕訳区分="本社経費"）。
     """
     C = _FREEE_COLS
     filled = [list(r) + [""] * (32 - len(r)) for r in rows]
@@ -381,13 +408,15 @@ def transform_freee(headers: list[str], rows: list[list[str]], roster: dict) -> 
                 break
         emp_no = roster.get(normkey(applicant), "該当なし")
         amt = parse_amount(r[C["金額"]])
-        cont = (r[C["内容"]] or "").strip().replace("\n", " ")
-        memo = (r[C["備考"]] or "").strip()
+        # 内容・備考は原文そのまま（改行・前後空白も保持＝マクロ CStr 相当。内容に改行を含むセルあり）
+        cont = r[C["内容"]] or ""
+        memo = r[C["備考"]] or ""
 
         row = _blank_row()
         row[C_EMP] = emp_no
         row[C_NAME] = applicant
         row[C_APPDATE] = norm_date_pad(r[C["申請日"]])
+        row[C_USEDATE] = norm_date_pad(r[C["日付"]])         # F: 利用日 ← 日付（Append_本社経費）
         row[C_TOTAL] = amt                                   # D: 合計 ← 金額
         row[C_MEMO_REQ] = (r[C["申請タイトル"]] or "").strip()   # E: 備考(申請書) ← 申請タイトル
         row[C_DETAIL] = (r[C["経費科目"]] or "").strip()        # H: 内訳 ← 経費科目
