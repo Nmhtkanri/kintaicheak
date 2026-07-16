@@ -1409,6 +1409,8 @@ def route_expense_integration():
     }
     output_filename = (request.form.get("output_filename") or "").strip()
     route_check = (request.form.get("route_check") or "1").strip() != "0"
+    classify = (request.form.get("classify") or "1").strip() != "0"
+    keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
 
     errors = []
     paths: dict = {}
@@ -1420,6 +1422,9 @@ def route_expense_integration():
         if not p.exists():
             errors.append(f"{key} が見つかりません: {p}")
         paths[key] = p
+    keywords_file = _Path(keywords_file_str) if keywords_file_str else None
+    if keywords_file and not keywords_file.exists():
+        errors.append(f"キーワード設定ファイルが見つかりません: {keywords_file}")
     if not any(paths.values()):
         errors.append("少なくとも1つのソースCSV（jinjer / e-staffing / SAP / freee）を指定してください。")
     if errors:
@@ -1440,7 +1445,8 @@ def route_expense_integration():
             output_path=output_path,
             jinjer_csv=paths["jinjer_csv"], estaffing_csv=paths["estaffing_csv"],
             sap_csv=paths["sap_csv"], freee_csv=paths["freee_csv"],
-            route_check=route_check, log_func=_log,
+            route_check=route_check, classify=classify, keywords_file=keywords_file,
+            log_func=_log,
         )
     except Exception as e:
         logger.exception("expense_integration failed")
@@ -1450,16 +1456,83 @@ def route_expense_integration():
         "success": result.ok,
         "download_url": f"/download/{output_filename}" if result.ok else None,
         "output_filename": output_filename if result.ok else None,
+        "import_csv_url": f"/download/{result.import_csv_name}" if result.import_csv_name else None,
+        "import_csv_name": result.import_csv_name or None,
+        "import_preview": result.import_preview,
+        "import_warnings": result.import_warnings,
         "stats": {
             "integrated_rows": result.integrated_rows,
             "source_counts": result.source_counts,
             "unmatched_emp": result.unmatched_emp,
             "route_summary": result.route_summary,
+            "classify_summary": result.classify_summary,
         },
         "console": log_lines,
     }
     if not result.ok:
         payload["errors"] = [result.error] if result.error else ["統合一覧表の生成に失敗しました"]
+        return jsonify(payload), 500
+    return jsonify(payload)
+
+
+@app.route("/expense_payroll_import", methods=["POST"])
+def route_expense_payroll_import():
+    """集計済みインポートCSVを jinjer給与へAPIインポートする（確認後実行）。
+
+    フォーム:
+      - import_csv_name : /expense_integration が outputs に出力したインポートCSVのファイル名
+      - month           : 処理月 YYYY-MM（jinjer給与計算の対象月）
+      - template_id     : 任意（既定 37047「経費インポート用」）
+      - confirmed       : "1" 必須（プレビュー確認済みの明示）
+    """
+    from services.keihi_payroll_import import DEFAULT_TEMPLATE_ID, post_payroll_import
+    from services.jinjer_api_client import JinjerClient, JinjerAPIError
+
+    import_csv_name = os.path.basename((request.form.get("import_csv_name") or "").strip())
+    month = (request.form.get("month") or "").strip()
+    template_id = (request.form.get("template_id") or "").strip() or DEFAULT_TEMPLATE_ID
+    confirmed = (request.form.get("confirmed") or "").strip() == "1"
+
+    errors = []
+    if not confirmed:
+        errors.append("プレビュー確認済みフラグがありません（画面から実行してください）。")
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        errors.append("処理月は YYYY-MM 形式で入力してください（例: 2026-07）")
+    csv_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, import_csv_name))) if import_csv_name else None
+    if not csv_path or not csv_path.exists():
+        errors.append(f"インポートCSVが見つかりません: {import_csv_name}（先に統合一覧表を生成してください）")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        client = JinjerClient()
+        client.authenticate()
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer 認証に失敗しました: {e}"]}), 500
+
+    try:
+        result = post_payroll_import(
+            client=client, month=month, csv_bytes=csv_path.read_bytes(),
+            file_name=import_csv_name, template_id=template_id, log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("expense_payroll_import failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    payload = {
+        "success": result.ok,
+        "status": result.status,
+        "month": month,
+        "file_name": import_csv_name,
+        "console": log_lines,
+    }
+    if not result.ok:
+        payload["errors"] = [result.error] if result.error else ["インポート投入に失敗しました"]
         return jsonify(payload), 500
     return jsonify(payload)
 

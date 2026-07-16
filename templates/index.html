@@ -473,9 +473,10 @@
         </div>
         <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
             <label>
-                ① jinjer 経費CSV（仕訳データ <code>*仕訳データ.csv</code>）:
-                <input type="text" id="ki-jinjer" placeholder="例: Z:\経費\2026年07月07日仕訳データ.csv"
+                ① jinjer 経費CSV（仕訳データ <code>*仕訳データ.csv</code>・<b>ファイルまたはフォルダ</b>）:
+                <input type="text" id="ki-jinjer" placeholder="例: Z:\経費\jinjer仕訳データ置き場（フォルダ指定で中の全CSVを統合）"
                        style="width:100%; padding:6px 10px; margin-top:4px">
+                <span class="hint" style="font-size:11px">フォルダを指定すると直下の全CSVを取り込みます（後から追加CSVを置く運用向け）。同じデータのCSVを2つ置くと二重計上になるのでご注意ください。</span>
             </label>
             <label>
                 ② e-staffing 経費CSV（<code>勤怠データダウンロード_立替金_*.csv</code>）:
@@ -501,6 +502,15 @@
                 <input type="checkbox" id="ki-route-check" checked>
                 経路突合チェックシートを付ける（通勤経路は jinjer API から取得。要ネット接続）
             </label>
+            <label style="display:inline-flex; align-items:center; gap:6px">
+                <input type="checkbox" id="ki-classify" checked>
+                分類・集計シート＋jinjer給与インポートCSVも作る（マクロの「集計」相当。新入社員も自動計上）
+            </label>
+            <label>
+                分類キーワード設定（任意・空欄=内蔵キーワード）: 設定シート形式のxlsx/CSVで上書きできます
+                <input type="text" id="ki-keywords" placeholder="例: Z:\経費\分類キーワード.xlsx（通常は空欄でOK）"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
                 <span id="ki-status" style="margin-left:12px; color:#666"></span>
@@ -513,9 +523,39 @@
                 <div class="summary-card"><div class="card-label">社員番号 未照合(行)</div><div class="card-value" id="ki-cnt-unmatched">0</div></div>
                 <div class="summary-card"><div class="card-label">★要確認(経路突合)</div><div class="card-value" id="ki-cnt-flagged">—</div></div>
                 <div class="summary-card"><div class="card-label">△逆要確認</div><div class="card-value" id="ki-cnt-rev">—</div></div>
+                <div class="summary-card"><div class="card-label">集計 社員数</div><div class="card-value" id="ki-cnt-summary">—</div></div>
+                <div class="summary-card"><div class="card-label">判定「差分あり」</div><div class="card-value" id="ki-cnt-diffng">—</div></div>
             </div>
             <a id="ki-download-link" href="#" class="btn btn-download" style="display:none">📥 統合一覧表xlsxをダウンロード</a>
+            <a id="ki-import-csv-link" href="#" class="btn btn-download" style="display:none; margin-left:8px">📥 jinjer給与インポートCSVをダウンロード</a>
             <pre id="ki-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+
+            <!-- ==== jinjer給与インポート（人間チェック → API投入）==== -->
+            <div id="ki-import-area" style="display:none; margin-top:14px; border:2px solid #c00000; border-radius:6px; padding:10px 14px">
+                <div style="font-weight:bold; margin-bottom:6px">🧾 jinjer給与インポート プレビュー（投入前に必ず確認してください）</div>
+                <div id="ki-import-warnings" class="alert alert-warning" style="display:none; margin:6px 0"></div>
+                <div style="max-height:320px; overflow:auto; border:1px solid #ddd">
+                    <table id="ki-import-table" style="border-collapse:collapse; font-size:11px; width:100%"></table>
+                </div>
+                <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+                    <label style="display:inline-flex; align-items:center; gap:6px">
+                        処理月:
+                        <input type="text" id="ki-import-month" placeholder="例: 2026-07" style="width:120px; padding:6px 10px">
+                    </label>
+                    <label style="display:inline-flex; align-items:center; gap:6px">
+                        テンプレートID:
+                        <input type="text" id="ki-import-template" value="37047" style="width:90px; padding:6px 10px">
+                        <span class="hint" style="font-size:11px">（jinjer「経費インポート用」。列名がCSVと一致していることをjinjer画面で確認）</span>
+                    </label>
+                    <label style="display:inline-flex; align-items:center; gap:6px; font-weight:bold">
+                        <input type="checkbox" id="ki-import-confirmed">
+                        プレビューとCSVを確認しました
+                    </label>
+                    <button type="button" class="btn btn-primary" id="ki-import-btn" style="background:#c00000" disabled>🚀 jinjer給与へAPIインポート</button>
+                    <span id="ki-import-status" style="color:#666"></span>
+                </div>
+                <pre id="ki-import-console" style="margin-top:8px; max-height:160px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+            </div>
         </div>
         <div id="ki-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
@@ -833,6 +873,8 @@
             fd.append('freee_csv', document.getElementById('ki-freee').value);
             fd.append('output_filename', document.getElementById('ki-output-filename').value);
             fd.append('route_check', routeCheck ? '1' : '0');
+            fd.append('classify', document.getElementById('ki-classify').checked ? '1' : '0');
+            fd.append('keywords_file', document.getElementById('ki-keywords').value);
 
             try {
                 const res = await fetch('/expense_integration', {method:'POST', body: fd});
@@ -858,12 +900,25 @@
                     (rs.rev_rows !== undefined)
                         ? (rs.rev_rows + '行 / ' + rs.rev_emps + '名')
                         : '—';
+                const cs = st.classify_summary || {};
+                document.getElementById('ki-cnt-summary').textContent =
+                    (cs.summary_employees !== undefined) ? (cs.summary_employees + '名') : '—';
+                document.getElementById('ki-cnt-diffng').textContent =
+                    (cs.diff_ng !== undefined) ? (cs.diff_ng + '名') : '—';
                 const dl = document.getElementById('ki-download-link');
                 dl.href = data.download_url;
                 dl.style.display = 'inline-block';
+                const idl = document.getElementById('ki-import-csv-link');
+                if (data.import_csv_url) {
+                    idl.href = data.import_csv_url;
+                    idl.style.display = 'inline-block';
+                } else {
+                    idl.style.display = 'none';
+                }
                 const consoleEl = document.getElementById('ki-console');
                 consoleEl.textContent = (data.console || []).join('\n');
                 consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                renderImportPreview(data);
                 document.getElementById('ki-result-area').style.display = 'block';
                 document.getElementById('ki-status').textContent = '完了';
             } catch (e) {
@@ -871,6 +926,100 @@
                 document.getElementById('ki-status').textContent = '';
             } finally {
                 kiRunBtn.disabled = false;
+            }
+        });
+    }
+
+    // ----- jinjer給与インポート プレビュー表示＋API投入 -----
+    let kiImportCsvName = '';
+
+    function renderImportPreview(data) {
+        const area = document.getElementById('ki-import-area');
+        const rows = data.import_preview || [];
+        kiImportCsvName = data.import_csv_name || '';
+        document.getElementById('ki-import-confirmed').checked = false;
+        document.getElementById('ki-import-btn').disabled = true;
+        if (!rows.length || !kiImportCsvName) {
+            area.style.display = 'none';
+            return;
+        }
+        const warnEl = document.getElementById('ki-import-warnings');
+        const warns = data.import_warnings || [];
+        if (warns.length) {
+            warnEl.innerHTML = '⚠️ ' + warns.map(w => escapeHtml(w)).join('<br>⚠️ ');
+            warnEl.style.display = 'block';
+        } else {
+            warnEl.style.display = 'none';
+        }
+        const cols = ['社員番号','氏名','夜間当番手当','定常外業務対応手当','支給過不足調整',
+                      '非課税通勤費','立替金（顧客請求分）','立替金','その他','その他手当','現物支給'];
+        const table = document.getElementById('ki-import-table');
+        const totals = {};
+        cols.slice(2).forEach(c => totals[c] = 0);
+        let html = '<thead><tr>' + cols.map(c =>
+            '<th style="border:1px solid #ccc; padding:3px 6px; background:#2f5597; color:#fff; position:sticky; top:0">' + escapeHtml(c) + '</th>').join('') + '</tr></thead><tbody>';
+        for (const r of rows) {
+            html += '<tr>' + cols.map((c, i) => {
+                const v = r[c];
+                if (i >= 2) totals[c] += (v || 0);
+                const style = 'border:1px solid #ddd; padding:2px 6px;' + (i >= 2 ? 'text-align:right' : '');
+                const disp = (i >= 2) ? Number(v || 0).toLocaleString() : escapeHtml(String(v ?? ''));
+                const hl = (i >= 2 && v) ? 'background:#fff7e0;' : '';
+                return '<td style="' + style + hl + '">' + disp + '</td>';
+            }).join('') + '</tr>';
+        }
+        html += '<tr><td colspan="2" style="border:1px solid #ccc; padding:2px 6px; font-weight:bold">合計（' + rows.length + '名）</td>' +
+            cols.slice(2).map(c => '<td style="border:1px solid #ccc; padding:2px 6px; text-align:right; font-weight:bold">' + totals[c].toLocaleString() + '</td>').join('') + '</tr>';
+        html += '</tbody>';
+        table.innerHTML = html;
+        area.style.display = 'block';
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, m =>
+            ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+
+    const kiConfirmed = document.getElementById('ki-import-confirmed');
+    const kiImportBtn = document.getElementById('ki-import-btn');
+    if (kiConfirmed && kiImportBtn) {
+        kiConfirmed.addEventListener('change', () => {
+            kiImportBtn.disabled = !kiConfirmed.checked;
+        });
+        kiImportBtn.addEventListener('click', async () => {
+            const month = document.getElementById('ki-import-month').value.trim();
+            if (!/^\d{4}-\d{2}$/.test(month)) {
+                alert('処理月を YYYY-MM 形式で入力してください（例: 2026-07）');
+                return;
+            }
+            if (!confirm('jinjer給与（処理月 ' + month + '）へ経費インポートを実行します。\n' +
+                         'プレビューとCSVの内容・テンプレート列の一致を確認しましたか？')) {
+                return;
+            }
+            kiImportBtn.disabled = true;
+            document.getElementById('ki-import-status').textContent = '投入中...（バッチ処理の完了を待っています）';
+            const fd = new FormData();
+            fd.append('import_csv_name', kiImportCsvName);
+            fd.append('month', month);
+            fd.append('template_id', document.getElementById('ki-import-template').value.trim());
+            fd.append('confirmed', '1');
+            try {
+                const res = await fetch('/expense_payroll_import', {method:'POST', body: fd});
+                const data = await res.json();
+                const consoleEl = document.getElementById('ki-import-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                if (data.success) {
+                    document.getElementById('ki-import-status').textContent =
+                        (data.status === '1') ? '✅ インポート成功（jinjer画面で金額をご確認ください）'
+                                              : '✅ 投入予約OK（完了はjinjer画面/通知メールでご確認ください）';
+                } else {
+                    document.getElementById('ki-import-status').textContent = '❌ 失敗: ' + ((data.errors || [])[0] || '');
+                }
+            } catch (e) {
+                document.getElementById('ki-import-status').textContent = '❌ 通信エラー: ' + e.message;
+            } finally {
+                kiImportBtn.disabled = !kiConfirmed.checked;
             }
         });
     }

@@ -624,6 +624,10 @@ class KeihiResult:
     source_counts: dict = field(default_factory=dict)      # {jinjer: n, ...}
     unmatched_emp: int = 0                                  # 社員番号が引けなかった行数
     route_summary: dict = field(default_factory=dict)
+    classify_summary: dict = field(default_factory=dict)   # 分類・集計の統計（P1b）
+    import_preview: list = field(default_factory=list)     # インポート行プレビュー（人間チェック用）
+    import_warnings: list = field(default_factory=list)
+    import_csv_name: str = ""                               # 出力したインポートCSVのファイル名
     error: str = ""
     logs: list[str] = field(default_factory=list)
 
@@ -646,14 +650,28 @@ def build_integrated_rows(
     counts: dict = {}
 
     if jinjer_csv:
-        jh, jr = read_csv_any_enc(jinjer_csv)
-        # jinjer CSV の（社員番号・氏名）でロスターを補完（API 不通時のフォールバック）
-        for k, v in build_roster_from_jinjer_csv(jh, jr).items():
-            roster.setdefault(k, v)
-        tj = transform_jinjer(jh, jr)
-        rows += tj
-        counts["jinjer"] = len(tj)
-        log_func(f"[info] jinjer 仕訳データ: {len(tj)} 行")
+        # フォルダ指定なら直下の *.csv を名前順で全部取り込む（後からCSVを追加する運用。
+        # 同じデータのCSVを2つ置くと二重計上になるので注意。重複削除はしない=Rev5準拠）
+        jp = Path(jinjer_csv)
+        jinjer_files = sorted(jp.glob("*.csv")) if jp.is_dir() else [jp]
+        if not jinjer_files:
+            raise ValueError(f"jinjer経費CSVフォルダに .csv がありません: {jp}")
+        total_j = 0
+        for jf in jinjer_files:
+            jh, jr = read_csv_any_enc(jf)
+            if len(jh) < 33:
+                raise ValueError(
+                    f"jinjer仕訳データCSVの列数が不足しています（{len(jh)}列）: {jf.name}")
+            # jinjer CSV の（社員番号・氏名）でロスターを補完（API 不通時のフォールバック）
+            for k, v in build_roster_from_jinjer_csv(jh, jr).items():
+                roster.setdefault(k, v)
+            tj = transform_jinjer(jh, jr)
+            rows += tj
+            total_j += len(tj)
+            if len(jinjer_files) > 1:
+                log_func(f"[info]   {jf.name}: {len(tj)} 行")
+        counts["jinjer"] = total_j
+        log_func(f"[info] jinjer 仕訳データ: {total_j} 行（{len(jinjer_files)} ファイル）")
     else:
         counts["jinjer"] = None
 
@@ -694,15 +712,20 @@ def run_keihi_integration(
     sap_csv: "str | Path | None" = None,
     freee_csv: "str | Path | None" = None,
     route_check: bool = True,
+    classify: bool = True,
+    keywords_file: "str | Path | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
-    """4ソース生CSV → 経費統合一覧表(34列) ＋ 経路突合チェック の Excel を出力する。
+    """4ソース生CSV → 経費統合一覧表(34列) ＋ 経路突合チェック ＋ 集計/集計ログ の Excel を出力する。
 
     Args:
         output_path: 出力 xlsx パス
-        *_csv: 各ソースの生CSVパス（未指定ソースは「未取込」）
+        *_csv: 各ソースの生CSVパス（未指定ソースは「未取込」）。jinjer_csv はフォルダ指定可
+               （直下の *.csv を全部取り込む）
         route_check: True なら jinjer API(commuting-information) から通勤経路を取り、経路突合シートを追加
+        classify: True なら分類・集計して「集計」「集計ログ」シートとインポートプレビューを出す（P1b）
+        keywords_file: 分類キーワード設定（設定シート形式 xlsx/CSV）。未指定は内蔵デフォルト
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -714,6 +737,7 @@ def run_keihi_integration(
 
     # --- ロスター（氏名→社員番号）を jinjer API から構築（e-staffing/SAP/freee 用） ---
     roster: dict = {}
+    roster_id_to_name: dict = {}
     commute_rows: list[dict] = []
     if route_check or estaffing_csv or sap_csv or freee_csv:
         try:
@@ -724,10 +748,10 @@ def run_keihi_integration(
                 client.authenticate()
             employees = fetch_active_employees(client)
             roster = build_roster_from_api(employees)
+            roster_id_to_name = {str(e["id"]): e["name"] for e in employees}
             log_func(f"[info] jinjer 在籍者ロスター: {len(employees)} 名")
             if route_check:
-                id_to_name = {e["id"]: e["name"] for e in employees}
-                commute_rows = fetch_commute_rows_via_api(client, id_to_name)
+                commute_rows = fetch_commute_rows_via_api(client, roster_id_to_name)
                 log_func(f"[info] 通勤経路(API): {len(commute_rows)} 経路")
         except Exception as e:  # noqa: BLE001 — API 不通でも jinjer CSV から最低限のロスターで続行
             log_func(f"[warn] jinjer API に接続できませんでした（CSV由来のロスターで続行）: {e}")
@@ -763,6 +787,40 @@ def run_keihi_integration(
             )
         except Exception as e:  # noqa: BLE001 — 経路突合が失敗しても統合一覧表は出す
             log_func(f"[warn] 経路突合チェックの作成に失敗（スキップ）: {e}")
+
+    # --- 分類・集計（P1b）＋ jinjer給与インポートのプレビュー ---
+    if classify:
+        try:
+            from services.keihi_classify import classify_and_summarize, load_keywords
+            from services.keihi_payroll_import import build_import_rows, write_import_csv
+
+            keywords = None
+            if keywords_file:
+                keywords = load_keywords(keywords_file)
+                log_func(f"[info] 分類キーワードを読込: {keywords_file}")
+            stats = classify_and_summarize(rows, wb, keywords, roster_id_to_name)
+            agg = stats.pop("_agg")
+            emp_names = stats.pop("_emp_names")
+            result.classify_summary = stats
+            log_func(
+                f"[info] 分類・集計: 処理 {stats['classified_hits']} 件 / 集計 {stats['summary_employees']} 名 / "
+                f"未照合(氏名のみ) {stats['unmatched_rows']} 件 / 判定差分あり {stats['diff_ng']} 名"
+            )
+            if stats["excluded_out_of_scope"]:
+                log_func(f"[info] 給与計算対象外(5/6/9始まり)を集計から除外: {stats['excluded_out_of_scope']} 名")
+
+            # インポート行（人間チェック用のプレビューとCSV）
+            import_rows, warnings = build_import_rows(agg.by_id, emp_names, roster_id_to_name)
+            result.import_preview = import_rows
+            result.import_warnings = warnings
+            csv_name = output_path.stem + "_jinjerインポート.csv"
+            write_import_csv(import_rows, output_path.parent / csv_name)
+            result.import_csv_name = csv_name
+            log_func(f"[info] jinjer給与インポートCSVを出力: {csv_name}（{len(import_rows)} 名）")
+            for w in warnings:
+                log_func(f"[warn] {w}")
+        except Exception as e:  # noqa: BLE001 — 分類が失敗しても統合一覧表は出す
+            log_func(f"[warn] 分類・集計の作成に失敗（スキップ）: {e}")
 
     try:
         wb.calculation.fullCalcOnLoad = True

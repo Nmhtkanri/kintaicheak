@@ -407,6 +407,100 @@ class JinjerClient:
             _time.sleep(0.1)
         return found
 
+    # ------------------------------------------------------------------
+    # 人事インポート（給与計算インポートのAPI投入）
+    #   POST /v1/jinji-imports はメニュー種別「給与計算」の入力テンプレートに対応しており、
+    #   経費インポートCSV（テンプレート「経費インポート用」id=37047）をAPIで投入できる。
+    #   給与計算テンプレートは type.id="3"（新規登録/更新）必須・salary_setting.executed_on=処理月。
+    # ------------------------------------------------------------------
+    def post_jinji_import(
+        self,
+        csv_bytes: bytes,
+        file_name: str,
+        template_id: str,
+        executed_on: str,
+        apply_formulas_off: bool = True,
+        type_id: str = "3",
+    ) -> dict:
+        """人事インポート（給与計算等）を `POST /v1/jinji-imports` で投入予約する。
+
+        Args:
+            csv_bytes: Shift_JIS(CP932) でエンコード済みのインポートCSV
+            file_name: インポートファイル名（255字以内）
+            template_id: 入力テンプレートID（GET /v1/master/jinji-import-templates の id）
+            executed_on: 処理月 "YYYY-MM"（給与計算/賞与計算/退職金計算のテンプレートで必須）
+            apply_formulas_off: 「編集した項目は計算式を適用しない」を有効にするか
+            type_id: インポート種別（給与計算テンプレートは "3"=新規登録/更新 必須）
+
+        Returns:
+            レスポンス JSON の ``data``
+
+        Raises:
+            JinjerAPIError: 認証失敗・投入予約の失敗
+        """
+        import base64 as _base64
+
+        headers = dict(self._auth_headers())
+        body: dict[str, Any] = {
+            "type": {"id": str(type_id)},
+            "template": {"id": str(template_id)},
+            "salary_setting": {
+                "executed_on": executed_on,
+                "is_checked_not_to_apply_formulas": bool(apply_formulas_off),
+            },
+            "file": {
+                "name": file_name,
+                "encoded_string": _base64.b64encode(csv_bytes).decode("ascii"),
+            },
+        }
+        try:
+            r = requests.post(
+                f"{self.base_url}/v1/jinji-imports",
+                headers=headers, json=body, timeout=120,
+            )
+        except requests.RequestException as e:
+            raise JinjerAPIError(f"人事インポートの投入に失敗: {e}") from e
+        if r.status_code != 200:
+            raise JinjerAPIError(
+                f"人事インポートの投入に失敗 (status={r.status_code}): {r.text[:300]}"
+            )
+        logger.info("jinji-imports 投入予約 OK: %s (template=%s, month=%s)",
+                    file_name, template_id, executed_on)
+        return r.json().get("data") or {}
+
+    def find_jinji_import(self, file_name: str) -> dict | None:
+        """`GET /v1/jinji-imports` を走査し、ファイル名が一致する最新レコードを返す。
+
+        jinjer はファイル名へ一意IDを付与しうるため、拡張子を除いたベース名の部分一致で照合。
+        ``status``: "0"=予約 / "1"=成功 / "2"=失敗（kintai-imports と同じ規約想定）。
+        """
+        base_name = file_name.rsplit(".", 1)[0]
+        headers = self._auth_headers()
+        found: dict | None = None
+        page = 1
+        while page <= 100:
+            try:
+                r = requests.get(
+                    f"{self.base_url}/v1/jinji-imports",
+                    headers=headers, params={"page": page}, timeout=30,
+                )
+            except requests.RequestException as e:
+                raise JinjerAPIError(f"人事インポート状況の取得に失敗: {e}") from e
+            if r.status_code != 200:
+                raise JinjerAPIError(
+                    f"人事インポート状況の取得に失敗 (status={r.status_code})"
+                )
+            items = r.json().get("data", []) or []
+            if not items:
+                break
+            for item in items:
+                name = str((item.get("file") or item.get("input_file") or {}).get("name") or "")
+                if base_name in name:
+                    found = item  # 後のページほど新しい想定で上書き
+            page += 1
+            _time.sleep(0.1)
+        return found
+
     def get_work_schedules(self, employee_id: str, month: str) -> dict[str, dict]:
         """`/v1/employees/work-schedules` から日別スケジュールを取得する。
 
