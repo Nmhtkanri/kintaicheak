@@ -1411,6 +1411,7 @@ def route_expense_integration():
     route_check = (request.form.get("route_check") or "1").strip() != "0"
     classify = (request.form.get("classify") or "1").strip() != "0"
     keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
+    import_template_str = _clean_path_input(request.form.get("import_template_csv"))
 
     errors = []
     paths: dict = {}
@@ -1425,6 +1426,9 @@ def route_expense_integration():
     keywords_file = _Path(keywords_file_str) if keywords_file_str else None
     if keywords_file and not keywords_file.exists():
         errors.append(f"キーワード設定ファイルが見つかりません: {keywords_file}")
+    import_template_csv = _Path(import_template_str) if import_template_str else None
+    if import_template_csv and not import_template_csv.exists():
+        errors.append(f"インポートテンプレCSVが見つかりません: {import_template_csv}")
     if not any(paths.values()):
         errors.append("少なくとも1つのソースCSV（jinjer / e-staffing / SAP / freee）を指定してください。")
     if errors:
@@ -1446,7 +1450,7 @@ def route_expense_integration():
             jinjer_csv=paths["jinjer_csv"], estaffing_csv=paths["estaffing_csv"],
             sap_csv=paths["sap_csv"], freee_csv=paths["freee_csv"],
             route_check=route_check, classify=classify, keywords_file=keywords_file,
-            log_func=_log,
+            import_template_csv=import_template_csv, log_func=_log,
         )
     except Exception as e:
         logger.exception("expense_integration failed")

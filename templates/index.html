@@ -511,6 +511,11 @@
                 <input type="text" id="ki-keywords" placeholder="例: Z:\経費\分類キーワード.xlsx（通常は空欄でOK）"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
+            <label>
+                jinjer給与インポートテンプレCSV（<b>推奨</b>・空欄=既定11列）: jinjerからダウンロードした空テンプレを指定すると、<b>列の並びを自動で合わせます</b>（jinjerは列の位置で取込むため、ズレると値が別項目に入ります）
+                <input type="text" id="ki-import-template-csv" placeholder="例: Z:\経費\jinjer_経費インポート用_9637.csv"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
                 <span id="ki-status" style="margin-left:12px; color:#666"></span>
@@ -875,6 +880,7 @@
             fd.append('route_check', routeCheck ? '1' : '0');
             fd.append('classify', document.getElementById('ki-classify').checked ? '1' : '0');
             fd.append('keywords_file', document.getElementById('ki-keywords').value);
+            fd.append('import_template_csv', document.getElementById('ki-import-template-csv').value);
 
             try {
                 const res = await fetch('/expense_integration', {method:'POST', body: fd});

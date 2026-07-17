@@ -714,6 +714,7 @@ def run_keihi_integration(
     route_check: bool = True,
     classify: bool = True,
     keywords_file: "str | Path | None" = None,
+    import_template_csv: "str | Path | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -812,9 +813,24 @@ def run_keihi_integration(
             # インポート行（人間チェック用のプレビューとCSV）
             import_rows, warnings = build_import_rows(agg.by_id, emp_names, roster_id_to_name)
             result.import_preview = import_rows
+
+            # jinjerテンプレCSVが指定されていれば、その列並びに追従してCSVを組み立てる
+            # （jinjerのテンプレインポートは列位置対応。並びがズレると値が別項目に入る）
+            template_header = None
+            if import_template_csv:
+                from services.keihi_payroll_import import read_template_header, check_template_coverage
+                try:
+                    template_header = read_template_header(import_template_csv)
+                    log_func(f"[info] インポートテンプレに追従: {len(template_header)}列 "
+                             f"({import_template_csv})")
+                    cov = check_template_coverage(import_rows, template_header)
+                    warnings = cov + warnings
+                except Exception as e:  # noqa: BLE001
+                    log_func(f"[warn] テンプレCSVを読めませんでした（既定ヘッダーで出力）: {e}")
+
             result.import_warnings = warnings
             csv_name = output_path.stem + "_jinjerインポート.csv"
-            write_import_csv(import_rows, output_path.parent / csv_name)
+            write_import_csv(import_rows, output_path.parent / csv_name, template_header)
             result.import_csv_name = csv_name
             log_func(f"[info] jinjer給与インポートCSVを出力: {csv_name}（{len(import_rows)} 名）")
             for w in warnings:

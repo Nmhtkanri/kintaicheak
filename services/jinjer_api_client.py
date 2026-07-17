@@ -468,15 +468,16 @@ class JinjerClient:
                     file_name, template_id, executed_on)
         return r.json().get("data") or {}
 
-    def find_jinji_import(self, file_name: str) -> dict | None:
-        """`GET /v1/jinji-imports` を走査し、ファイル名が一致する最新レコードを返す。
+    def find_jinji_import(self, import_id: str) -> dict | None:
+        """`GET /v1/jinji-imports` から指定 id のレコードを返す。見つからなければ None。
 
-        jinjer はファイル名へ一意IDを付与しうるため、拡張子を除いたベース名の部分一致で照合。
-        ``status``: "0"=予約 / "1"=成功 / "2"=失敗（kintai-imports と同じ規約想定）。
+        kintai-imports と違い、jinji-imports の GET 応答には ``status`` やファイル名は無い。
+        レコードは ``id`` / ``menu`` / ``template`` / ``number_of_total_rows`` /
+        ``number_of_failed_rows`` / ``created_at`` / ``updated_at`` を持つ（2026-07-16 実測）。
+        成否は ``number_of_failed_rows`` で判定する（0=全行成功）。
         """
-        base_name = file_name.rsplit(".", 1)[0]
         headers = self._auth_headers()
-        found: dict | None = None
+        target = str(import_id)
         page = 1
         while page <= 100:
             try:
@@ -494,12 +495,11 @@ class JinjerClient:
             if not items:
                 break
             for item in items:
-                name = str((item.get("file") or item.get("input_file") or {}).get("name") or "")
-                if base_name in name:
-                    found = item  # 後のページほど新しい想定で上書き
+                if str(item.get("id") or "") == target:
+                    return item
             page += 1
             _time.sleep(0.1)
-        return found
+        return None
 
     def get_work_schedules(self, employee_id: str, month: str) -> dict[str, dict]:
         """`/v1/employees/work-schedules` から日別スケジュールを取得する。

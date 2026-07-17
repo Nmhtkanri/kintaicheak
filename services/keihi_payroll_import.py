@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import csv as _csv
+import re as _re
 import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,8 +33,49 @@ IMPORT_HEADERS = [
     "社員番号", "氏名", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
     "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給",
 ]
+# インポート行が持つ支給項目（社員番号・氏名以外）。テンプレ列名との照合対象。
+ITEM_KEYS = [
+    "夜間当番手当", "定常外業務対応手当", "支給過不足調整", "非課税通勤費",
+    "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給", "テレワーク手当",
+]
 # jinjer側テンプレート（GET /v1/master/jinji-import-templates で実測）
 DEFAULT_TEMPLATE_ID = "37047"   # 「経費インポート用」menu=payroll_calculation
+
+
+def _norm_col(s) -> str:
+    """列名の照合キー。空白・全角スペース・先頭の必須マーク「*」を除去。"""
+    return _re.sub(r"[\s　*＊]", "", "" if s is None else str(s)).strip()
+
+
+def _match_column(col: str) -> "str | None":
+    """テンプレの列名 → インポート行のどのキーに対応するか。空/不明は None。"""
+    n = _norm_col(col)
+    if n == "":
+        return None
+    if n in ("社員番号", "従業員番号"):
+        return "社員番号"
+    if n in ("氏名", "名前"):
+        return "氏名"
+    for k in ITEM_KEYS:
+        if _norm_col(k) == n:
+            return k
+    return None
+
+
+def read_template_header(path: "str | Path") -> list[str]:
+    """jinjerからダウンロードした空テンプレCSVの先頭行（列名の並び）を返す。
+
+    列位置対応のインポートに合わせるため、空セルもそのまま（"" として）保持する。
+    """
+    path = Path(path)
+    for enc in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            with open(path, encoding=enc, newline="") as f:
+                header = next(_csv.reader(f))
+            return [("" if c is None else str(c)).strip() for c in header]
+        except (UnicodeDecodeError, StopIteration):
+            continue
+    raise ValueError(f"テンプレートCSVを読めませんでした: {path}")
 
 
 def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" = None) -> tuple[list[dict], list[str]]:
@@ -49,10 +92,6 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
             continue
         v = by_id[emp_id]
         name = emp_names.get(emp_id) or roster_names.get(emp_id, "")
-        tw = int(v[B_TW])
-        if tw:
-            warnings.append(
-                f"{emp_id} {name}: テレワーク手当 {tw:,}円 はインポートCSVに含まれません（現行マクロ仕様）")
         rows.append({
             "社員番号": emp_id,
             "氏名": name,
@@ -65,6 +104,7 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
             "その他": int(v[B_ETC]),
             "その他手当": 0,
             "現物支給": 0,
+            "テレワーク手当": int(v[B_TW]),
         })
     return rows, warnings
 
@@ -74,22 +114,55 @@ def _escape_csv(s: str) -> str:
     return '"' + str(s).replace('"', '""') + '"'
 
 
-def render_import_csv(rows: list[dict]) -> bytes:
-    """インポートCSVを Shift-JIS バイト列で返す（Module2 と同形式: 文字列のみクォート）。"""
-    lines = [",".join(IMPORT_HEADERS)]
+def check_template_coverage(rows: list[dict], template_header: list[str]) -> list[str]:
+    """テンプレに列が無いのに金額が発生している支給項目を警告として返す。
+
+    位置対応インポートでは、テンプレに列が無い項目はサイレントに捨てられて計上漏れになる
+    （今回の 川口さん立替金12,177円・夜間当番手当30,000円の事故がこれ）。事前に検知する。
+    """
+    covered = {_match_column(c) for c in template_header}
+    warnings: list[str] = []
+    for key in ITEM_KEYS:
+        if key in covered:
+            continue
+        total = sum(int(r.get(key, 0) or 0) for r in rows)
+        n = sum(1 for r in rows if int(r.get(key, 0) or 0))
+        if total:
+            warnings.append(
+                f"⚠️ テンプレに「{key}」の列がありません → {n}名・計{total:,}円が"
+                f"取り込まれず計上漏れになります。jinjer側テンプレートに「{key}」列を追加してください。")
+    return warnings
+
+
+def render_import_csv(rows: list[dict], template_header: "list[str] | None" = None) -> bytes:
+    """インポートCSVを Shift-JIS バイト列で返す（Module2 と同形式: 文字列のみクォート）。
+
+    template_header を渡すと、その列名の並び（空セルも保持）に合わせて列を組み立てる。
+    jinjer のテンプレインポートは列名でなく**列位置**で対応付けるため、テンプレの並びに
+    追従させることが必須（並びがズレると値が別項目に入る）。未指定時は IMPORT_HEADERS。
+    """
+    header = template_header if template_header is not None else IMPORT_HEADERS
+    lines = [",".join(header)]   # ヘッダーは列名をそのまま（テンプレの見出しを忠実に）
     for r in rows:
-        cells = [_escape_csv(r["社員番号"]), _escape_csv(r["氏名"])]
-        for h in IMPORT_HEADERS[2:]:
-            cells.append(str(int(r[h])))
+        cells = []
+        for col in header:
+            key = _match_column(col)
+            if key in ("社員番号", "氏名"):
+                cells.append(_escape_csv(r.get(key, "")))
+            elif key in ITEM_KEYS:
+                cells.append(str(int(r.get(key, 0) or 0)))
+            else:
+                cells.append("")   # 空列・不明列はそのまま空（テンプレのスキップ列）
         lines.append(",".join(cells))
     return ("\r\n".join(lines) + "\r\n").encode("cp932")
 
 
-def write_import_csv(rows: list[dict], out_path: "str | Path") -> Path:
+def write_import_csv(rows: list[dict], out_path: "str | Path",
+                     template_header: "list[str] | None" = None) -> Path:
     """インポートCSVをファイルに書き出す（人間チェック用ダウンロード）。"""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(render_import_csv(rows))
+    out_path.write_bytes(render_import_csv(rows, template_header))
     return out_path
 
 
@@ -102,7 +175,10 @@ class PayrollImportResult:
     ok: bool
     month: str = ""
     file_name: str = ""
-    status: str = ""      # "0"=予約 / "1"=成功 / "2"=失敗 / "" = 不明
+    status: str = ""      # "1"=全行成功 / "2"=一部失敗 / "0"=処理待ち・不明
+    total_rows: int = 0
+    failed_rows: int = 0
+    import_id: str = ""
     error: str = ""
     logs: list = field(default_factory=list)
 
@@ -139,38 +215,53 @@ def post_payroll_import(
             csv_bytes=csv_bytes, file_name=file_name, template_id=template_id,
             executed_on=month, apply_formulas_off=apply_formulas_off,
         )
-        log(f"[info] jinji-imports 投入予約 OK: {file_name} (処理月 {month} / テンプレ {template_id})")
+        result.import_id = str(data.get("id") or "")
+        log(f"[info] jinji-imports 投入予約 OK: {file_name} "
+            f"(処理月 {month} / テンプレ {template_id} / id={result.import_id or '不明'})")
     except Exception as e:  # noqa: BLE001
         result.error = f"投入予約に失敗しました: {e}"
         log(f"[error] {result.error}")
         return result
 
-    # ポーリング（status: 0=予約 / 1=成功 / 2=失敗）
+    # ポーリング。jinji-imports の GET には status フィールドが無く、
+    # number_of_failed_rows / number_of_total_rows で成否を判定する（2026-07-16 実測。
+    # updated_at が入ればバッチ処理完了とみなす）。
+    if not result.import_id:
+        result.ok = True
+        log("[warn] 投入予約は成功しましたが id が取得できず完了確認をスキップします。"
+            "jinjer画面のインポート履歴をご確認ください。")
+        return result
+
     waited = 0
     interval = 10
     while waited < poll_seconds:
         _time.sleep(interval)
         waited += interval
         try:
-            item = client.find_jinji_import(file_name)
+            item = client.find_jinji_import(result.import_id)
         except Exception as e:  # noqa: BLE001
             log(f"[warn] 状況確認に失敗（リトライ）: {e}")
             continue
-        status = str((item or {}).get("status") or "")
-        if status == "1":
-            result.status = "1"
-            result.ok = True
-            log(f"[done] インポート成功（{waited}秒）。jinjer給与画面で金額をご確認ください。")
+        if item and str(item.get("updated_at") or "").strip():
+            result.total_rows = int(item.get("number_of_total_rows") or 0)
+            result.failed_rows = int(item.get("number_of_failed_rows") or 0)
+            if result.failed_rows == 0:
+                result.status = "1"
+                result.ok = True
+                log(f"[done] インポート成功: {result.total_rows}行すべて取込（{waited}秒）。"
+                    "jinjer給与画面で金額をご確認ください。")
+            else:
+                result.status = "2"
+                result.ok = False
+                result.error = (
+                    f"{result.total_rows}行中 {result.failed_rows}行が失敗しました。"
+                    "通知メールとjinjer画面のインポート履歴でエラー行をご確認ください。")
+                log(f"[error] {result.error}")
             return result
-        if status == "2":
-            result.status = "2"
-            result.error = "jinjer側でインポートが失敗しました。通知メールとjinjer画面のインポート履歴をご確認ください。"
-            log(f"[error] {result.error}")
-            return result
-        log(f"[info] 処理待ち... ({waited}秒 / status={status or '未検出'})")
+        log(f"[info] 処理待ち... ({waited}秒)")
 
-    result.status = result.status or "0"
+    result.status = "0"
     result.ok = True  # 予約自体は成功（完了待ちタイムアウトは失敗扱いにしない）
-    result.error = ""
-    log("[warn] 完了確認がタイムアウトしました（投入予約は成功）。後ほどjinjer画面のインポート履歴か通知メールをご確認ください。")
+    log("[warn] 完了確認がタイムアウトしました（投入予約は成功）。"
+        "後ほどjinjer画面のインポート履歴か通知メールをご確認ください。")
     return result

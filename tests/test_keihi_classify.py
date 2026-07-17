@@ -306,7 +306,7 @@ def test_build_import_rows_mapping():
     assert r["その他"] == 300                   # J
     assert r["定常外業務対応手当"] == 0 and r["その他手当"] == 0 and r["現物支給"] == 0
     assert r["支給過不足調整"] == 0
-    assert any("テレワーク手当" in w for w in warnings)   # K=400は未搬送の警告
+    assert r["テレワーク手当"] == 400           # K（テンプレにテレワーク手当列があれば搬送される）
 
 
 def test_render_import_csv_sjis_and_quoting():
@@ -316,3 +316,42 @@ def test_render_import_csv_sjis_and_quoting():
     lines = text.strip().split("\r\n")
     assert lines[0] == ",".join(IMPORT_HEADERS)
     assert lines[1].startswith('"2026013","川口 祐ノ輔",0,0,0,100,')
+
+
+def test_render_import_csv_follows_template_positions():
+    """テンプレの列位置に追従する（jinjerは列位置で取込むため）。
+
+    テンプレ37047の実レイアウト（社員番号,空,空,夜間当番手当,空,空,立替金(顧客),非課税通勤費,その他,テレワーク手当）
+    で、夜間当番手当が位置4に、非課税通勤費が位置8に入ることを確認する。
+    """
+    from services.keihi_payroll_import import _match_column, check_template_coverage
+    tpl = ["*社員番号", "", "", "夜間当番手当", "", "",
+           "立替金（顧客請求分）", "非課税通勤費", "その他", "テレワーク手当"]
+    # by_id: [夜間, RINK, 交通費(→非課税通勤費), その他, テレワーク, 顧客請求, 非課税精算(→立替金)]
+    rows, _ = build_import_rows(
+        {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"})
+    data = render_import_csv(rows, tpl).decode("cp932")
+    line = data.strip().split("\r\n")[1].split(",")
+    assert line[0] == '"2026013"'
+    assert line[1] == "" and line[2] == ""        # 空スキップ列
+    assert line[3] == "30000"                     # 位置4=夜間当番手当 ✓
+    assert line[7] == "0"                          # 位置8=非課税通勤費（交通費0）
+    # 立替金(12177)はテンプレに列が無い → カバレッジ警告
+    cov = check_template_coverage(rows, tpl)
+    assert any("立替金" in w and "12,177" in w for w in cov)
+
+
+def test_match_column_normalizes():
+    from services.keihi_payroll_import import _match_column
+    assert _match_column("*社員番号") == "社員番号"
+    assert _match_column("氏名") == "氏名"
+    assert _match_column("立替金（顧客請求分）") == "立替金（顧客請求分）"
+    assert _match_column("") is None
+    assert _match_column("基本給") is None       # 経費項目でない列はスキップ
+
+
+def test_read_template_header(tmp_path):
+    from services.keihi_payroll_import import read_template_header
+    p = tmp_path / "tpl.csv"
+    p.write_bytes('"*社員番号","","夜間当番手当"\r\n'.encode("cp932"))
+    assert read_template_header(p) == ["*社員番号", "", "夜間当番手当"]
