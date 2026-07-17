@@ -516,6 +516,16 @@
                 <input type="text" id="ki-import-template-csv" placeholder="例: Z:\経費\jinjer_経費インポート用_9637.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
+            <label>
+                定常外業務対応手当（任意・手入力）: 「社員番号,金額」を1行ずつ。<b>Excelの2列をそのままコピペできます</b>（タブ区切り可）。同じ社員が複数行あれば合算します
+                <textarea id="ki-teijo" rows="3" placeholder="例:&#10;2026012,15000&#10;2024050,8000"
+                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
+            </label>
+            <label>
+                その他手当（任意・手入力）: 同上。経費の「<b>その他</b>」とは<b>別項目</b>です
+                <textarea id="ki-sonota" rows="3" placeholder="例:&#10;2026013,5000"
+                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
+            </label>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
                 <span id="ki-status" style="margin-left:12px; color:#666"></span>
@@ -881,6 +891,8 @@
             fd.append('classify', document.getElementById('ki-classify').checked ? '1' : '0');
             fd.append('keywords_file', document.getElementById('ki-keywords').value);
             fd.append('import_template_csv', document.getElementById('ki-import-template-csv').value);
+            fd.append('teijo_allowances', document.getElementById('ki-teijo').value);
+            fd.append('sonota_allowances', document.getElementById('ki-sonota').value);
 
             try {
                 const res = await fetch('/expense_integration', {method:'POST', body: fd});

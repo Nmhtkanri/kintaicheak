@@ -715,6 +715,8 @@ def run_keihi_integration(
     classify: bool = True,
     keywords_file: "str | Path | None" = None,
     import_template_csv: "str | Path | None" = None,
+    teijo_allowances: "dict | None" = None,
+    sonota_allowances: "dict | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -727,6 +729,8 @@ def run_keihi_integration(
         route_check: True なら jinjer API(commuting-information) から通勤経路を取り、経路突合シートを追加
         classify: True なら分類・集計して「集計」「集計ログ」シートとインポートプレビューを出す（P1b）
         keywords_file: 分類キーワード設定（設定シート形式 xlsx/CSV）。未指定は内蔵デフォルト
+        teijo_allowances: 定常外業務対応手当 {社員番号: 金額}（画面手入力。経費から導けないため）
+        sonota_allowances: その他手当 {社員番号: 金額}（同上）
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -811,8 +815,16 @@ def run_keihi_integration(
                 log_func(f"[info] 給与計算対象外(5/6/9始まり)を集計から除外: {stats['excluded_out_of_scope']} 名")
 
             # インポート行（人間チェック用のプレビューとCSV）
-            import_rows, warnings = build_import_rows(agg.by_id, emp_names, roster_id_to_name)
+            import_rows, warnings = build_import_rows(
+                agg.by_id, emp_names, roster_id_to_name,
+                teijo=teijo_allowances, sonota=sonota_allowances)
             result.import_preview = import_rows
+            n_teijo = sum(1 for a in (teijo_allowances or {}).values() if a)
+            n_sonota = sum(1 for a in (sonota_allowances or {}).values() if a)
+            if n_teijo or n_sonota:
+                log_func(f"[info] 手入力手当を反映: 定常外業務対応手当 {n_teijo}名 "
+                         f"({sum((teijo_allowances or {}).values()):,}円) / "
+                         f"その他手当 {n_sonota}名 ({sum((sonota_allowances or {}).values()):,}円)")
 
             # jinjerテンプレCSVが指定されていれば、その列並びに追従してCSVを組み立てる
             # （jinjerのテンプレインポートは列位置対応。並びがズレると値が別項目に入る）

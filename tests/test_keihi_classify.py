@@ -364,6 +364,65 @@ def test_render_import_csv_template_44450_covers_all():
     assert check_template_coverage(rows, tpl) == []
 
 
+def test_parse_manual_allowances_formats():
+    """手入力欄のパース。Excelの2列コピペ（タブ区切り）もそのまま通す。"""
+    from services.keihi_payroll_import import parse_manual_allowances
+    got, errs = parse_manual_allowances(
+        "社員番号,金額\n"          # ヘッダー行 → 無視
+        "2026012,15000\n"
+        "2024050\t8,000\n"          # タブ区切り＋カンマ入り金額（Excelコピペ）
+        "２０２６０１３，１０００\n"  # 全角
+        "# コメント\n"
+        "\n"
+        "2026012,5000\n"            # 同一社員 → 加算
+        "2026014,0\n"               # 0 は無視
+    )
+    assert got == {"2026012": 20000, "2024050": 8000, "2026013": 1000}
+    assert errs == []
+
+
+def test_parse_manual_allowances_errors_and_scope():
+    from services.keihi_payroll_import import parse_manual_allowances
+    got, errs = parse_manual_allowances(
+        "2026012,あああ\n"     # 金額が数値でない
+        "5000001,3000\n"       # 給与計算対象外(5始まり)
+        "2026013\n"            # 列が足りない
+    )
+    assert got == {}
+    assert len(errs) == 3
+    assert any("金額を数値として読めません" in e for e in errs)
+    assert any("給与計算対象外" in e for e in errs)
+
+
+def test_build_import_rows_with_manual_allowances():
+    """手入力の定常外/その他手当が行に乗り、手当だけの社員も行が出る（計上漏れ防止）。"""
+    rows, warns = build_import_rows(
+        {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]},
+        {"2026013": "川口 祐ノ輔"},
+        roster_names={"2026013": "川口 祐ノ輔", "2024050": "加藤 英人"},
+        teijo={"2026013": 15000, "2024050": 8000},   # 2024050 は経費ゼロ＝手当だけ
+        sonota={"2026013": 5000},
+    )
+    by_id = {r["社員番号"]: r for r in rows}
+    assert set(by_id) == {"2026013", "2024050"}      # 手当だけの社員も行が出る
+    assert by_id["2026013"]["定常外業務対応手当"] == 15000
+    assert by_id["2026013"]["その他手当"] == 5000
+    assert by_id["2026013"]["夜間当番手当"] == 30000  # 既存の経費由来も維持
+    # 経費が無く手当だけの社員：手当以外は0、氏名はロスターから引く
+    assert by_id["2024050"]["定常外業務対応手当"] == 8000
+    assert by_id["2024050"]["氏名"] == "加藤 英人"
+    assert by_id["2024050"]["夜間当番手当"] == 0 and by_id["2024050"]["立替金"] == 0
+    assert warns == []
+
+
+def test_build_import_rows_manual_allowance_unknown_id_warns():
+    """在籍者一覧に無い社員番号は入力ミスの可能性として警告（行は出す）。"""
+    rows, warns = build_import_rows(
+        {}, {}, roster_names={"2026013": "川口 祐ノ輔"}, teijo={"2029999": 1000})
+    assert [r["社員番号"] for r in rows] == ["2029999"]
+    assert any("2029999" in w and "在籍者一覧にありません" in w for w in warns)
+
+
 def test_match_column_normalizes():
     from services.keihi_payroll_import import _match_column
     assert _match_column("*社員番号") == "社員番号"

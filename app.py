@@ -1413,7 +1413,14 @@ def route_expense_integration():
     keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
     import_template_str = _clean_path_input(request.form.get("import_template_csv"))
 
+    # 定常外業務対応手当・その他手当は経費から導けない手決めの金額 → 画面の手入力欄で受ける
+    from services.keihi_payroll_import import parse_manual_allowances
+    teijo_allowances, teijo_errs = parse_manual_allowances(request.form.get("teijo_allowances"))
+    sonota_allowances, sonota_errs = parse_manual_allowances(request.form.get("sonota_allowances"))
+
     errors = []
+    errors += [f"定常外業務対応手当の入力 {e}" for e in teijo_errs]
+    errors += [f"その他手当の入力 {e}" for e in sonota_errs]
     paths: dict = {}
     for key, val in sources.items():
         if not val:
@@ -1450,7 +1457,9 @@ def route_expense_integration():
             jinjer_csv=paths["jinjer_csv"], estaffing_csv=paths["estaffing_csv"],
             sap_csv=paths["sap_csv"], freee_csv=paths["freee_csv"],
             route_check=route_check, classify=classify, keywords_file=keywords_file,
-            import_template_csv=import_template_csv, log_func=_log,
+            import_template_csv=import_template_csv,
+            teijo_allowances=teijo_allowances, sonota_allowances=sonota_allowances,
+            log_func=_log,
         )
     except Exception as e:
         logger.exception("expense_integration failed")
