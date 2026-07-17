@@ -1486,7 +1486,7 @@ def route_expense_payroll_import():
     フォーム:
       - import_csv_name : /expense_integration が outputs に出力したインポートCSVのファイル名
       - month           : 処理月 YYYY-MM（jinjer給与計算の対象月）
-      - template_id     : 任意（既定 37047「経費インポート用」）
+      - template_id     : 任意（既定 44450「経費APIインポート用」）
       - confirmed       : "1" 必須（プレビュー確認済みの明示）
     """
     from services.keihi_payroll_import import DEFAULT_TEMPLATE_ID, post_payroll_import

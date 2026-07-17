@@ -1,7 +1,8 @@
 """jinjer給与へのインポート行生成とAPI投入（経費マクロ移植 P2）
 
 集計結果（keihi_classify の bucket）から jinjer給与インポートCSV（11列・谷津さん確定ヘッダー）を作り、
-`POST /v1/jinji-imports`（メニュー種別=給与計算、テンプレート「経費インポート用」id=37047）で投入する。
+`POST /v1/jinji-imports`（メニュー種別=給与計算、テンプレート「経費APIインポート用」id=44450）で投入する。
+※旧テンプレ「経費インポート用」id=37047 は「立替金」裸列が無く計上漏れになるため廃止（2026-07-17 谷津確認）。
 
 列マッピング（live 集計シート実測 2026-07-16。マクロは dRY列振り分け→Module2 の2段変換）:
   - 夜間当番手当       ← F列相当 = 夜間当番(D) + RINK(E)   ※dRYがF値をR/Sペアに入れるため合算値になる
@@ -39,7 +40,7 @@ ITEM_KEYS = [
     "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給", "テレワーク手当",
 ]
 # jinjer側テンプレート（GET /v1/master/jinji-import-templates で実測）
-DEFAULT_TEMPLATE_ID = "37047"   # 「経費インポート用」menu=payroll_calculation
+DEFAULT_TEMPLATE_ID = "44450"   # 「経費APIインポート用」menu=payroll_calculation（11列・立替金裸列あり・2026-07-17検証済）
 
 
 def _norm_col(s) -> str:
@@ -200,7 +201,7 @@ def post_payroll_import(
         month: 処理月 "YYYY-MM"（salary_setting.executed_on）
         csv_bytes: Shift-JIS のインポートCSV
         file_name: インポートファイル名
-        template_id: 入力テンプレートID（既定 37047「経費インポート用」）
+        template_id: 入力テンプレートID（既定 44450「経費APIインポート用」）
         apply_formulas_off: 「編集した項目は計算式を適用しない」を有効にするか
         poll_seconds: 完了待ちの最大秒数（バッチ処理のため時間がかかる）
     """

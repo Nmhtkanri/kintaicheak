@@ -341,6 +341,29 @@ def test_render_import_csv_follows_template_positions():
     assert any("立替金" in w and "12,177" in w for w in cov)
 
 
+def test_render_import_csv_template_44450_covers_all():
+    """新テンプレ44450「経費APIインポート用」（2026-07-17 谷津作成・空DL検証済）。
+
+    11列＝社員番号,空(氏名なし),夜間当番手当,定常外業務対応手当,支給過不足調整,
+    非課税通勤費,立替金(顧客請求分),立替金,その他,その他手当,現物支給。
+    旧37047で欠けていた「立替金」裸列が入り、経費の全支給項目をカバーする
+    （テレワーク手当はそもそも給与に乗せないので対象外）。
+    """
+    from services.keihi_payroll_import import check_template_coverage
+    tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
+           "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給"]
+    # 川口: 夜間当番30000 + 立替金(非課税精算)12177
+    rows, _ = build_import_rows(
+        {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"})
+    line = render_import_csv(rows, tpl).decode("cp932").strip().split("\r\n")[1].split(",")
+    assert line[0] == '"2026013"'
+    assert line[1] == ""          # 氏名列は無い（空スキップ）
+    assert line[2] == "30000"     # 位置3=夜間当番手当 ✓
+    assert line[7] == "12177"     # 位置8=立替金 ✓（旧37047では欠落し計上漏れだった）
+    # 立替金列があるので計上漏れ警告は出ない（テレワーク手当=0なので警告なし）
+    assert check_template_coverage(rows, tpl) == []
+
+
 def test_match_column_normalizes():
     from services.keihi_payroll_import import _match_column
     assert _match_column("*社員番号") == "社員番号"
