@@ -519,22 +519,33 @@
             <div style="margin-top:10px; padding:10px 12px; border:1px solid #d7dee8; border-radius:6px; background:#fafcff">
                 <div style="font-weight:600; margin-bottom:4px">イレギュラー経費（任意）</div>
                 <p class="hint" style="margin:0 0 8px">
-                    経費データから作れない「その月に手で決める」金額です。項目を選び、<b>「社員番号,金額」を1行ずつ</b>貼り付けて「追加」してください
-                    （<b>Excelの2列をそのままコピペできます</b>／タブ区切り可）。<b>マイナス金額も可</b>（過払いの戻し等）。
+                    経費データから作れない「その月に手で決める」金額です。項目を選び、<b>社員番号の列と金額の列をそれぞれ貼り付けて</b>「追加」してください
+                    （Excelで列が離れていても大丈夫です）。<b>上から順に同じ行どうしが対応</b>します。<b>マイナス金額も可</b>（過払いの戻し等）。
                     同じ項目を何回でも追加でき、同じ社員は合算されます。
                 </p>
-                <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap">
-                    <select id="ki-irr-type" style="padding:6px 10px; min-width:190px">
-                        <option value="定常外業務対応手当">定常外業務対応手当</option>
-                        <option value="その他手当">その他手当</option>
-                        <option value="現物支給">現物支給</option>
-                        <option value="支給過不足調整">支給過不足調整</option>
-                        <option value="社保調整">社保調整（控除）</option>
-                    </select>
-                    <textarea id="ki-irr-text" rows="3" placeholder="例:&#10;2026012,15000&#10;2024050,8000"
-                              style="flex:1; min-width:240px; padding:6px 10px; font-family:monospace; font-size:12px"></textarea>
-                    <button type="button" class="btn btn-secondary" id="ki-irr-add" style="padding:6px 16px">＋ 追加</button>
+                <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
+                    <label style="font-size:12px">項目<br>
+                        <select id="ki-irr-type" style="padding:6px 10px; min-width:190px; margin-top:3px">
+                            <option value="定常外業務対応手当">定常外業務対応手当</option>
+                            <option value="その他手当">その他手当</option>
+                            <option value="現物支給">現物支給</option>
+                            <option value="支給過不足調整">支給過不足調整</option>
+                            <option value="社保調整">社保調整（控除）</option>
+                        </select>
+                    </label>
+                    <label style="flex:1; min-width:150px; font-size:12px">
+                        社員番号 <span id="ki-irr-ids-n" style="color:#777"></span><br>
+                        <textarea id="ki-irr-ids" rows="6" placeholder="2026012&#10;2024050"
+                                  style="width:100%; margin-top:3px; padding:6px 10px; font-family:monospace; font-size:12px; line-height:1.5"></textarea>
+                    </label>
+                    <label style="flex:1; min-width:150px; font-size:12px">
+                        金額 <span id="ki-irr-amts-n" style="color:#777"></span><br>
+                        <textarea id="ki-irr-amts" rows="6" placeholder="15000&#10;8000"
+                                  style="width:100%; margin-top:3px; padding:6px 10px; font-family:monospace; font-size:12px; line-height:1.5"></textarea>
+                    </label>
+                    <button type="button" class="btn btn-secondary" id="ki-irr-add" style="padding:6px 16px; margin-bottom:2px">＋ 追加</button>
                 </div>
+                <div id="ki-irr-warn" style="margin-top:5px; font-size:12px; color:#c0392b; display:none"></div>
                 <div id="ki-irr-list" style="margin-top:8px"></div>
                 <label style="display:block; margin-top:10px">
                     まとめて入れる場合はファイル指定（任意・CSV/xlsx）: <b>社員番号＋項目名の列</b>（例: 社員番号, 現物支給, 社保調整）か、<b>社員番号・項目・金額の3列</b>のどちらでもOK。見出しから自動判別します
@@ -891,8 +902,65 @@
     const kiIrrAddBtn = document.getElementById('ki-irr-add');
     if (kiIrrAddBtn) {
         const listEl = document.getElementById('ki-irr-list');
+        const idsEl = document.getElementById('ki-irr-ids');
+        const amtsEl = document.getElementById('ki-irr-amts');
+        const warnEl = document.getElementById('ki-irr-warn');
 
-        // 「社員番号,金額」の行数と合計を数える（サーバ側 parse_manual_allowances と同じ区切り規約）
+        // 末尾の空行だけ落とす（途中の空行は行位置を保つため残す）。サーバ側 _split_lines と同じ規約
+        const splitLines = (t) => {
+            const ls = (t || '').replace(/\r\n?/g, '\n').split('\n');
+            while (ls.length && !ls[ls.length - 1].trim()) ls.pop();
+            return ls;
+        };
+
+        // 社員番号欄と金額欄を行の並び順で対応させる（サーバ側 pair_ids_amounts と同じ規約）
+        const pair = () => {
+            const ids = splitLines(idsEl.value), amts = splitLines(amtsEl.value);
+            if (!amts.length) {
+                // 2列まとめて貼られた場合はそのまま通す
+                const body = ids.filter(l => l.trim() && !l.trim().startsWith('#'));
+                if (body.length && body.every(l => l.split(/[\t,、，]/).length >= 2)) {
+                    return {lines: ids, error: null};
+                }
+                return {lines: [], error: body.length ? '金額が入力されていません。' : null};
+            }
+            if (!ids.length) return {lines: [], error: '社員番号が入力されていません。'};
+            if (ids.length !== amts.length) {
+                return {lines: [], error: `社員番号が${ids.length}行、金額が${amts.length}行で数が合いません`
+                    + '（行の並び順で対応させるため、同じ行数にしてください）。'};
+            }
+            const out = [];
+            for (let n = 0; n < ids.length; n++) {
+                const i = ids[n].trim(), a = amts[n].trim();
+                if (!i && !a) continue;
+                if (!i || !a) {
+                    return {lines: [], error: `${n + 1}行目: ${i ? '金額' : '社員番号'}が空です`
+                        + '（片方だけ空だと以降の行がズレます）。'};
+                }
+                out.push(i + '\t' + a);
+            }
+            return {lines: out, error: null};
+        };
+
+        // 行数の食い違いは貼った時点で気づけるよう、常時表示する
+        const refreshCounts = () => {
+            const ids = splitLines(idsEl.value), amts = splitLines(amtsEl.value);
+            document.getElementById('ki-irr-ids-n').textContent = ids.length ? `(${ids.length}行)` : '';
+            document.getElementById('ki-irr-amts-n').textContent = amts.length ? `(${amts.length}行)` : '';
+            const p = pair();
+            warnEl.textContent = p.error ? '⚠️ ' + p.error : '';
+            warnEl.style.display = p.error ? 'block' : 'none';
+        };
+        [idsEl, amtsEl].forEach(el => {
+            el.addEventListener('input', refreshCounts);
+            // 行がズレて見えないよう縦スクロールを同期する
+            el.addEventListener('scroll', () => {
+                const other = el === idsEl ? amtsEl : idsEl;
+                if (other.scrollTop !== el.scrollTop) other.scrollTop = el.scrollTop;
+            });
+        });
+
+        // 「社員番号\t金額」の行数と合計を数える（サーバ側 parse_manual_allowances と同じ区切り規約）
         const summarize = (text) => {
             let n = 0, total = 0;
             (text || '').split(/\r?\n/).forEach(line => {
@@ -934,19 +1002,26 @@
 
         kiIrrAddBtn.addEventListener('click', () => {
             const typeEl = document.getElementById('ki-irr-type');
-            const textEl = document.getElementById('ki-irr-text');
-            const text = textEl.value.trim();
-            if (!text) { alert('「社員番号,金額」を貼り付けてから「追加」してください。'); return; }
+            if (!idsEl.value.trim() && !amtsEl.value.trim()) {
+                alert('社員番号と金額を貼り付けてから「追加」してください。'); return;
+            }
+            const p = pair();
+            if (p.error) { alert(p.error); return; }
+            const text = p.lines.join('\n');
             const s = summarize(text);
             if (!s.n) {
-                alert('「社員番号,金額」の形式で読み取れる行がありませんでした。\n'
-                    + '例) 2026012,15000   ※Excelの2列コピペ（タブ区切り）も使えます');
+                alert('読み取れる行がありませんでした。\n'
+                    + '社員番号の列と金額の列を、それぞれの欄に貼り付けてください。\n'
+                    + '例) 社員番号: 2026012 ／ 金額: 15000');
                 return;
             }
-            kiIrregularItems.push({type: typeEl.value, text});
-            textEl.value = '';          // 続けて別項目を足せるように空にする
+            // サーバ側でも同じ規約で突き合わせ直せるよう、欄ごとの内容をそのまま送る
+            kiIrregularItems.push({type: typeEl.value, ids: idsEl.value, amounts: amtsEl.value, text});
+            idsEl.value = ''; amtsEl.value = '';   // 続けて別項目を足せるように空にする
+            refreshCounts();
             render();
         });
+        refreshCounts();
     }
 
     // ----- 経費統合一覧表の生成（4ソース取込・マクロ移植 P1a）-----

@@ -1416,7 +1416,8 @@ def route_expense_integration():
     # イレギュラー経費（経費4ソースから導けない手決めの金額）。
     # 画面の「項目プルダウン＋貼り付け」を1件ずつ追加したものと、ファイル一括取込を合算する。
     from services.keihi_payroll_import import (
-        parse_manual_allowances, load_irregular_file, merge_manual, MANUAL_ITEM_KEYS)
+        parse_manual_allowances, load_irregular_file, merge_manual, pair_ids_amounts,
+        MANUAL_ITEM_KEYS)
 
     errors = []
     manual_items: dict = {}
@@ -1433,7 +1434,13 @@ def route_expense_integration():
             if item not in MANUAL_ITEM_KEYS:
                 errors.append(f"イレギュラー経費: 項目「{item}」は選択できる項目ではありません。")
                 continue
-            got, errs = parse_manual_allowances((ent or {}).get("text"))
+            # 社員番号欄と金額欄は「行の並び順」で対応させる（ズレ＝別人に金額が付く事故）
+            text, pair_errs = pair_ids_amounts(
+                (ent or {}).get("ids"), (ent or {}).get("amounts"))
+            errors += [f"イレギュラー経費（{item}）: {e}" for e in pair_errs]
+            if pair_errs:
+                continue
+            got, errs = parse_manual_allowances(text)
             errors += [f"イレギュラー経費（{item}）の入力 {e}" for e in errs]
             if got:
                 merge_manual(manual_items, item, got)

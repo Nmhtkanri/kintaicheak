@@ -110,6 +110,60 @@ def _parse_amount(s) -> "float | None":
         return None
 
 
+def _split_lines(text: "str | None") -> list[str]:
+    """改行で分割し、末尾の空行だけ落とす（途中の空行は行位置の保持のため残す）。"""
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def pair_ids_amounts(ids_text: "str | None", amounts_text: "str | None",
+                     ) -> "tuple[str, list[str]]":
+    """社員番号欄と金額欄を「行の並び順」で突き合わせ、1行1明細のテキストにする。
+
+    画面では社員番号と金額を別の欄に貼り付ける（Excelで列が離れていても貼れるように）。
+    ここが**ズレると別人に金額が付く**ので、行数不一致は黙って詰めずにエラーにする。
+
+    金額欄が空で社員番号欄が2列（タブ/カンマ区切り）なら、2列まとめての
+    コピペとみなしてそのまま返す。
+    """
+    ids = _split_lines(ids_text)
+    amts = _split_lines(amounts_text)
+    errors: list[str] = []
+
+    if not amts:
+        # 2列まとめて貼られた場合はそのまま通す（全行が2列に割れるときだけ）
+        body = [l for l in ids if l.strip() and not l.strip().startswith("#")]
+        if body and all(len(_re.split(r"[\t,、，]", l)) >= 2 for l in body):
+            return "\n".join(ids), errors
+        if body:
+            errors.append("金額が入力されていません。")
+        return "", errors
+    if not ids:
+        errors.append("社員番号が入力されていません。")
+        return "", errors
+
+    if len(ids) != len(amts):
+        errors.append(
+            f"社員番号が{len(ids)}行、金額が{len(amts)}行で数が合いません"
+            f"（行の並び順で対応させるため、同じ行数にしてください）。")
+        return "", errors
+
+    out: list[str] = []
+    for n, (i, a) in enumerate(zip(ids, amts), start=1):
+        i, a = i.strip(), a.strip()
+        if not i and not a:
+            continue                    # 両方空の行は読み飛ばす
+        if not i or not a:
+            errors.append(
+                f"{n}行目: {'金額' if i else '社員番号'}が空です"
+                f"（片方だけ空だと以降の行がズレるため中断しました）。")
+            return "", errors
+        out.append(f"{i}\t{a}")
+    return "\n".join(out), errors
+
+
 def parse_manual_allowances(text: "str | None") -> "tuple[dict[str, int], list[str]]":
     """「社員番号,金額」形式の手入力テキストを {社員番号: 金額} にする。
 
