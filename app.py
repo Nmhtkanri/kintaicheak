@@ -1414,10 +1414,9 @@ def route_expense_integration():
     import_template_str = _clean_path_input(request.form.get("import_template_csv"))
 
     # イレギュラー経費（経費4ソースから導けない手決めの金額）。
-    # 画面の「項目プルダウン＋貼り付け」を1件ずつ追加したものと、ファイル一括取込を合算する。
+    # 画面で1人ずつ追加した明細（1件＝1人）と、ファイル一括取込を合算する。
     from services.keihi_payroll_import import (
-        parse_manual_allowances, load_irregular_file, merge_manual, pair_ids_amounts,
-        MANUAL_ITEM_KEYS)
+        parse_manual_allowances, load_irregular_file, merge_manual, MANUAL_ITEM_KEYS)
 
     errors = []
     manual_items: dict = {}
@@ -1429,19 +1428,19 @@ def route_expense_integration():
         except ValueError:
             entries = []
             errors.append("イレギュラー経費の入力を読み取れませんでした（画面を再読み込みしてください）。")
+        # 項目ごとに1行1明細へ組み直してから、画面と同じ規約で検証する
+        lines_by_item: dict = {}
         for ent in entries if isinstance(entries, list) else []:
             item = str((ent or {}).get("type") or "").strip()
             if item not in MANUAL_ITEM_KEYS:
                 errors.append(f"イレギュラー経費: 項目「{item}」は選択できる項目ではありません。")
                 continue
-            # 社員番号欄と金額欄は「行の並び順」で対応させる（ズレ＝別人に金額が付く事故）
-            text, pair_errs = pair_ids_amounts(
-                (ent or {}).get("ids"), (ent or {}).get("amounts"))
-            errors += [f"イレギュラー経費（{item}）: {e}" for e in pair_errs]
-            if pair_errs:
-                continue
-            got, errs = parse_manual_allowances(text)
-            errors += [f"イレギュラー経費（{item}）の入力 {e}" for e in errs]
+            emp = str((ent or {}).get("id") or "").strip()
+            amt = str((ent or {}).get("amount") or "").strip()
+            lines_by_item.setdefault(item, []).append(f"{emp}\t{amt}")
+        for item, lines in lines_by_item.items():
+            got, errs = parse_manual_allowances("\n".join(lines))
+            errors += [f"イレギュラー経費（{item}）{e}" for e in errs]
             if got:
                 merge_manual(manual_items, item, got)
 

@@ -427,55 +427,12 @@ def test_build_import_rows_manual_allowance_unknown_id_warns():
     assert any("2029999" in w and "在籍者一覧にありません" in w for w in warns)
 
 
-def test_pair_ids_amounts_basic():
-    """社員番号欄と金額欄を行の並び順で対応させる。"""
-    from services.keihi_payroll_import import pair_ids_amounts, parse_manual_allowances
-    text, errs = pair_ids_amounts("2026012\n2024050", "3,000\n-1500")
+def test_manual_allowances_same_employee_added_twice_is_summed():
+    """画面で同じ社員を2回追加したら合算する（1件＝1人分を積み上げる運用）。"""
+    from services.keihi_payroll_import import parse_manual_allowances
+    got, errs = parse_manual_allowances("2026013\t2000\n2026013\t500\n2026012\t-3000")
     assert errs == []
-    got, errs2 = parse_manual_allowances(text)
-    assert errs2 == [] and got == {"2026012": 3000, "2024050": -1500}
-
-
-def test_pair_ids_amounts_row_count_mismatch_errors():
-    """行数が合わなければ**黙って詰めずにエラー**（ズレると別人に金額が付くため）。"""
-    from services.keihi_payroll_import import pair_ids_amounts
-    text, errs = pair_ids_amounts("2026012\n2024050\n2026013", "3000\n1500")
-    assert text == ""
-    assert any("3行" in e and "2行" in e and "合いません" in e for e in errs)
-
-
-def test_pair_ids_amounts_one_side_blank_errors():
-    """片方だけ空行があると以降がズレるので中断する。"""
-    from services.keihi_payroll_import import pair_ids_amounts
-    text, errs = pair_ids_amounts("2026012\n\n2026013", "3000\n1500\n2000")
-    assert text == ""
-    assert any("2行目" in e and "社員番号が空" in e for e in errs)
-
-
-def test_pair_ids_amounts_trailing_blank_lines_ok():
-    """末尾の空行（Excelコピペで付きがち）は行数差にしない。"""
-    from services.keihi_payroll_import import pair_ids_amounts
-    text, errs = pair_ids_amounts("2026012\n2024050\n\n", "3000\n1500\n\n\n")
-    assert errs == []
-    assert text == "2026012\t3000\n2024050\t1500"
-
-
-def test_pair_ids_amounts_two_column_paste_still_works():
-    """金額欄が空でも、社員番号欄に2列まとめて貼られていれば受け付ける。"""
-    from services.keihi_payroll_import import pair_ids_amounts, parse_manual_allowances
-    text, errs = pair_ids_amounts("2026012\t3000\n2024050\t1500", "")
-    assert errs == []
-    got, _ = parse_manual_allowances(text)
-    assert got == {"2026012": 3000, "2024050": 1500}
-
-
-def test_pair_ids_amounts_missing_side_errors():
-    """片方の欄だけ埋まっている場合は分かるように知らせる。"""
-    from services.keihi_payroll_import import pair_ids_amounts
-    _, errs = pair_ids_amounts("2026012\n2024050", "")
-    assert any("金額が入力されていません" in e for e in errs)
-    _, errs = pair_ids_amounts("", "3000")
-    assert any("社員番号が入力されていません" in e for e in errs)
+    assert got == {"2026013": 2500, "2026012": -3000}
 
 
 def test_load_irregular_file_wide(tmp_path):
