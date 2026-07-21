@@ -717,6 +717,8 @@ def run_keihi_integration(
     import_template_csv: "str | Path | None" = None,
     teijo_allowances: "dict | None" = None,
     sonota_allowances: "dict | None" = None,
+    genbutsu_allowances: "dict | None" = None,
+    kabusoku_allowances: "dict | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -731,6 +733,8 @@ def run_keihi_integration(
         keywords_file: 分類キーワード設定（設定シート形式 xlsx/CSV）。未指定は内蔵デフォルト
         teijo_allowances: 定常外業務対応手当 {社員番号: 金額}（画面手入力。経費から導けないため）
         sonota_allowances: その他手当 {社員番号: 金額}（同上）
+        genbutsu_allowances: 現物支給 {社員番号: 金額}（同上）
+        kabusoku_allowances: 支給過不足調整 {社員番号: 金額}（ファイル取込。負数可）
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -817,14 +821,16 @@ def run_keihi_integration(
             # インポート行（人間チェック用のプレビューとCSV）
             import_rows, warnings = build_import_rows(
                 agg.by_id, emp_names, roster_id_to_name,
-                teijo=teijo_allowances, sonota=sonota_allowances)
+                teijo=teijo_allowances, sonota=sonota_allowances,
+                genbutsu=genbutsu_allowances, kabusoku=kabusoku_allowances)
             result.import_preview = import_rows
-            n_teijo = sum(1 for a in (teijo_allowances or {}).values() if a)
-            n_sonota = sum(1 for a in (sonota_allowances or {}).values() if a)
-            if n_teijo or n_sonota:
-                log_func(f"[info] 手入力手当を反映: 定常外業務対応手当 {n_teijo}名 "
-                         f"({sum((teijo_allowances or {}).values()):,}円) / "
-                         f"その他手当 {n_sonota}名 ({sum((sonota_allowances or {}).values()):,}円)")
+            for _label, _d in (("定常外業務対応手当", teijo_allowances),
+                               ("その他手当", sonota_allowances),
+                               ("現物支給", genbutsu_allowances),
+                               ("支給過不足調整", kabusoku_allowances)):
+                _n = sum(1 for a in (_d or {}).values() if a)
+                if _n:
+                    log_func(f"[info] {_label}を反映: {_n}名 / 計 {sum((_d or {}).values()):,}円")
 
             # jinjerテンプレCSVが指定されていれば、その列並びに追従してCSVを組み立てる
             # （jinjerのテンプレインポートは列位置対応。並びがズレると値が別項目に入る）

@@ -1413,14 +1413,31 @@ def route_expense_integration():
     keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
     import_template_str = _clean_path_input(request.form.get("import_template_csv"))
 
-    # 定常外業務対応手当・その他手当は経費から導けない手決めの金額 → 画面の手入力欄で受ける
-    from services.keihi_payroll_import import parse_manual_allowances
+    # 経費から導けない手決めの金額。少人数の項目は手入力欄、
+    # 対象者が1〜30名規模になり得る支給過不足調整はファイル取込で受ける。
+    from services.keihi_payroll_import import parse_manual_allowances, load_allowance_file
     teijo_allowances, teijo_errs = parse_manual_allowances(request.form.get("teijo_allowances"))
     sonota_allowances, sonota_errs = parse_manual_allowances(request.form.get("sonota_allowances"))
+    genbutsu_allowances, genbutsu_errs = parse_manual_allowances(request.form.get("genbutsu_allowances"))
 
     errors = []
     errors += [f"定常外業務対応手当の入力 {e}" for e in teijo_errs]
     errors += [f"その他手当の入力 {e}" for e in sonota_errs]
+    errors += [f"現物支給の入力 {e}" for e in genbutsu_errs]
+
+    kabusoku_allowances: dict = {}
+    kabusoku_str = _clean_path_input(request.form.get("kabusoku_file"))
+    if kabusoku_str:
+        kabusoku_path = _Path(kabusoku_str)
+        if not kabusoku_path.exists():
+            errors.append(f"支給過不足調整ファイルが見つかりません: {kabusoku_path}")
+        else:
+            try:
+                kabusoku_allowances, kabusoku_errs = load_allowance_file(
+                    kabusoku_path, label="支給過不足調整")
+                errors += kabusoku_errs
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"支給過不足調整ファイルを読めませんでした: {e}")
     paths: dict = {}
     for key, val in sources.items():
         if not val:
@@ -1459,6 +1476,7 @@ def route_expense_integration():
             route_check=route_check, classify=classify, keywords_file=keywords_file,
             import_template_csv=import_template_csv,
             teijo_allowances=teijo_allowances, sonota_allowances=sonota_allowances,
+            genbutsu_allowances=genbutsu_allowances, kabusoku_allowances=kabusoku_allowances,
             log_func=_log,
         )
     except Exception as e:

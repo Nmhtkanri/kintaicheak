@@ -7,17 +7,18 @@
 列マッピング（live 集計シート実測 2026-07-16。マクロは dRY列振り分け→Module2 の2段変換）:
   - 夜間当番手当       ← F列相当 = 夜間当番(D) + RINK(E)   ※dRYがF値をR/Sペアに入れるため合算値になる
   - 定常外業務対応手当  ← 画面からの手入力（マクロでは「仕訳データ」K/L列 → R/S・T/Uペア）
-  - 支給過不足調整     ← 固定 0（旧「過不足調整」を名称変更）
+  - 支給過不足調整     ← **ファイル取込**（1〜30名規模になるため。CSV/xlsxの「社員番号,金額」。負数可）
   - 非課税通勤費       ← 交通費(H)
   - 立替金（顧客請求分）← 顧客請求分(G)
   - 立替金            ← 非課税精算(立替金)(I)
   - その他            ← その他(J)
   - その他手当         ← 画面からの手入力（マクロでは集計シート R/T へ直接手入力）
-  - 現物支給          ← 固定 0
+  - 現物支給          ← 画面からの手入力
   ※テレワーク手当(K) は現行マクロでもインポートCSVに乗らない（dRYでK廃止）。金額があれば警告表示する。
 
-定常外業務対応手当・その他手当は経費4ソースから導けない「その月に手で決める」金額なので、
-画面の手入力欄から受け取る（`parse_manual_allowances`）。マクロ側は R/S・T/U の2枠しか無く、
+定常外業務対応手当・その他手当・現物支給は経費4ソースから導けない「その月に手で決める」
+金額なので画面の手入力欄から受け取る（`parse_manual_allowances`）。支給過不足調整は
+対象者が1〜30名規模になり得るためファイル取込にする（`load_allowance_file`）。マクロ側は R/S・T/U の2枠しか無く、
 夜間当番手当＋通信手当＋定常外業務対応手当 の3つが揃うと定常外が
 「スキップ(両スロット使用済み)」で消える不具合があるが、本実装は項目ごとに独立の
 フィールドを持つため取りこぼさない（通信手当はCSV対象外なので枠を食わない）。
@@ -142,8 +143,65 @@ def parse_manual_allowances(text: "str | None") -> "tuple[dict[str, int], list[s
     return out, errors
 
 
+# 手当ファイルの列名候補（ヘッダーから自動判別する）
+_ID_HEADERS = ("社員番号", "従業員番号", "社員no", "社員ｎｏ", "empno", "employee_id")
+_AMT_HEADERS = ("金額", "支給額", "調整額", "支給過不足調整", "現物支給", "amount")
+
+
+def load_allowance_file(path: "str | Path", label: str = "手当") -> "tuple[dict[str, int], list[str]]":
+    """「社員番号・金額」の2列を持つ CSV/xlsx を読み、{社員番号: 金額} にする。
+
+    人数が多い項目（支給過不足調整は1〜30名規模）向け。ヘッダー行の列名から
+    社員番号列・金額列を自動判別し、見つからなければ先頭2列を使う。
+    金額は負数可（過払いの戻し等）。同一社員の複数行は加算。
+    """
+    path = Path(path)
+    rows: list[tuple] = []
+    if path.suffix.lower() in (".xlsx", ".xlsm", ".xltx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb.worksheets[0]
+            rows = [r for r in ws.iter_rows(values_only=True) if r is not None]
+        finally:
+            wb.close()
+    else:
+        for enc in ("cp932", "utf-8-sig", "utf-8"):
+            try:
+                with open(path, encoding=enc, newline="") as f:
+                    rows = [tuple(r) for r in _csv.reader(f)]
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"{label}ファイルの文字コードを判別できませんでした: {path}")
+
+    rows = [r for r in rows if any(c is not None and str(c).strip() for c in r)]
+    if not rows:
+        return {}, [f"{label}ファイルにデータがありません: {path}"]
+
+    # ヘッダーから列位置を判別（無ければ先頭2列）
+    head = [_norm_col(c).lower() for c in rows[0]]
+    id_col = next((i for i, h in enumerate(head) if h in _ID_HEADERS), None)
+    amt_col = next((i for i, h in enumerate(head) if h in _AMT_HEADERS), None)
+    if id_col is None or amt_col is None:
+        id_col, amt_col = 0, 1
+        body = rows if _parse_amount(rows[0][1] if len(rows[0]) > 1 else None) is not None else rows[1:]
+    else:
+        body = rows[1:]
+
+    text = "\n".join(
+        f"{r[id_col]}\t{r[amt_col]}"
+        for r in body
+        if len(r) > max(id_col, amt_col)
+    )
+    got, errors = parse_manual_allowances(text)
+    return got, [f"{label}ファイル {e}" for e in errors]
+
+
 def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" = None,
                       teijo: "dict | None" = None, sonota: "dict | None" = None,
+                      genbutsu: "dict | None" = None, kabusoku: "dict | None" = None,
                       ) -> tuple[list[dict], list[str]]:
     """集計（数字ID→7バケット）＋手入力手当からインポート行と警告リストを返す。
 
@@ -156,9 +214,11 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
     roster_names = roster_names or {}
     teijo = teijo or {}
     sonota = sonota or {}
+    genbutsu = genbutsu or {}
+    kabusoku = kabusoku or {}
     rows: list[dict] = []
     warnings: list[str] = []
-    for emp_id in sorted(set(by_id) | set(teijo) | set(sonota)):
+    for emp_id in sorted(set(by_id) | set(teijo) | set(sonota) | set(genbutsu) | set(kabusoku)):
         if not in_company_scope(emp_id):
             continue
         v = by_id.get(emp_id) or [0.0] * 7
@@ -168,18 +228,18 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
             "氏名": name,
             "夜間当番手当": int(v[B_YAKAN] + v[B_RINK]),   # F列相当（夜間＋RINK）
             "定常外業務対応手当": int(teijo.get(emp_id, 0)),
-            "支給過不足調整": 0,
+            "支給過不足調整": int(kabusoku.get(emp_id, 0)),
             "非課税通勤費": int(v[B_TRANS]),
             "立替金（顧客請求分）": int(v[B_BILL]),
             "立替金": int(v[B_NONTAX]),
             "その他": int(v[B_ETC]),
             "その他手当": int(sonota.get(emp_id, 0)),
-            "現物支給": 0,
+            "現物支給": int(genbutsu.get(emp_id, 0)),
             "テレワーク手当": int(v[B_TW]),
         })
 
     # 手入力の社員番号が在籍者一覧に無ければ入力ミスの可能性 → 警告（行は出す）
-    for emp_id in sorted(set(teijo) | set(sonota)):
+    for emp_id in sorted(set(teijo) | set(sonota) | set(genbutsu) | set(kabusoku)):
         if in_company_scope(emp_id) and roster_names and emp_id not in roster_names:
             warnings.append(
                 f"⚠️ 手入力手当: 社員番号 {emp_id} が在籍者一覧にありません（入力ミスの可能性）。")

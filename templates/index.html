@@ -526,6 +526,16 @@
                 <textarea id="ki-sonota" rows="3" placeholder="例:&#10;2026013,5000"
                           style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
             </label>
+            <label>
+                現物支給（任意・手入力）: 同上
+                <textarea id="ki-genbutsu" rows="3" placeholder="例:&#10;2026012,3000"
+                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
+            </label>
+            <label>
+                支給過不足調整（任意・<b>ファイル指定</b>）: 対象者が多くなるため CSV/xlsx で渡します。<b>「社員番号」「金額」の2列</b>（見出しがあれば自動判別、無ければ先頭2列）。<b>マイナス金額も可</b>（過払いの戻し等）
+                <input type="text" id="ki-kabusoku-file" placeholder="例: Z:\経費\支給過不足調整_202608.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+            </label>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
                 <span id="ki-status" style="margin-left:12px; color:#666"></span>
@@ -893,6 +903,8 @@
             fd.append('import_template_csv', document.getElementById('ki-import-template-csv').value);
             fd.append('teijo_allowances', document.getElementById('ki-teijo').value);
             fd.append('sonota_allowances', document.getElementById('ki-sonota').value);
+            fd.append('genbutsu_allowances', document.getElementById('ki-genbutsu').value);
+            fd.append('kabusoku_file', document.getElementById('ki-kabusoku-file').value);
 
             try {
                 const res = await fetch('/expense_integration', {method:'POST', body: fd});

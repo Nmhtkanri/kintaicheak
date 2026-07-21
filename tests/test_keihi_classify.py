@@ -423,6 +423,80 @@ def test_build_import_rows_manual_allowance_unknown_id_warns():
     assert any("2029999" in w and "在籍者一覧にありません" in w for w in warns)
 
 
+def test_load_allowance_file_csv_with_header(tmp_path):
+    """支給過不足調整はファイル取込（見出しから列を自動判別・マイナス可）。"""
+    from services.keihi_payroll_import import load_allowance_file
+    p = tmp_path / "kabusoku.csv"
+    p.write_bytes(
+        "社員番号,氏名,金額\r\n"
+        "2026012,橘 伸俊,-5000\r\n"       # 過払いの戻し＝マイナス
+        "2024050,加藤 英人,\"12,000\"\r\n"  # 桁区切り
+        "2026013,川口 祐ノ輔,0\r\n"        # 0 は無視
+        .encode("cp932"))
+    got, errs = load_allowance_file(p, label="支給過不足調整")
+    assert got == {"2026012": -5000, "2024050": 12000}
+    assert errs == []
+
+
+def test_load_allowance_file_no_header_two_columns(tmp_path):
+    """見出しが無ければ先頭2列を social番号/金額として読む。"""
+    from services.keihi_payroll_import import load_allowance_file
+    p = tmp_path / "k.csv"
+    p.write_bytes("2026012,3000\r\n2026013,4000\r\n".encode("cp932"))
+    got, errs = load_allowance_file(p)
+    assert got == {"2026012": 3000, "2026013": 4000}
+    assert errs == []
+
+
+def test_load_allowance_file_xlsx(tmp_path):
+    from openpyxl import Workbook
+    from services.keihi_payroll_import import load_allowance_file
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["社員番号", "調整額"])
+    ws.append([2026012, -1500])     # 数値セル
+    ws.append(["2024050", 2000])
+    p = tmp_path / "k.xlsx"
+    wb.save(p)
+    got, errs = load_allowance_file(p)
+    assert got == {"2026012": -1500, "2024050": 2000}
+    assert errs == []
+
+
+def test_build_import_rows_genbutsu_and_kabusoku():
+    """現物支給（手入力）と支給過不足調整（ファイル）が行に乗る。"""
+    rows, warns = build_import_rows(
+        {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]},
+        {"2026013": "川口 祐ノ輔"},
+        roster_names={"2026013": "川口 祐ノ輔", "2026012": "橘 伸俊"},
+        genbutsu={"2026013": 3000},
+        kabusoku={"2026013": -5000, "2026012": 8000},
+    )
+    by_id = {r["社員番号"]: r for r in rows}
+    assert by_id["2026013"]["現物支給"] == 3000
+    assert by_id["2026013"]["支給過不足調整"] == -5000      # マイナスがそのまま乗る
+    assert by_id["2026013"]["夜間当番手当"] == 30000        # 既存項目は不変
+    assert by_id["2026012"]["支給過不足調整"] == 8000       # 調整だけの社員も行が出る
+    assert warns == []
+
+
+def test_render_csv_all_manual_items_on_template_44450():
+    """4つの手決め項目が テンプレ44450 の正しい列位置に載る。"""
+    tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
+           "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給"]
+    rows, _ = build_import_rows(
+        {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"},
+        teijo={"2026013": 15000}, sonota={"2026013": 5000},
+        genbutsu={"2026013": 3000}, kabusoku={"2026013": -5000})
+    line = render_import_csv(rows, tpl).decode("cp932").strip().split("\r\n")[1].split(",")
+    assert line[2] == "30000"    # 位置3 夜間当番手当
+    assert line[3] == "15000"    # 位置4 定常外業務対応手当
+    assert line[4] == "-5000"    # 位置5 支給過不足調整（マイナス）
+    assert line[7] == "12177"    # 位置8 立替金
+    assert line[9] == "5000"     # 位置10 その他手当
+    assert line[10] == "3000"    # 位置11 現物支給
+
+
 def test_match_column_normalizes():
     from services.keihi_payroll_import import _match_column
     assert _match_column("*社員番号") == "社員番号"
