@@ -36,15 +36,23 @@ from pathlib import Path
 
 from services.keihi_classify import B_YAKAN, B_RINK, B_TRANS, B_ETC, B_TW, B_BILL, B_NONTAX
 
-# 谷津さん確定の正式ヘッダー（2026-07-16。jinjerテンプレート「経費インポート用」と一致させること）
+# 谷津さん確定の正式ヘッダー（2026-07-16。jinjerテンプレートと一致させること）
+# 社保調整は控除項目（2026-07-21 追加）。テンプレ44450にも列を追加してもらう。
 IMPORT_HEADERS = [
     "社員番号", "氏名", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
     "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給",
+    "社保調整",
 ]
-# インポート行が持つ支給項目（社員番号・氏名以外）。テンプレ列名との照合対象。
+# インポート行が持つ項目（社員番号・氏名以外）。テンプレ列名との照合対象。
 ITEM_KEYS = [
     "夜間当番手当", "定常外業務対応手当", "支給過不足調整", "非課税通勤費",
-    "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給", "テレワーク手当",
+    "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給", "社保調整",
+    "テレワーク手当",
+]
+# 経費4ソースから導けず、画面の「イレギュラー経費」から手で入れる項目。
+# 金額は負数可（支給過不足調整の戻し等）。社保調整は控除項目。
+MANUAL_ITEM_KEYS = [
+    "定常外業務対応手当", "その他手当", "現物支給", "支給過不足調整", "社保調整",
 ]
 # jinjer側テンプレート（GET /v1/master/jinji-import-templates で実測）
 DEFAULT_TEMPLATE_ID = "44450"   # 「経費APIインポート用」menu=payroll_calculation（11列・立替金裸列あり・2026-07-17検証済）
@@ -143,26 +151,29 @@ def parse_manual_allowances(text: "str | None") -> "tuple[dict[str, int], list[s
     return out, errors
 
 
-# 手当ファイルの列名候補（ヘッダーから自動判別する）
+# 一括取込ファイルの列名候補（ヘッダーから自動判別する）
 _ID_HEADERS = ("社員番号", "従業員番号", "社員no", "社員ｎｏ", "empno", "employee_id")
-_AMT_HEADERS = ("金額", "支給額", "調整額", "支給過不足調整", "現物支給", "amount")
+_AMT_HEADERS = ("金額", "支給額", "調整額", "amount")
+_TYPE_HEADERS = ("項目", "種類", "経費種類", "費目", "手当種類", "項目名")
+_ITEM_BY_NORM = {_norm_col(k): k for k in MANUAL_ITEM_KEYS}
 
 
-def load_allowance_file(path: "str | Path", label: str = "手当") -> "tuple[dict[str, int], list[str]]":
-    """「社員番号・金額」の2列を持つ CSV/xlsx を読み、{社員番号: 金額} にする。
+def merge_manual(dst: dict, item: str, add: dict) -> None:
+    """{項目: {社員番号: 金額}} に加算マージする（同一社員は合算）。"""
+    cur = dst.setdefault(item, {})
+    for emp, amt in add.items():
+        cur[emp] = cur.get(emp, 0) + amt
 
-    人数が多い項目（支給過不足調整は1〜30名規模）向け。ヘッダー行の列名から
-    社員番号列・金額列を自動判別し、見つからなければ先頭2列を使う。
-    金額は負数可（過払いの戻し等）。同一社員の複数行は加算。
-    """
+
+def _read_table(path: "str | Path", label: str) -> list[tuple]:
+    """CSV(cp932/utf-8) または xlsx を2次元のタプル列として読む（空行は除去）。"""
     path = Path(path)
     rows: list[tuple] = []
     if path.suffix.lower() in (".xlsx", ".xlsm", ".xltx"):
         from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
-            ws = wb.worksheets[0]
-            rows = [r for r in ws.iter_rows(values_only=True) if r is not None]
+            rows = [r for r in wb.worksheets[0].iter_rows(values_only=True) if r is not None]
         finally:
             wb.close()
     else:
@@ -175,74 +186,122 @@ def load_allowance_file(path: "str | Path", label: str = "手当") -> "tuple[dic
                 continue
         else:
             raise ValueError(f"{label}ファイルの文字コードを判別できませんでした: {path}")
+    return [r for r in rows if any(c is not None and str(c).strip() for c in r)]
 
-    rows = [r for r in rows if any(c is not None and str(c).strip() for c in r)]
+
+def load_irregular_file(path: "str | Path", label: str = "イレギュラー経費",
+                        ) -> "tuple[dict[str, dict[str, int]], list[str]]":
+    """イレギュラー経費を一括取込する。{項目: {社員番号: 金額}} を返す。
+
+    ヘッダーから2つの形式を自動判別する（どちらもExcelでそのまま作れる）:
+
+    ワイド形式（推奨・出力CSVと同じ並び）
+        社員番号, 定常外業務対応手当, その他手当, 現物支給, 支給過不足調整, 社保調整
+        2026013,  15000,             5000,       3000,     -5000,          2000
+
+    ロング形式（1行1明細）
+        社員番号, 項目,       金額
+        2026013,  現物支給,   3000
+
+    金額は負数可。同一社員・同一項目の複数行は加算。
+    """
+    rows = _read_table(path, label)
     if not rows:
         return {}, [f"{label}ファイルにデータがありません: {path}"]
 
-    # ヘッダーから列位置を判別（無ければ先頭2列）
-    head = [_norm_col(c).lower() for c in rows[0]]
-    id_col = next((i for i, h in enumerate(head) if h in _ID_HEADERS), None)
-    amt_col = next((i for i, h in enumerate(head) if h in _AMT_HEADERS), None)
-    if id_col is None or amt_col is None:
-        id_col, amt_col = 0, 1
-        body = rows if _parse_amount(rows[0][1] if len(rows[0]) > 1 else None) is not None else rows[1:]
-    else:
-        body = rows[1:]
+    head_raw = [_norm_col(c) for c in rows[0]]
+    head_low = [h.lower() for h in head_raw]
+    id_col = next((i for i, h in enumerate(head_low) if h in _ID_HEADERS), None)
+    item_cols = {i: _ITEM_BY_NORM[h] for i, h in enumerate(head_raw) if h in _ITEM_BY_NORM}
+    type_col = next((i for i, h in enumerate(head_raw) if h in _TYPE_HEADERS), None)
+    amt_col = next((i for i, h in enumerate(head_low) if h in _AMT_HEADERS), None)
+    if id_col is None:
+        id_col = 0
+    body = rows[1:]
 
-    text = "\n".join(
-        f"{r[id_col]}\t{r[amt_col]}"
-        for r in body
-        if len(r) > max(id_col, amt_col)
-    )
-    got, errors = parse_manual_allowances(text)
-    return got, [f"{label}ファイル {e}" for e in errors]
+    out: dict[str, dict[str, int]] = {}
+    errors: list[str] = []
+
+    if item_cols:
+        # ワイド形式: 項目名の列ごとに読む
+        for ci, item in sorted(item_cols.items()):
+            text = "\n".join(f"{r[id_col]}\t{r[ci]}" for r in body
+                             if len(r) > max(id_col, ci))
+            got, errs = parse_manual_allowances(text)
+            if got:
+                merge_manual(out, item, got)
+            errors += [f"{label}ファイル（{item}）{e}" for e in errs]
+    elif type_col is not None and amt_col is not None:
+        # ロング形式: 項目列でグルーピングしてから読む
+        groups: dict[str, list[str]] = {}
+        for n, r in enumerate(body, start=2):
+            if len(r) <= max(id_col, type_col, amt_col):
+                continue
+            item = _ITEM_BY_NORM.get(_norm_col(r[type_col]))
+            if item is None:
+                name = str(r[type_col] or "").strip()
+                if name:
+                    errors.append(
+                        f"{label}ファイル {n}行目: 項目「{name}」は選択できる項目ではありません"
+                        f"（{' / '.join(MANUAL_ITEM_KEYS)}）")
+                continue
+            groups.setdefault(item, []).append(f"{r[id_col]}\t{r[amt_col]}")
+        for item, lines in groups.items():
+            got, errs = parse_manual_allowances("\n".join(lines))
+            if got:
+                merge_manual(out, item, got)
+            errors += [f"{label}ファイル（{item}）{e}" for e in errs]
+    else:
+        errors.append(
+            f"{label}ファイルの見出しから項目を判別できませんでした: {path}\n"
+            f"　　ワイド形式（社員番号＋項目名の列）またはロング形式（社員番号・項目・金額）"
+            f"にしてください。項目名は {' / '.join(MANUAL_ITEM_KEYS)} のいずれかです。")
+    return out, errors
 
 
 def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" = None,
-                      teijo: "dict | None" = None, sonota: "dict | None" = None,
-                      genbutsu: "dict | None" = None, kabusoku: "dict | None" = None,
+                      manual: "dict | None" = None,
                       ) -> tuple[list[dict], list[str]]:
-    """集計（数字ID→7バケット）＋手入力手当からインポート行と警告リストを返す。
+    """集計（数字ID→7バケット）＋イレギュラー経費からインポート行と警告リストを返す。
 
     行は 20YY 始まりの社員のみ・社員番号昇順（5/6/9始まりは給与計算対象外）。
-    teijo/sonota は `parse_manual_allowances` の戻り（{社員番号: 金額}）。
-    **経費が無く手当だけの社員も行を出す**（マクロの「A列に無い社員は無言スキップ」で
-    起きた計上漏れ事故と同じ轍を踏まないため）。
+    manual は {項目名: {社員番号: 金額}}（項目名は MANUAL_ITEM_KEYS）。
+    **経費が無くイレギュラー経費だけの社員も行を出す**（マクロの「A列に無い社員は
+    無言スキップ」で起きた計上漏れ事故と同じ轍を踏まないため）。
     """
     from services.keihi_summary import in_company_scope
     roster_names = roster_names or {}
-    teijo = teijo or {}
-    sonota = sonota or {}
-    genbutsu = genbutsu or {}
-    kabusoku = kabusoku or {}
+    manual = manual or {}
+    manual_ids: set = set()
+    for _d in manual.values():
+        manual_ids |= set(_d or {})
+
     rows: list[dict] = []
     warnings: list[str] = []
-    for emp_id in sorted(set(by_id) | set(teijo) | set(sonota) | set(genbutsu) | set(kabusoku)):
+    for emp_id in sorted(set(by_id) | manual_ids):
         if not in_company_scope(emp_id):
             continue
         v = by_id.get(emp_id) or [0.0] * 7
         name = emp_names.get(emp_id) or roster_names.get(emp_id, "")
-        rows.append({
+        row = {
             "社員番号": emp_id,
             "氏名": name,
             "夜間当番手当": int(v[B_YAKAN] + v[B_RINK]),   # F列相当（夜間＋RINK）
-            "定常外業務対応手当": int(teijo.get(emp_id, 0)),
-            "支給過不足調整": int(kabusoku.get(emp_id, 0)),
             "非課税通勤費": int(v[B_TRANS]),
             "立替金（顧客請求分）": int(v[B_BILL]),
             "立替金": int(v[B_NONTAX]),
             "その他": int(v[B_ETC]),
-            "その他手当": int(sonota.get(emp_id, 0)),
-            "現物支給": int(genbutsu.get(emp_id, 0)),
             "テレワーク手当": int(v[B_TW]),
-        })
+        }
+        for key in MANUAL_ITEM_KEYS:
+            row[key] = int((manual.get(key) or {}).get(emp_id, 0))
+        rows.append(row)
 
     # 手入力の社員番号が在籍者一覧に無ければ入力ミスの可能性 → 警告（行は出す）
-    for emp_id in sorted(set(teijo) | set(sonota) | set(genbutsu) | set(kabusoku)):
+    for emp_id in sorted(manual_ids):
         if in_company_scope(emp_id) and roster_names and emp_id not in roster_names:
             warnings.append(
-                f"⚠️ 手入力手当: 社員番号 {emp_id} が在籍者一覧にありません（入力ミスの可能性）。")
+                f"⚠️ イレギュラー経費: 社員番号 {emp_id} が在籍者一覧にありません（入力ミスの可能性）。")
     return rows, warnings
 
 

@@ -516,26 +516,32 @@
                 <input type="text" id="ki-import-template-csv" placeholder="例: Z:\経費\jinjer_経費インポート用_9637.csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
-            <label>
-                定常外業務対応手当（任意・手入力）: 「社員番号,金額」を1行ずつ。<b>Excelの2列をそのままコピペできます</b>（タブ区切り可）。同じ社員が複数行あれば合算します
-                <textarea id="ki-teijo" rows="3" placeholder="例:&#10;2026012,15000&#10;2024050,8000"
-                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
-            </label>
-            <label>
-                その他手当（任意・手入力）: 同上。経費の「<b>その他</b>」とは<b>別項目</b>です
-                <textarea id="ki-sonota" rows="3" placeholder="例:&#10;2026013,5000"
-                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
-            </label>
-            <label>
-                現物支給（任意・手入力）: 同上
-                <textarea id="ki-genbutsu" rows="3" placeholder="例:&#10;2026012,3000"
-                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:monospace; font-size:12px"></textarea>
-            </label>
-            <label>
-                支給過不足調整（任意・<b>ファイル指定</b>）: 対象者が多くなるため CSV/xlsx で渡します。<b>「社員番号」「金額」の2列</b>（見出しがあれば自動判別、無ければ先頭2列）。<b>マイナス金額も可</b>（過払いの戻し等）
-                <input type="text" id="ki-kabusoku-file" placeholder="例: Z:\経費\支給過不足調整_202608.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-            </label>
+            <div style="margin-top:10px; padding:10px 12px; border:1px solid #d7dee8; border-radius:6px; background:#fafcff">
+                <div style="font-weight:600; margin-bottom:4px">イレギュラー経費（任意）</div>
+                <p class="hint" style="margin:0 0 8px">
+                    経費データから作れない「その月に手で決める」金額です。項目を選び、<b>「社員番号,金額」を1行ずつ</b>貼り付けて「追加」してください
+                    （<b>Excelの2列をそのままコピペできます</b>／タブ区切り可）。<b>マイナス金額も可</b>（過払いの戻し等）。
+                    同じ項目を何回でも追加でき、同じ社員は合算されます。
+                </p>
+                <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap">
+                    <select id="ki-irr-type" style="padding:6px 10px; min-width:190px">
+                        <option value="定常外業務対応手当">定常外業務対応手当</option>
+                        <option value="その他手当">その他手当</option>
+                        <option value="現物支給">現物支給</option>
+                        <option value="支給過不足調整">支給過不足調整</option>
+                        <option value="社保調整">社保調整（控除）</option>
+                    </select>
+                    <textarea id="ki-irr-text" rows="3" placeholder="例:&#10;2026012,15000&#10;2024050,8000"
+                              style="flex:1; min-width:240px; padding:6px 10px; font-family:monospace; font-size:12px"></textarea>
+                    <button type="button" class="btn btn-secondary" id="ki-irr-add" style="padding:6px 16px">＋ 追加</button>
+                </div>
+                <div id="ki-irr-list" style="margin-top:8px"></div>
+                <label style="display:block; margin-top:10px">
+                    まとめて入れる場合はファイル指定（任意・CSV/xlsx）: <b>社員番号＋項目名の列</b>（例: 社員番号, 現物支給, 社保調整）か、<b>社員番号・項目・金額の3列</b>のどちらでもOK。見出しから自動判別します
+                    <input type="text" id="ki-irregular-file" placeholder="例: Z:\経費\イレギュラー経費_202608.xlsx"
+                           style="width:100%; padding:6px 10px; margin-top:4px">
+                </label>
+            </div>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
                 <span id="ki-status" style="margin-left:12px; color:#666"></span>
@@ -880,6 +886,69 @@
         });
     }
 
+    // ----- イレギュラー経費（項目プルダウン＋貼り付けを1件ずつ追加）-----
+    const kiIrregularItems = [];
+    const kiIrrAddBtn = document.getElementById('ki-irr-add');
+    if (kiIrrAddBtn) {
+        const listEl = document.getElementById('ki-irr-list');
+
+        // 「社員番号,金額」の行数と合計を数える（サーバ側 parse_manual_allowances と同じ区切り規約）
+        const summarize = (text) => {
+            let n = 0, total = 0;
+            (text || '').split(/\r?\n/).forEach(line => {
+                const s = line.trim();
+                if (!s || s.startsWith('#')) return;
+                const parts = s.includes('\t') ? s.split('\t') : s.split(/[,、，]/);
+                if (parts.length < 2) return;
+                const id = parts[0].trim();
+                if (!/^\d+$/.test(id)) return;          // 見出し行などは数えない
+                const raw = parts.slice(1).join('').replace(/[¥￥円,\s　]/g, '');
+                const amt = Number(raw.replace(/^\((.*)\)$/, '-$1'));
+                if (!isFinite(amt) || amt === 0) return;
+                n += 1; total += amt;
+            });
+            return {n, total};
+        };
+
+        const render = () => {
+            listEl.innerHTML = '';
+            if (!kiIrregularItems.length) return;
+            kiIrregularItems.forEach((it, i) => {
+                const s = summarize(it.text);
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; gap:10px; padding:5px 10px; '
+                    + 'margin-top:4px; background:#eef4ff; border-radius:4px; font-size:12px';
+                const label = document.createElement('span');
+                label.innerHTML = `<b>${it.type}</b> … ${s.n}名 / 計 ${s.total.toLocaleString()}円`;
+                label.style.flex = '1';
+                const del = document.createElement('button');
+                del.type = 'button';
+                del.textContent = '削除';
+                del.className = 'btn btn-secondary';
+                del.style.cssText = 'padding:2px 10px; font-size:11px';
+                del.addEventListener('click', () => { kiIrregularItems.splice(i, 1); render(); });
+                row.appendChild(label); row.appendChild(del);
+                listEl.appendChild(row);
+            });
+        };
+
+        kiIrrAddBtn.addEventListener('click', () => {
+            const typeEl = document.getElementById('ki-irr-type');
+            const textEl = document.getElementById('ki-irr-text');
+            const text = textEl.value.trim();
+            if (!text) { alert('「社員番号,金額」を貼り付けてから「追加」してください。'); return; }
+            const s = summarize(text);
+            if (!s.n) {
+                alert('「社員番号,金額」の形式で読み取れる行がありませんでした。\n'
+                    + '例) 2026012,15000   ※Excelの2列コピペ（タブ区切り）も使えます');
+                return;
+            }
+            kiIrregularItems.push({type: typeEl.value, text});
+            textEl.value = '';          // 続けて別項目を足せるように空にする
+            render();
+        });
+    }
+
     // ----- 経費統合一覧表の生成（4ソース取込・マクロ移植 P1a）-----
     const kiRunBtn = document.getElementById('ki-run-btn');
     if (kiRunBtn) {
@@ -901,10 +970,8 @@
             fd.append('classify', document.getElementById('ki-classify').checked ? '1' : '0');
             fd.append('keywords_file', document.getElementById('ki-keywords').value);
             fd.append('import_template_csv', document.getElementById('ki-import-template-csv').value);
-            fd.append('teijo_allowances', document.getElementById('ki-teijo').value);
-            fd.append('sonota_allowances', document.getElementById('ki-sonota').value);
-            fd.append('genbutsu_allowances', document.getElementById('ki-genbutsu').value);
-            fd.append('kabusoku_file', document.getElementById('ki-kabusoku-file').value);
+            fd.append('irregular_items', JSON.stringify(kiIrregularItems));
+            fd.append('irregular_file', document.getElementById('ki-irregular-file').value);
 
             try {
                 const res = await fetch('/expense_integration', {method:'POST', body: fd});

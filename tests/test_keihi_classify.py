@@ -400,8 +400,11 @@ def test_build_import_rows_with_manual_allowances():
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]},
         {"2026013": "川口 祐ノ輔"},
         roster_names={"2026013": "川口 祐ノ輔", "2024050": "加藤 英人"},
-        teijo={"2026013": 15000, "2024050": 8000},   # 2024050 は経費ゼロ＝手当だけ
-        sonota={"2026013": 5000},
+        manual={
+            # 2024050 は経費ゼロ＝イレギュラー経費だけ
+            "定常外業務対応手当": {"2026013": 15000, "2024050": 8000},
+            "その他手当": {"2026013": 5000},
+        },
     )
     by_id = {r["社員番号"]: r for r in rows}
     assert set(by_id) == {"2026013", "2024050"}      # 手当だけの社員も行が出る
@@ -418,59 +421,88 @@ def test_build_import_rows_with_manual_allowances():
 def test_build_import_rows_manual_allowance_unknown_id_warns():
     """在籍者一覧に無い社員番号は入力ミスの可能性として警告（行は出す）。"""
     rows, warns = build_import_rows(
-        {}, {}, roster_names={"2026013": "川口 祐ノ輔"}, teijo={"2029999": 1000})
+        {}, {}, roster_names={"2026013": "川口 祐ノ輔"},
+        manual={"定常外業務対応手当": {"2029999": 1000}})
     assert [r["社員番号"] for r in rows] == ["2029999"]
     assert any("2029999" in w and "在籍者一覧にありません" in w for w in warns)
 
 
-def test_load_allowance_file_csv_with_header(tmp_path):
-    """支給過不足調整はファイル取込（見出しから列を自動判別・マイナス可）。"""
-    from services.keihi_payroll_import import load_allowance_file
-    p = tmp_path / "kabusoku.csv"
+def test_load_irregular_file_wide(tmp_path):
+    """ワイド形式（社員番号＋項目名の列）を自動判別する。マイナス・桁区切り可。"""
+    from services.keihi_payroll_import import load_irregular_file
+    p = tmp_path / "irr.csv"
     p.write_bytes(
-        "社員番号,氏名,金額\r\n"
-        "2026012,橘 伸俊,-5000\r\n"       # 過払いの戻し＝マイナス
-        "2024050,加藤 英人,\"12,000\"\r\n"  # 桁区切り
-        "2026013,川口 祐ノ輔,0\r\n"        # 0 は無視
+        "社員番号,氏名,現物支給,支給過不足調整,社保調整\r\n"
+        "2026012,橘 伸俊,3000,-5000,0\r\n"          # マイナス・0は無視
+        "2024050,加藤 英人,0,\"12,000\",2000\r\n"     # 桁区切り
         .encode("cp932"))
-    got, errs = load_allowance_file(p, label="支給過不足調整")
-    assert got == {"2026012": -5000, "2024050": 12000}
+    got, errs = load_irregular_file(p)
     assert errs == []
+    assert got == {
+        "現物支給": {"2026012": 3000},
+        "支給過不足調整": {"2026012": -5000, "2024050": 12000},
+        "社保調整": {"2024050": 2000},
+    }
 
 
-def test_load_allowance_file_no_header_two_columns(tmp_path):
-    """見出しが無ければ先頭2列を social番号/金額として読む。"""
-    from services.keihi_payroll_import import load_allowance_file
-    p = tmp_path / "k.csv"
-    p.write_bytes("2026012,3000\r\n2026013,4000\r\n".encode("cp932"))
-    got, errs = load_allowance_file(p)
-    assert got == {"2026012": 3000, "2026013": 4000}
+def test_load_irregular_file_long(tmp_path):
+    """ロング形式（社員番号・項目・金額）も読める。同一社員同一項目は加算。"""
+    from services.keihi_payroll_import import load_irregular_file
+    p = tmp_path / "irr.csv"
+    p.write_bytes(
+        "社員番号,項目,金額\r\n"
+        "2026013,現物支給,3000\r\n"
+        "2026013,社保調整,1500\r\n"
+        "2026013,社保調整,500\r\n"       # 加算 → 2000
+        .encode("cp932"))
+    got, errs = load_irregular_file(p)
     assert errs == []
+    assert got == {"現物支給": {"2026013": 3000}, "社保調整": {"2026013": 2000}}
 
 
-def test_load_allowance_file_xlsx(tmp_path):
+def test_load_irregular_file_long_unknown_item_errors(tmp_path):
+    """選択できない項目名はエラーとして返す（黙って捨てない）。"""
+    from services.keihi_payroll_import import load_irregular_file
+    p = tmp_path / "irr.csv"
+    p.write_bytes("社員番号,項目,金額\r\n2026013,通信手当,500\r\n".encode("cp932"))
+    got, errs = load_irregular_file(p)
+    assert got == {}
+    assert any("通信手当" in e for e in errs)
+
+
+def test_load_irregular_file_xlsx_wide(tmp_path):
     from openpyxl import Workbook
-    from services.keihi_payroll_import import load_allowance_file
+    from services.keihi_payroll_import import load_irregular_file
     wb = Workbook()
     ws = wb.active
-    ws.append(["社員番号", "調整額"])
-    ws.append([2026012, -1500])     # 数値セル
+    ws.append(["社員番号", "社保調整"])
+    ws.append([2026012, -1500])     # 数値セル・マイナス
     ws.append(["2024050", 2000])
-    p = tmp_path / "k.xlsx"
+    p = tmp_path / "irr.xlsx"
     wb.save(p)
-    got, errs = load_allowance_file(p)
-    assert got == {"2026012": -1500, "2024050": 2000}
+    got, errs = load_irregular_file(p)
     assert errs == []
+    assert got == {"社保調整": {"2026012": -1500, "2024050": 2000}}
+
+
+def test_load_irregular_file_undetectable_header(tmp_path):
+    """項目が判別できない見出しは、黙って捨てずにエラーで知らせる。"""
+    from services.keihi_payroll_import import load_irregular_file
+    p = tmp_path / "irr.csv"
+    p.write_bytes("社員番号,金額\r\n2026013,3000\r\n".encode("cp932"))
+    got, errs = load_irregular_file(p)
+    assert got == {}
+    assert any("判別できませんでした" in e for e in errs)
 
 
 def test_build_import_rows_genbutsu_and_kabusoku():
-    """現物支給（手入力）と支給過不足調整（ファイル）が行に乗る。"""
+    """現物支給・支給過不足調整が行に乗る（調整だけの社員も行が出る）。"""
     rows, warns = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]},
         {"2026013": "川口 祐ノ輔"},
         roster_names={"2026013": "川口 祐ノ輔", "2026012": "橘 伸俊"},
-        genbutsu={"2026013": 3000},
-        kabusoku={"2026013": -5000, "2026012": 8000},
+        manual={"現物支給": {"2026013": 3000},
+                "支給過不足調整": {"2026013": -5000, "2026012": 8000}},
     )
     by_id = {r["社員番号"]: r for r in rows}
     assert by_id["2026013"]["現物支給"] == 3000
@@ -480,14 +512,28 @@ def test_build_import_rows_genbutsu_and_kabusoku():
     assert warns == []
 
 
-def test_render_csv_all_manual_items_on_template_44450():
-    """4つの手決め項目が テンプレ44450 の正しい列位置に載る。"""
+def test_shaho_chosei_missing_column_warns():
+    """社保調整はテンプレ44450(11列)に列が無い → 計上漏れ警告が出る（追加してもらう）。"""
+    from services.keihi_payroll_import import check_template_coverage
     tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
            "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給"]
+    rows, _ = build_import_rows({}, {}, manual={"社保調整": {"2026013": 2000}})
+    cov = check_template_coverage(rows, tpl)
+    assert any("社保調整" in w and "2,000" in w for w in cov)
+
+
+def test_render_csv_all_manual_items_on_template_44450():
+    """手決め項目が テンプレ44450 の正しい列位置に載る（社保調整列を足した想定）。"""
+    tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
+           "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給",
+           "社保調整"]
     rows, _ = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"},
-        teijo={"2026013": 15000}, sonota={"2026013": 5000},
-        genbutsu={"2026013": 3000}, kabusoku={"2026013": -5000})
+        manual={"定常外業務対応手当": {"2026013": 15000},
+                "その他手当": {"2026013": 5000},
+                "現物支給": {"2026013": 3000},
+                "支給過不足調整": {"2026013": -5000},
+                "社保調整": {"2026013": 2000}})
     line = render_import_csv(rows, tpl).decode("cp932").strip().split("\r\n")[1].split(",")
     assert line[2] == "30000"    # 位置3 夜間当番手当
     assert line[3] == "15000"    # 位置4 定常外業務対応手当
@@ -495,6 +541,7 @@ def test_render_csv_all_manual_items_on_template_44450():
     assert line[7] == "12177"    # 位置8 立替金
     assert line[9] == "5000"     # 位置10 その他手当
     assert line[10] == "3000"    # 位置11 現物支給
+    assert line[11] == "2000"    # 位置12 社保調整（控除）
 
 
 def test_match_column_normalizes():

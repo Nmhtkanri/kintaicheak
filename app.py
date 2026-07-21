@@ -1413,31 +1413,44 @@ def route_expense_integration():
     keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
     import_template_str = _clean_path_input(request.form.get("import_template_csv"))
 
-    # 経費から導けない手決めの金額。少人数の項目は手入力欄、
-    # 対象者が1〜30名規模になり得る支給過不足調整はファイル取込で受ける。
-    from services.keihi_payroll_import import parse_manual_allowances, load_allowance_file
-    teijo_allowances, teijo_errs = parse_manual_allowances(request.form.get("teijo_allowances"))
-    sonota_allowances, sonota_errs = parse_manual_allowances(request.form.get("sonota_allowances"))
-    genbutsu_allowances, genbutsu_errs = parse_manual_allowances(request.form.get("genbutsu_allowances"))
+    # イレギュラー経費（経費4ソースから導けない手決めの金額）。
+    # 画面の「項目プルダウン＋貼り付け」を1件ずつ追加したものと、ファイル一括取込を合算する。
+    from services.keihi_payroll_import import (
+        parse_manual_allowances, load_irregular_file, merge_manual, MANUAL_ITEM_KEYS)
 
     errors = []
-    errors += [f"定常外業務対応手当の入力 {e}" for e in teijo_errs]
-    errors += [f"その他手当の入力 {e}" for e in sonota_errs]
-    errors += [f"現物支給の入力 {e}" for e in genbutsu_errs]
+    manual_items: dict = {}
 
-    kabusoku_allowances: dict = {}
-    kabusoku_str = _clean_path_input(request.form.get("kabusoku_file"))
-    if kabusoku_str:
-        kabusoku_path = _Path(kabusoku_str)
-        if not kabusoku_path.exists():
-            errors.append(f"支給過不足調整ファイルが見つかりません: {kabusoku_path}")
+    raw_items = (request.form.get("irregular_items") or "").strip()
+    if raw_items:
+        try:
+            entries = json.loads(raw_items)
+        except ValueError:
+            entries = []
+            errors.append("イレギュラー経費の入力を読み取れませんでした（画面を再読み込みしてください）。")
+        for ent in entries if isinstance(entries, list) else []:
+            item = str((ent or {}).get("type") or "").strip()
+            if item not in MANUAL_ITEM_KEYS:
+                errors.append(f"イレギュラー経費: 項目「{item}」は選択できる項目ではありません。")
+                continue
+            got, errs = parse_manual_allowances((ent or {}).get("text"))
+            errors += [f"イレギュラー経費（{item}）の入力 {e}" for e in errs]
+            if got:
+                merge_manual(manual_items, item, got)
+
+    irregular_str = _clean_path_input(request.form.get("irregular_file"))
+    if irregular_str:
+        irregular_path = _Path(irregular_str)
+        if not irregular_path.exists():
+            errors.append(f"イレギュラー経費の一括取込ファイルが見つかりません: {irregular_path}")
         else:
             try:
-                kabusoku_allowances, kabusoku_errs = load_allowance_file(
-                    kabusoku_path, label="支給過不足調整")
-                errors += kabusoku_errs
+                file_items, file_errs = load_irregular_file(irregular_path)
+                errors += file_errs
+                for item, d in file_items.items():
+                    merge_manual(manual_items, item, d)
             except Exception as e:  # noqa: BLE001
-                errors.append(f"支給過不足調整ファイルを読めませんでした: {e}")
+                errors.append(f"イレギュラー経費の一括取込ファイルを読めませんでした: {e}")
     paths: dict = {}
     for key, val in sources.items():
         if not val:
@@ -1475,8 +1488,7 @@ def route_expense_integration():
             sap_csv=paths["sap_csv"], freee_csv=paths["freee_csv"],
             route_check=route_check, classify=classify, keywords_file=keywords_file,
             import_template_csv=import_template_csv,
-            teijo_allowances=teijo_allowances, sonota_allowances=sonota_allowances,
-            genbutsu_allowances=genbutsu_allowances, kabusoku_allowances=kabusoku_allowances,
+            manual_items=manual_items,
             log_func=_log,
         )
     except Exception as e:
