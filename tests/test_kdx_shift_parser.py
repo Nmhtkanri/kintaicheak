@@ -144,6 +144,14 @@ class TestParseKdxWords:
                 _synth_words(), _synth_text(),
                 filename="test.pdf", target_year=2026, target_month=8)
 
+    def test_target_none_uses_title_year_month(self):
+        """対象年月未入力（None）→ PDFタイトルの年月を採用して解析できる"""
+        result = parse_kdx_words(
+            _synth_words(), _synth_text(),
+            filename="test.pdf", target_year=None, target_month=None)
+        assert result["year"] == 2026 and result["month"] == 7
+        assert len(result["employees"]) == 3
+
     def test_weekday_mismatch(self):
         """タイトルは合っているが曜日が別月のもの → 誤読み防止で中止"""
         words = _synth_words()
@@ -194,3 +202,18 @@ class TestRealPdf:
     def test_year_mismatch_rejected(self):
         with pytest.raises(ValueError):
             parse_kdx_shift_pdf(REAL_PDF, 2026, 6)
+
+    def test_parse_without_target_uses_title(self):
+        """対象年月未入力でもタイトルの2026年7月で解析できる"""
+        result = parse_kdx_shift_pdf(REAL_PDF)
+        assert result["year"] == 2026 and result["month"] == 7
+        assert len(result["employees"]) == 11
+
+    def test_structured_files_mismatch_returns_warning(self):
+        """年月不一致はAIへ黙って落とさず warning で見せる"""
+        from services.multi_year_shift_parser import parse_structured_files
+        result = parse_structured_files([REAL_PDF], 2026, 6)
+        assert result is not None
+        sheets, consumed, warnings = result
+        assert sheets == [] and consumed == []
+        assert any("フォールバック" in w for w in warnings)

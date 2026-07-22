@@ -214,22 +214,26 @@ def parse_kdx_words(
     page_text: str,
     *,
     filename: str,
-    target_year: int,
-    target_month: int,
+    target_year: "int | None",
+    target_month: "int | None",
 ) -> dict:
     """word リスト（pdfplumber extract_words 互換）→ code_sheet 形式へ解析する純関数。
+
+    target_year/month が None（画面の対象年月が未入力）の場合は、
+    PDFタイトルの年月をそのまま採用する（曜日整合チェックは常に行う）。
 
     Raises:
         ValueError: タイトル年月が対象と不一致 / 日付ヘッダーが見つからない 等
     """
     rows = _group_words_into_rows(words)
 
-    # --- タイトルから年月（対象年月と不一致なら誤投入防止のため中止）---
+    # --- タイトルから年月（対象年月の指定があり不一致なら誤投入防止のため中止）---
     m = _TITLE_RE.search(page_text or "")
     if not m:
         raise ValueError(f"{filename}: タイトルの年月（YYYY年M月度勤務スケジュール表）が見つかりません")
     year, month = int(m.group(1)), int(m.group(2))
-    if year != target_year or month != target_month:
+    if target_year is not None and target_month is not None and (
+            year != target_year or month != target_month):
         raise ValueError(
             f"{filename}: シフト表の年月 {year}年{month}月 が対象 {target_year}年{target_month}月 と一致しません")
 
@@ -361,8 +365,15 @@ def is_kdx_shift_pdf(filepath: str) -> bool:
     return all(k in text for k in _SNIFF_KEYWORDS) and bool(_TITLE_RE.search(text))
 
 
-def parse_kdx_shift_pdf(filepath: str, target_year: int, target_month: int) -> dict:
-    """KDX勤務シフト表 PDF → code_sheet 形式（parse_structured_files と同形）。"""
+def parse_kdx_shift_pdf(
+    filepath: str,
+    target_year: "int | None" = None,
+    target_month: "int | None" = None,
+) -> dict:
+    """KDX勤務シフト表 PDF → code_sheet 形式（parse_structured_files と同形）。
+
+    target_year/month 未指定（None）の場合はPDFタイトルの年月を採用する。
+    """
     import os
     import pdfplumber
 

@@ -79,9 +79,26 @@ def test_parse_structured_files_consumes_monthly_shift_xlsx(tmp_path):
     result = parse_structured_files([str(path)], 2026, 5)
 
     assert result is not None
-    sheets, consumed = result
+    sheets, consumed, warnings = result
     assert consumed == [str(path)]
+    assert warnings == []
     assert sheets[0]["year"] == 2026
     assert sheets[0]["month"] == 6
     assert len(sheets[0]["employees"]) == 2
     assert any(entry["code"] == "休" and entry["is_off"] for entry in sheets[0]["legend"])
+
+
+def test_parse_structured_files_xlsx_needs_target_month(tmp_path):
+    """対象年月未入力: xlsx はスキップして warning（黙ってAIに落とさない）"""
+    path = tmp_path / "monthly.xlsx"
+    _make_monthly_shift_book(path)
+
+    result = parse_structured_files([str(path)], None, None)
+
+    assert result is not None
+    sheets, consumed, warnings = result
+    assert sheets == []
+    assert consumed == []
+    assert len(warnings) == 1
+    assert "対象年月が未入力" in warnings[0]
+    assert "monthly.xlsx" in warnings[0]

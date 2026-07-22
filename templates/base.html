@@ -11,6 +11,12 @@
         <div class="header-inner">
             <h1 class="header-title">勤怠突合チェッカー</h1>
             <span class="header-sub">請求勤怠 × jinjer CSV 自動突合システム</span>
+            {% if build_stamp %}
+            <span class="header-sub" style="margin-left:auto; opacity:.65; font-size:11px"
+                  title="実行中のアプリの版。共有側の更新後は 起動.bat の再起動で新しくなります">
+                {{ build_stamp }}
+            </span>
+            {% endif %}
         </div>
     </header>
     <main class="main-content">

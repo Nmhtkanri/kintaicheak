@@ -788,27 +788,31 @@ def is_monthly_shift_xlsx(filepath: str) -> bool:
 
 def parse_structured_files(
     filepaths: Iterable[str],
-    target_year: int,
-    target_month: int,
-) -> tuple[list[dict], list[str]] | None:
-    """複数のアップロードパスを sniff し、構造化解析できる xlsx だけを処理する
+    target_year: "int | None",
+    target_month: "int | None",
+) -> tuple[list[dict], list[str], list[str]] | None:
+    """複数のアップロードパスを sniff し、構造化解析できるファイルだけを処理する
 
-    多年度シフト表 .xlsx が 1 つも見つからなければ何もせず None を返す。
-    見つかった場合は、そのシフト表 + マッチするシフトルール .xlsx をまとめて
-    構造化パースし、consumed パス（後続の Claude フォールバックから除外
-    すべきパス）と合わせて返す。
+    対象: 多年度シフト表 .xlsx / 月次シフト表 .xlsx / KDX勤務シフト表 .pdf。
+    1 つも見つからなければ何もせず None を返す。見つかった場合は構造化パースし、
+    consumed パス（後続の Claude フォールバックから除外すべきパス）と、
+    ユーザーに見せるべき warning（構造化解析に失敗して AI 読み取りへ
+    フォールバックするファイル等）を合わせて返す。
 
     Args:
         filepaths: アップロードされた timesheet 系ファイルのパス
-        target_year, target_month: 抽出対象
+        target_year, target_month: 抽出対象。None（画面で未入力）の場合、
+            年月をファイル自身から特定できる KDX PDF だけを処理し、
+            対象月の指定が必要な xlsx 系はスキップして warning を返す
 
     Returns:
-        (sheets, consumed_paths) — sheets は code_sheets と同形式
-        該当する多年度シフト表が無い場合は None
+        (sheets, consumed_paths, warnings) — sheets は code_sheets と同形式
+        構造化解析の対象ファイルが無い場合は None
     """
     paths = list(filepaths)
     if not paths:
         return None
+    warnings: list[str] = []
 
     legend_paths: list[str] = []
     shift_paths: list[str] = []
@@ -862,6 +866,9 @@ def parse_structured_files(
             result = parse_kdx_shift_pdf(kp, target_year, target_month)
         except Exception as e:
             logger.warning("KDXシフト表 %s の構造化解析に失敗: %s", kp, e)
+            warnings.append(
+                f"KDXシフト表の構造化解析に失敗したため AI 読み取りへフォールバックします: "
+                f"{os.path.basename(kp)} — {e}")
             continue
         sheets.append({
             "mode": "code",
@@ -874,6 +881,16 @@ def parse_structured_files(
             "section_info": result.get("section_info"),
         })
         consumed.append(kp)
+
+    # xlsx 系の構造化パースは対象年月の指定が必須（多年度表から対象月を切り出すため）
+    if (monthly_shift_paths or shift_paths) and not (target_year and target_month):
+        skipped = [os.path.basename(p) for p in monthly_shift_paths + shift_paths]
+        warnings.append(
+            "対象年月が未入力のため、シフト表 xlsx の構造化解析をスキップして "
+            f"AI 読み取りへフォールバックします: {', '.join(skipped)}"
+            "（画面の「対象年月」を入れると確定的に解析できます）")
+        monthly_shift_paths = []
+        shift_paths = []
 
     for mp in monthly_shift_paths:
         try:
@@ -911,9 +928,10 @@ def parse_structured_files(
         })
         consumed.append(sp)
 
-    if not sheets:
+    if not sheets and not warnings:
         return None
 
     # 構造化解析が成功したシフト表があれば、シフトルール .xlsx も消費扱いにする
-    consumed.extend(legend_paths)
-    return sheets, consumed
+    if sheets:
+        consumed.extend(legend_paths)
+    return sheets, consumed, warnings

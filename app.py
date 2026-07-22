@@ -159,6 +159,23 @@ def _apply_single_supplemental_legend(code_sheets: list[dict]) -> list[dict]:
 # ルート
 # =============================================================================
 
+def _build_stamp() -> str:
+    """ヘッダーに出す実行アプリの版表示。
+
+    exe 版は exe のビルド日時（共有側を更新したのに古い exe で動かしている
+    ことに画面だけで気づけるようにする）。Python 直起動は「開発版」。
+    """
+    import sys
+    from datetime import datetime as _dt
+    try:
+        if getattr(sys, "frozen", False):
+            ts = os.path.getmtime(sys.executable)
+            return f"exe {_dt.fromtimestamp(ts):%Y-%m-%d %H:%M}"
+        return "開発版 (python)"
+    except Exception:
+        return ""
+
+
 @app.route("/")
 def index():
     api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -166,6 +183,7 @@ def index():
         "index.html",
         api_key_set=api_key_set,
         keihi_sap_past_default=Config.KEIHI_SAP_PAST_DIR,
+        build_stamp=_build_stamp(),
     )
 
 
@@ -253,11 +271,12 @@ def upload():
             code_sheets: list[dict] = []  # 凡例レビュー対象
             total = len(saved_timesheet_paths)
 
-            # ----- 構造化パース（多年度横並び xlsx + シフトルール xlsx 専用 fast path）-----
-            # target_year/month が指定されており、アップロードされた xlsx の中に
-            # 多年度シフト表があれば、Claude を経由せず確定的に解析する。
+            # ----- 構造化パース（多年度/月次 xlsx + KDX PDF 専用 fast path）-----
+            # 構造化解析できるファイルは Claude を経由せず確定的に解析する。
+            # KDX PDF は対象年月未入力でもタイトルの年月で解析できる。
+            # xlsx 系は対象年月が必要（未入力ならスキップ warning が返る）。
             # 該当しないファイルや該当しないレイアウトはそのまま Claude フォールバックへ。
-            if target_year and target_month and saved_timesheet_paths:
+            if saved_timesheet_paths:
                 try:
                     yield _sse_event("progress", {"message": "シフト表を構造化解析中..."})
                     structured_result = parse_structured_files(
@@ -269,8 +288,10 @@ def upload():
                     structured_result = None
 
                 if structured_result:
-                    structured_sheets, consumed_paths = structured_result
+                    structured_sheets, consumed_paths, struct_warnings = structured_result
                     consumed_set = set(consumed_paths)
+                    for w in struct_warnings:
+                        yield _sse_event("progress", {"message": f"⚠️ {w}"})
                     for sheet in structured_sheets:
                         code_sheets.append({
                             "filename": sheet["filename"],
