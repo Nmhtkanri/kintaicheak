@@ -30,8 +30,10 @@ from services.jinjer_api_client import (
     JinjerAPIError,
 )
 from services.jinjer_schedule_csv_exporter import (
+    annotate_unresolved_name,
     export_jinjer_schedule_csv,
     export_jinjer_schedule_csv_split,
+    resolve_employee_id,
 )
 from services.multi_year_shift_parser import parse_structured_files
 
@@ -588,7 +590,7 @@ def export_jinjer_csv():
         try:
             yield _sse_event("progress", {"message": "jinjer API から従業員一覧を取得中..."})
             try:
-                name_to_id, id_to_official_name = fetch_employee_id_map()
+                name_to_id, id_to_official_name, ambiguous_names = fetch_employee_id_map()
             except JinjerAPIError as e:
                 logger.warning("jinjer API 失敗: %s", e)
                 yield _sse_event("progress", {
@@ -596,6 +598,7 @@ def export_jinjer_csv():
                 })
                 name_to_id = {}
                 id_to_official_name = {}
+                ambiguous_names = {}
 
             yield _sse_event("progress", {"message": f"取得完了: {len(name_to_id)}件の氏名→IDマップ"})
 
@@ -627,7 +630,8 @@ def export_jinjer_csv():
                     "message": f"CSV生成中: {filename} ({year_i}年{month_i}月)"
                 })
 
-                # この勤務表に登場する従業員の ID を集める（同姓ヒット回避: 厳密マッチ→ストリップ）
+                # この勤務表に登場する従業員の ID を集める
+                # （厳密マッチ→空白/括弧除去→前方一致(一意時のみ)。exporter と同じ解決規則）
                 emp_ids_for_sheet: list[str] = []
                 emp_id_seen: set[str] = set()
                 for emp in employees:
@@ -636,14 +640,7 @@ def export_jinjer_csv():
                     name = (emp.get("name") or "").strip()
                     if not name:
                         continue
-                    eid = name_to_id.get(name) or ""
-                    if not eid:
-                        import re as _re
-                        stripped = _re.sub(r"\s+", "", name)
-                        for k, v in name_to_id.items():
-                            if _re.sub(r"\s+", "", k) == stripped:
-                                eid = v
-                                break
+                    eid = resolve_employee_id(name, name_to_id)
                     if eid and eid not in emp_id_seen:
                         emp_id_seen.add(eid)
                         emp_ids_for_sheet.append(eid)
@@ -762,8 +759,9 @@ def export_jinjer_csv():
                         new_template_filename = os.path.basename(gen["path"])
                         new_template_count += gen["count"]
 
-            # 重複除去
-            unique_missing = sorted(set(all_missing_ids))
+            # 重複除去 ＋ 同姓複数などの「なぜ引けないか」の注記を付ける
+            unique_missing = [annotate_unresolved_name(n, ambiguous_names)
+                              for n in sorted(set(all_missing_ids))]
 
             yield _sse_event("csv_export_done", {
                 "csv_files": output_files,

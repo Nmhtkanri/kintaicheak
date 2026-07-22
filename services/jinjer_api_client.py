@@ -711,19 +711,9 @@ def _safe_get(d: dict, *keys, default=""):
     return cur or default
 
 
-def build_name_to_id_map(employees: list[dict]) -> dict[str, str]:
-    """jinjer 従業員一覧 → 氏名 → ID の辞書
-
-    氏名のバリエーション（"姓名" / "姓 名" / "姓　名"）を全て同じ ID に
-    マップしておくことで、勤務表側の表記揺れに対応する。
-
-    Args:
-        employees: JinjerClient.get_employees() の戻り値
-
-    Returns:
-        {氏名(str): 従業員ID(str)}
-    """
-    name_map: dict[str, str] = {}
+def _name_key_candidates(employees: list[dict]) -> dict[str, list[tuple[str, str]]]:
+    """氏名キー → [(従業員ID, フルネーム), ...] を集める（build_name_to_id_map の内部）。"""
+    key_hits: dict[str, list[tuple[str, str]]] = {}
     for emp in employees:
         if not isinstance(emp, dict):
             continue
@@ -736,6 +726,7 @@ def build_name_to_id_map(employees: list[dict]) -> dict[str, str]:
 
         last = str(_safe_get(emp, "company", "last_name") or "").strip()
         first = str(_safe_get(emp, "company", "first_name") or "").strip()
+        full = f"{last} {first}".strip()
 
         candidates = []
         if last and first:
@@ -750,10 +741,46 @@ def build_name_to_id_map(employees: list[dict]) -> dict[str, str]:
             candidates.append(first)
 
         for name in candidates:
-            if name and name not in name_map:
-                name_map[name] = emp_id_str
+            if not name:
+                continue
+            hits = key_hits.setdefault(name, [])
+            if all(eid != emp_id_str for eid, _ in hits):
+                hits.append((emp_id_str, full))
+    return key_hits
 
-    return name_map
+
+def build_name_to_id_map(employees: list[dict]) -> dict[str, str]:
+    """jinjer 従業員一覧 → 氏名 → ID の辞書
+
+    氏名のバリエーション（"姓名" / "姓 名" / "姓　名" / 姓のみ / 名のみ）を
+    同じ ID にマップしておくことで、勤務表側の表記揺れに対応する。
+
+    **同じ氏名キーが複数の従業員に該当する場合（同姓の「吉田」等）は登録しない**。
+    以前は先勝ちで最初の1人の ID を返しており、勤務表の「吉田」が別人の吉田の
+    ID に静かに化ける事故リスクがあった（2026-07-22 KDXシフト表で実例）。
+    曖昧キーは build_ambiguous_names() で候補ごと取得し、警告表示に使う。
+
+    Args:
+        employees: JinjerClient.get_employees() の戻り値
+
+    Returns:
+        {氏名(str): 従業員ID(str)}
+    """
+    return {name: hits[0][0]
+            for name, hits in _name_key_candidates(employees).items()
+            if len(hits) == 1}
+
+
+def build_ambiguous_names(employees: list[dict]) -> dict[str, list[tuple[str, str]]]:
+    """複数の従業員に該当してしまう氏名キー → [(従業員ID, フルネーム), ...]。
+
+    同姓（例: 吉田英伸 / 吉田拓矢 の「吉田」）など、自動では確定できない
+    キーの候補一覧。勤務表側でこの名前が出た場合、警告に候補を並べて
+    人間に選ばせるために使う。
+    """
+    return {name: hits
+            for name, hits in _name_key_candidates(employees).items()
+            if len(hits) > 1}
 
 
 def build_id_to_official_name(employees: list[dict]) -> dict[str, str]:
@@ -780,15 +807,17 @@ def build_id_to_official_name(employees: list[dict]) -> dict[str, str]:
     return id_to_name
 
 
-def fetch_employee_id_map() -> tuple[dict[str, str], dict[str, str]]:
-    """API を叩いて (氏名→ID マップ, 従業員ID→姓 マップ) を返す
+def fetch_employee_id_map() -> tuple[dict[str, str], dict[str, str], dict[str, list[tuple[str, str]]]]:
+    """API を叩いて (氏名→ID マップ, 従業員ID→姓 マップ, 曖昧氏名→候補) を返す
 
     Raises:
         JinjerAPIError: 認証失敗 / 取得失敗
     """
     client = JinjerClient()
     employees = client.get_employees(only_active=True)
-    return build_name_to_id_map(employees), build_id_to_official_name(employees)
+    return (build_name_to_id_map(employees),
+            build_id_to_official_name(employees),
+            build_ambiguous_names(employees))
 
 
 # ----------------------------------------------------------------------

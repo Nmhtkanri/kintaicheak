@@ -20,12 +20,15 @@ from services.jinjer_schedule_csv_exporter import (
     _resolve_merged_cell_value,
     _resolve_cell_value,
     _sanitize_filename_part,
+    annotate_unresolved_name,
     build_legend_to_template_name,
     export_jinjer_schedule_csv,
     export_jinjer_schedule_csv_split,
+    resolve_employee_id,
 )
 from services.shift_resolver import normalize_legend
 from services.jinjer_api_client import (
+    build_ambiguous_names,
     build_name_to_id_map,
     pick_attendance_group_at,
 )
@@ -153,6 +156,72 @@ def test_build_name_to_id_map_skips_missing_id():
     ]
     name_map = build_name_to_id_map(employees)
     assert name_map == {}
+
+
+# 2026-07-22 KDXシフト表の実例: 吉田英伸/吉田拓矢・市川正人・亘（わたり）
+_KDX_EMPLOYEES = [
+    {"id": 2017016, "company": {"last_name": "吉田", "first_name": "英伸"}},
+    {"id": 2025007, "company": {"last_name": "吉田", "first_name": "拓矢"}},
+    {"id": 2010005, "company": {"last_name": "市川", "first_name": "正人"}},
+    {"id": 2023030, "company": {"last_name": "亘", "first_name": "瑛斗"}},
+    {"id": 2009006, "company": {"last_name": "尾川", "first_name": "大地"}},
+]
+
+
+def test_build_name_to_id_map_ambiguous_surname_not_registered():
+    """同姓（吉田×2）の姓のみキーは先勝ちで別人に化けさせず、登録しない"""
+    name_map = build_name_to_id_map(_KDX_EMPLOYEES)
+    assert "吉田" not in name_map            # 曖昧 → 引けない（missing で警告に出る）
+    assert name_map["吉田英伸"] == "2017016"  # フルネームは一意なので引ける
+    assert name_map["吉田拓矢"] == "2025007"
+    assert name_map["市川"] == "2010005"      # 一意な姓は従来どおり
+
+
+def test_build_ambiguous_names_lists_candidates():
+    ambiguous = build_ambiguous_names(_KDX_EMPLOYEES)
+    assert "吉田" in ambiguous
+    assert {eid for eid, _ in ambiguous["吉田"]} == {"2017016", "2025007"}
+    assert "市川" not in ambiguous
+
+
+class TestResolveEmployeeId:
+    def setup_method(self):
+        self.name_map = build_name_to_id_map(_KDX_EMPLOYEES)
+
+    def test_exact_and_space_variants(self):
+        assert resolve_employee_id("尾川", self.name_map) == "2009006"
+        assert resolve_employee_id("市川 正人", self.name_map) == "2010005"
+        assert resolve_employee_id("吉田拓矢", self.name_map) == "2025007"
+
+    def test_prefix_match_unique(self):
+        """「市川正」（姓+名1文字）→ 市川正人 に前方一致で解決"""
+        assert resolve_employee_id("市川正", self.name_map) == "2010005"
+
+    def test_paren_note_stripped(self):
+        """「亘（わたり）」のルビ括弧を除去して解決"""
+        assert resolve_employee_id("亘（わたり）", self.name_map) == "2023030"
+        assert resolve_employee_id("亘(わたり)", self.name_map) == "2023030"
+
+    def test_ambiguous_surname_unresolved(self):
+        """同姓複数の「吉田」は自動確定しない（別人のIDに化けない）"""
+        assert resolve_employee_id("吉田", self.name_map) == ""
+
+    def test_short_prefix_not_matched(self):
+        assert resolve_employee_id("吉", self.name_map) == ""
+
+    def test_unknown_name(self):
+        assert resolve_employee_id("存在しない太郎", self.name_map) == ""
+        assert resolve_employee_id("", self.name_map) == ""
+
+
+def test_annotate_unresolved_name_with_candidates():
+    ambiguous = build_ambiguous_names(_KDX_EMPLOYEES)
+    note = annotate_unresolved_name("吉田", ambiguous)
+    assert "吉田 英伸(2017016)" in note
+    assert "吉田 拓矢(2025007)" in note
+    assert "自動確定できません" in note
+    # 曖昧に該当しない名前はそのまま
+    assert annotate_unresolved_name("謎の人", ambiguous) == "謎の人"
 
 
 # =============================================================================

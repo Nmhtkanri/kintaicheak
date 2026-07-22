@@ -213,6 +213,74 @@ def _resolve_merged_cell_value(
     return (suggest_template_id(code), unmatched_entry)
 
 
+_PAREN_NOTE_RE = re.compile(r"[（(][^（()）]*[)）]")
+
+
+def _name_variants(name: str) -> list[str]:
+    """氏名の照合バリエーション（元表記 → 空白除去 → 括弧注記除去 → 両方）。
+
+    KDXシフト表の「亘（わたり）」のようなルビ・注記括弧を落として照合できるようにする。
+    """
+    raw = str(name or "").strip()
+    variants: list[str] = []
+    for base in (raw, _PAREN_NOTE_RE.sub("", raw)):
+        for v in (base, re.sub(r"[\s　]+", "", base)):
+            v = v.strip()
+            if v and v not in variants:
+                variants.append(v)
+    return variants
+
+
+def resolve_employee_id(name: str, name_to_id: dict[str, str]) -> str:
+    """勤務表の氏名 → jinjer 従業員ID を解決する（失敗は空文字）。
+
+    解決順:
+      1. 完全一致（元表記 / 空白除去 / 括弧注記除去）
+      2. 前方一致: jinjer 側の氏名キー（空白除去）が勤務表名で始まり、
+         候補IDがちょうど1人のときだけ採用（「市川正」→「市川正人」）。
+         3文字未満は誤マッチ防止のため前方一致しない（姓のみは 1 の専用キーで拾う）。
+
+    name_to_id は build_name_to_id_map の出力（同姓など曖昧キーは含まれない）を想定。
+    """
+    if not name_to_id:
+        return ""
+    variants = _name_variants(name)
+
+    for v in variants:
+        if v in name_to_id:
+            return name_to_id[v]
+
+    stripped_map: dict[str, set[str]] = {}
+    for k, eid in name_to_id.items():
+        ks = re.sub(r"[\s　]+", "", str(k))
+        if ks:
+            stripped_map.setdefault(ks, set()).add(eid)
+    for v in variants:
+        ids = stripped_map.get(v)
+        if ids and len(ids) == 1:
+            return next(iter(ids))
+
+    for v in variants:
+        if len(v) < 3:
+            continue
+        ids = {eid for ks, id_set in stripped_map.items()
+               if ks.startswith(v) for eid in id_set}
+        if len(ids) == 1:
+            return next(iter(ids))
+    return ""
+
+
+def annotate_unresolved_name(name: str, ambiguous_names: dict) -> str:
+    """ID未解決の氏名に、同姓複数などの「なぜ引けないか」の注記を付ける（警告表示用）。"""
+    for v in _name_variants(name):
+        hits = (ambiguous_names or {}).get(v)
+        if hits:
+            cands = " / ".join(f"{full}({eid})" for eid, full in hits)
+            return (f"{name}（同じ氏名の候補が複数いるため自動確定できません: {cands}"
+                    f" — CSVの従業員ID列に正しいIDを入力してください）")
+    return name
+
+
 def _is_ake_code(code: str, label: str = "") -> bool:
     """「明け休」を意味する記号か"""
     if not code:
@@ -459,14 +527,7 @@ def export_jinjer_schedule_csv(
         if not isinstance(emp, dict):
             continue
         name = (emp.get("name") or "不明").strip()
-        emp_id = name_to_id.get(name, "")
-        if not emp_id:
-            # スペースを取り除いた / 入れたバリエーションで再試行
-            stripped = re.sub(r"\s+", "", name)
-            for k, v in name_to_id.items():
-                if re.sub(r"\s+", "", k) == stripped:
-                    emp_id = v
-                    break
+        emp_id = resolve_employee_id(name, name_to_id)
         if not emp_id:
             missing_ids.append(name)
 
@@ -581,20 +642,13 @@ def _resolve_employee_id_for_group(
     emp: dict,
     name_to_id: dict[str, str],
 ) -> str:
-    """build_employee_day_map と同じ流儀で従業員ID を引く（マッチに失敗したら空文字）"""
+    """resolve_employee_id と同じ流儀で従業員ID を引く（マッチに失敗したら空文字）"""
     if not isinstance(emp, dict):
         return ""
     name = (emp.get("name") or "").strip()
     if not name:
         return ""
-    emp_id = name_to_id.get(name, "")
-    if emp_id:
-        return emp_id
-    stripped = re.sub(r"\s+", "", name)
-    for k, v in name_to_id.items():
-        if re.sub(r"\s+", "", k) == stripped:
-            return v
-    return ""
+    return resolve_employee_id(name, name_to_id)
 
 
 def export_jinjer_schedule_csv_split(
