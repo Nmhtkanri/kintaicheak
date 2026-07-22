@@ -813,8 +813,18 @@ def parse_structured_files(
     legend_paths: list[str] = []
     shift_paths: list[str] = []
     monthly_shift_paths: list[str] = []
+    kdx_pdf_paths: list[str] = []
     for p in paths:
-        if not p.lower().endswith((".xlsx", ".xls")):
+        low = p.lower()
+        if low.endswith(".pdf"):
+            try:
+                from services.kdx_shift_parser import is_kdx_shift_pdf
+                if is_kdx_shift_pdf(p):
+                    kdx_pdf_paths.append(p)
+            except Exception as e:
+                logger.warning("pdf sniff 失敗 %s: %s", p, e)
+            continue
+        if not low.endswith((".xlsx", ".xls")):
             continue
         try:
             if is_multi_year_shift_xlsx(p):
@@ -826,7 +836,7 @@ def parse_structured_files(
         except Exception as e:
             logger.warning("xlsx sniff 失敗 %s: %s", p, e)
 
-    if not shift_paths and not monthly_shift_paths:
+    if not shift_paths and not monthly_shift_paths and not kdx_pdf_paths:
         return None
 
     # 凡例をマージ（複数渡された場合は重複コードを除外しつつ全件統合）
@@ -845,6 +855,25 @@ def parse_structured_files(
     # シフト表ごとにシートを作る
     sheets: list[dict] = []
     consumed: list[str] = []
+
+    for kp in kdx_pdf_paths:
+        try:
+            from services.kdx_shift_parser import parse_kdx_shift_pdf
+            result = parse_kdx_shift_pdf(kp, target_year, target_month)
+        except Exception as e:
+            logger.warning("KDXシフト表 %s の構造化解析に失敗: %s", kp, e)
+            continue
+        sheets.append({
+            "mode": "code",
+            "filename": result["filename"],
+            "legend": result["legend"],
+            "employees": result["employees"],
+            "off_markers": result["off_markers"],
+            "year": result["year"],
+            "month": result["month"],
+            "section_info": result.get("section_info"),
+        })
+        consumed.append(kp)
 
     for mp in monthly_shift_paths:
         try:

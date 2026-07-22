@@ -557,6 +557,37 @@ def add_integrated_sheet(wb: Workbook, rows: list[list[str]]) -> None:
         ws.auto_filter.ref = f"A1:{get_column_letter(NCOL)}{n + 1}"
 
 
+def add_sap_dedup_sheet(wb: Workbook, fieldnames: list[str], removed_rows: list[dict]) -> None:
+    """「SAP重複除外」シートを追加する（除外された行の一覧＝精査の証跡）。
+
+    fieldnames は SAP 生CSVの列＋付加列（除外理由/照合キー/重複元ファイル/重複元CSV行/重複元件数）。
+    除外 0 行でも「除外なし」が確認できるようシート自体は作る。
+    """
+    header_font = Font(name=FONT, bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", start_color="C05046")
+    body_font = Font(name=FONT)
+
+    ws = wb.create_sheet("SAP重複除外")
+    ws.append(fieldnames)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+    if removed_rows:
+        for row in removed_rows:
+            ws.append(["" if row.get(c) is None else str(row.get(c, "")) for c in fieldnames])
+        for row in ws.iter_rows(min_row=2, max_row=len(removed_rows) + 1):
+            for cell in row:
+                cell.font = body_font
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(fieldnames))}{len(removed_rows) + 1}"
+    else:
+        ws.append(["(除外された行はありません)"])
+        ws.cell(row=2, column=1).font = body_font
+    for i, name in enumerate(fieldnames, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = max(12, min(40, len(str(name)) * 2 + 6))
+    ws.freeze_panes = "A2"
+
+
 _ROUTE_COLS = ["社員番号", "氏名", "利用日", "交通機関", "内訳", "乗車場所", "降車場所",
                "経路", "金額", "往復", "備考(明細)", "登録通勤経路", "一致", "判定"]
 
@@ -628,6 +659,7 @@ class KeihiResult:
     import_preview: list = field(default_factory=list)     # インポート行プレビュー（人間チェック用）
     import_warnings: list = field(default_factory=list)
     import_csv_name: str = ""                               # 出力したインポートCSVのファイル名
+    sap_dedup: dict = field(default_factory=dict)           # SAP重複除外の統計（未実施なら空）
     error: str = ""
     logs: list[str] = field(default_factory=list)
 
@@ -716,6 +748,7 @@ def run_keihi_integration(
     keywords_file: "str | Path | None" = None,
     import_template_csv: "str | Path | None" = None,
     manual_items: "dict | None" = None,
+    sap_past_inputs: "list | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -731,6 +764,9 @@ def run_keihi_integration(
         manual_items: イレギュラー経費 {項目名: {社員番号: 金額}}。経費4ソースから導けない
                       手決めの金額（定常外業務対応手当/その他手当/現物支給/支給過不足調整/
                       社保調整）。画面の入力欄またはファイル一括取込から渡す。負数可
+        sap_past_inputs: 過去SAP CSVのファイル/フォルダのリスト。指定時、SAP取込前に
+                         「費用シート ID」が過去と一致する行を除外する（前々月分の混入対策）。
+                         除外に失敗した場合は二重計上事故防止のため処理を中止する
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -739,6 +775,33 @@ def run_keihi_integration(
         result.error = "少なくとも1つのソースCSVを指定してください。"
         log_func(f"[error] {result.error}")
         return result
+
+    # --- SAP重複除外（オプトイン）: 取込前に過去CSVと費用シートIDで突合 ---
+    sap_dedup_removed_rows: list[dict] = []
+    sap_dedup_removed_fieldnames: list[str] = []
+    if sap_csv and sap_past_inputs:
+        try:
+            from services.sap_duplicate_filter import run_sap_dedup
+            dedup = run_sap_dedup(
+                past_inputs=sap_past_inputs,
+                current_csv=sap_csv,
+                output_dir=Path(output_path).parent,
+                output_stem=Path(output_path).stem,
+            )
+        except Exception as e:  # noqa: BLE001 — 黙って重複入りで進むと二重計上になるため中止
+            result.error = f"SAP重複除外に失敗しました: {e}"
+            log_func(f"[error] {result.error}")
+            return result
+        log_func(
+            f"[info] SAP重複除外: 過去 {dedup.past_file_count} ファイル/{dedup.past_row_count} 行と突合 → "
+            f"当月 {dedup.current_row_count} 行から {dedup.removed_row_count} 行を除外（残り {dedup.kept_row_count} 行）"
+        )
+        if dedup.removed_row_count:
+            log_func(f"[info]   除外一覧CSV: {dedup.removed_path.name} / 取込対象CSV: {dedup.clean_path.name}")
+        sap_csv = dedup.clean_path   # 以降は除外済みCSVを取り込む
+        result.sap_dedup = dedup.summary_dict()
+        sap_dedup_removed_rows = dedup.removed_rows
+        sap_dedup_removed_fieldnames = dedup.removed_fieldnames
 
     # --- ロスター（氏名→社員番号）を jinjer API から構築（e-staffing/SAP/freee 用） ---
     roster: dict = {}
@@ -781,6 +844,9 @@ def run_keihi_integration(
     # --- Excel 出力 ---
     wb = Workbook()
     add_integrated_sheet(wb, rows)
+    if result.sap_dedup:
+        # SAP重複除外を実施した場合は、除外行の一覧シート（精査の証跡）を付ける
+        add_sap_dedup_sheet(wb, sap_dedup_removed_fieldnames, sap_dedup_removed_rows)
     if route_check:
         try:
             route_results = evaluate_route_check(rows, commute_rows)

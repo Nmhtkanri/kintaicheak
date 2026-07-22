@@ -162,7 +162,11 @@ def _apply_single_supplemental_legend(code_sheets: list[dict]) -> list[dict]:
 @app.route("/")
 def index():
     api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    return render_template("index.html", api_key_set=api_key_set)
+    return render_template(
+        "index.html",
+        api_key_set=api_key_set,
+        keihi_sap_past_default=Config.KEIHI_SAP_PAST_DIR,
+    )
 
 
 @app.route("/upload", methods=["POST"])
@@ -277,14 +281,16 @@ def upload():
                             "off_markers": sheet["off_markers"],
                         })
                         sec = sheet.get("section_info") or {}
+                        # KDX PDF などセクション概念の無いパーサは section_index=None
+                        sec_part = (f"セクション{sec.get('section_index')} "
+                                    if sec.get("section_index") is not None else "")
                         yield _sse_event("progress", {
                             "message": (
                                 f"構造化解析完了: {sheet['filename']} "
                                 f"→ {sheet['year']}年{sheet['month']}月 "
                                 f"凡例 {len(sheet['legend'])}個 / "
                                 f"従業員 {len(sheet['employees'])}人 "
-                                f"(セクション{sec.get('section_index')} "
-                                f"曜日マッチ {sec.get('weekday_matched', 0)}/"
+                                f"({sec_part}曜日マッチ {sec.get('weekday_matched', 0)}/"
                                 f"{sec.get('weekday_total', 0)})"
                             )
                         })
@@ -1407,6 +1413,9 @@ def route_expense_integration():
         "sap_csv": _clean_path_input(request.form.get("sap_csv")),
         "freee_csv": _clean_path_input(request.form.get("freee_csv")),
     }
+    # SAP重複除外: 過去SAP CSV/フォルダ（; 区切りで複数可。空欄なら除外なし）
+    from services.sap_duplicate_filter import parse_past_inputs
+    sap_past_inputs = parse_past_inputs(request.form.get("sap_past") or "")
     output_filename = (request.form.get("output_filename") or "").strip()
     route_check = (request.form.get("route_check") or "1").strip() != "0"
     classify = (request.form.get("classify") or "1").strip() != "0"
@@ -1466,6 +1475,12 @@ def route_expense_integration():
         if not p.exists():
             errors.append(f"{key} が見つかりません: {p}")
         paths[key] = p
+    for sp in sap_past_inputs:
+        if not _Path(sp).exists():
+            errors.append(f"過去SAP CSV/フォルダが見つかりません: {sp}")
+    if sap_past_inputs and not sources["sap_csv"]:
+        # SAP本体が無いのに過去だけ指定 → 除外は動かないことを明示（黙って無視しない）
+        errors.append("過去SAP CSVが指定されていますが、③SAP経費CSV本体が空欄です（重複除外はSAP CSV指定時のみ動きます）。")
     keywords_file = _Path(keywords_file_str) if keywords_file_str else None
     if keywords_file and not keywords_file.exists():
         errors.append(f"キーワード設定ファイルが見つかりません: {keywords_file}")
@@ -1495,6 +1510,7 @@ def route_expense_integration():
             route_check=route_check, classify=classify, keywords_file=keywords_file,
             import_template_csv=import_template_csv,
             manual_items=manual_items,
+            sap_past_inputs=sap_past_inputs or None,
             log_func=_log,
         )
     except Exception as e:
@@ -1515,6 +1531,7 @@ def route_expense_integration():
             "unmatched_emp": result.unmatched_emp,
             "route_summary": result.route_summary,
             "classify_summary": result.classify_summary,
+            "sap_dedup": result.sap_dedup,
         },
         "console": log_lines,
     }

@@ -488,6 +488,18 @@
                 <input type="text" id="ki-sap" placeholder="例: Z:\経費\経費月次出力_API連携用 (5).csv"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
+            <label style="margin-left:18px">
+                ③-2 過去SAP経費CSV（<b>重複の自動除外</b>・ファイル/フォルダを <code>;</code> 区切りで複数可）:
+                <input type="text" id="ki-sap-past" value="{{ keihi_sap_past_default or '' }}"
+                       placeholder="例: Y:\給与明細\R8年（フォルダ指定でサブフォルダ内の全CSVと突合）"
+                       style="width:100%; padding:6px 10px; margin-top:4px">
+                <span class="hint" style="font-size:11px">
+                    SAPのCSVには前々月分の経費が混ざって落ちてくるため、ここで指定した過去CSVと
+                    「費用シート ID」が一致する行を<b>取込前に自動除外</b>します。除外された行は
+                    Excelの「SAP重複除外」シートと除外一覧CSVで確認できます。<b>空欄にすると従来通り除外なし</b>。
+                    フォルダ指定時、過去の「重複除外済/除外一覧」CSVは自動で読み飛ばします。
+                </span>
+            </label>
             <label>
                 ④ freee 経費CSV（本社経費 <code>経費精算-*.csv</code>）:
                 <input type="text" id="ki-freee" placeholder="例: Z:\経費\経費精算-20260707120832.csv"
@@ -558,6 +570,7 @@
             <div class="summary-cards" style="margin-bottom:8px">
                 <div class="summary-card"><div class="card-label">統合一覧表(行)</div><div class="card-value" id="ki-cnt-rows">0</div></div>
                 <div class="summary-card"><div class="card-label">ソース取込(jinjer/e-staffing/SAP/freee)</div><div class="card-value" id="ki-cnt-sources" style="font-size:14px">—</div></div>
+                <div class="summary-card"><div class="card-label">SAP重複除外(行)</div><div class="card-value" id="ki-cnt-sap-dedup" style="font-size:14px">—</div></div>
                 <div class="summary-card"><div class="card-label">社員番号 未照合(行)</div><div class="card-value" id="ki-cnt-unmatched">0</div></div>
                 <div class="summary-card"><div class="card-label">★要確認(経路突合)</div><div class="card-value" id="ki-cnt-flagged">—</div></div>
                 <div class="summary-card"><div class="card-label">△逆要確認</div><div class="card-value" id="ki-cnt-rev">—</div></div>
@@ -1024,6 +1037,7 @@
             fd.append('jinjer_csv', document.getElementById('ki-jinjer').value);
             fd.append('estaffing_csv', document.getElementById('ki-estaffing').value);
             fd.append('sap_csv', document.getElementById('ki-sap').value);
+            fd.append('sap_past', document.getElementById('ki-sap-past').value);
             fd.append('freee_csv', document.getElementById('ki-freee').value);
             fd.append('output_filename', document.getElementById('ki-output-filename').value);
             fd.append('route_check', routeCheck ? '1' : '0');
@@ -1047,6 +1061,11 @@
                 const fmt = (v) => (v === null || v === undefined) ? '未取込' : (v + '行');
                 document.getElementById('ki-cnt-sources').textContent =
                     fmt(sc.jinjer) + ' / ' + fmt(sc.estaffing) + ' / ' + fmt(sc.sap) + ' / ' + fmt(sc.freee);
+                const sd = st.sap_dedup || {};
+                document.getElementById('ki-cnt-sap-dedup').textContent =
+                    (sd.removed_rows !== undefined)
+                        ? (sd.removed_rows + '行 (過去' + sd.past_files + 'ファイルと突合)')
+                        : '未実施';
                 document.getElementById('ki-cnt-unmatched').textContent = st.unmatched_emp || 0;
                 const rs = st.route_summary || {};
                 document.getElementById('ki-cnt-flagged').textContent =

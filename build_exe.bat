@@ -25,6 +25,7 @@ python -m PyInstaller ^
   --add-data "templates;templates" ^
   --add-data "static;static" ^
   --add-data ".env;." ^
+  --collect-all pdfplumber ^
   launcher.py
 
 if errorlevel 1 goto :build_failed
@@ -32,7 +33,7 @@ if errorlevel 1 goto :build_failed
 echo.
 echo ============================================================
 echo   Build complete.
-echo   Users can now run 起動.bat without installing Python.
+echo   Users can now run 起勁Ebat without installing Python.
 echo ============================================================
 pause
 exit /b 0

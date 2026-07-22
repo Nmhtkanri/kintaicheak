@@ -72,6 +72,11 @@ class Config:
     JINJER_SECRET_KEY = os.environ.get("JINJER_SECRET_KEY")
     JINJER_BASE_URL = os.environ.get("JINJER_BASE_URL", "https://api.jinjer.biz")
 
+    # 経費統合: SAP重複除外の過去CSV既定フォルダ（画面の初期値。サブフォルダも走査）。
+    # SAPの月次CSVは前々月分が混ざって落ちてくるため、過去CSVと費用シートIDで突合して
+    # 取込前に除外する。画面で空欄にすれば従来通り除外なし。.env の KEIHI_SAP_PAST_DIR で上書き可
+    KEIHI_SAP_PAST_DIR = os.environ.get("KEIHI_SAP_PAST_DIR", r"Y:\給与明細\R8年")
+
     # 手順③ API直接投入（kintai-imports）
     # executor = jinjer標準の完了通知メール宛先。
     # ⚠️ 明示指定できるのは「勤怠管理者権限ロール」を持つ社員番号のみ。
