@@ -77,6 +77,21 @@ class Config:
     # 取込前に除外する。画面で空欄にすれば従来通り除外なし。.env の KEIHI_SAP_PAST_DIR で上書き可
     KEIHI_SAP_PAST_DIR = os.environ.get("KEIHI_SAP_PAST_DIR", r"Y:\給与明細\R8年")
 
+    # ------------------------------------------------------------------
+    # 経理モード（freee 給与仕訳の生成）
+    # ------------------------------------------------------------------
+    # マッピング表は谷津さんがレビューで直すファイルなので **exe に同梱せず共有フォルダを読む**。
+    # 直したら再ビルドなしで次回実行から効く。画面のパス欄で 1回限りの上書きもできる。
+    KEIRI_MASTER_CSV = os.environ.get(
+        "KEIRI_MASTER_CSV", r"Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv")
+    KEIRI_KEIHI_MAPPING_CSV = os.environ.get(
+        "KEIRI_KEIHI_MAPPING_CSV", r"Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv")
+    # C-4 の分解材料（経費利用履歴 RevN.xlsm）と、突合先の経理最終CSV。どちらも {M}月 フォルダ配下
+    KEIRI_KEIHI_BOOK_DIR = os.environ.get("KEIRI_KEIHI_BOOK_DIR", r"Y:\給与明細\R8年")
+    KEIRI_FINAL_CSV_DIR = os.environ.get("KEIRI_FINAL_CSV_DIR", r"Y:\給与明細\R8年")
+    # 生成物と API キャッシュの置き場（個人情報を含むのでローカル）
+    KEIRI_OUTPUT_DIR = os.environ.get("KEIRI_OUTPUT_DIR", "outputs/keiri")
+
     # 手順③ API直接投入（kintai-imports）
     # executor = jinjer標準の完了通知メール宛先。
     # ⚠️ 明示指定できるのは「勤怠管理者権限ロール」を持つ社員番号のみ。
@@ -95,6 +110,8 @@ class Config:
         # 出勤1/退勤1 は完全一致で先にヒットさせ、出勤10等への誤マッチを防ぐ
         "出勤時刻": ["出勤1", "出勤", "出勤時刻", "始業", "始業時刻", "出勤時間"],
         "退勤時刻": ["退勤1", "退勤", "退勤時刻", "終業", "終業時刻", "退勤時間"],
+        # 「実労働時間」は別の意味を持つため代用せず、総労働時間の完全一致だけを使う
+        "総労働時間": ["総労働時間"],
         # 第1コメント列（打刻時）と第2コメント列（管理者備考）を別キーで管理
         "コメント": ["打刻時コメント", "備考", "コメント", "メモ", "申請理由", "理由", "申請事由"],
         "コメント2": ["管理者備考"],

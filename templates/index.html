@@ -15,7 +15,7 @@
             <div class="workflow-kicker">処理モード</div>
             <h2>やりたい作業を選んでください</h2>
         </div>
-        <div class="workflow-note">勤怠チェック / スケジュールアップロード / 経費チェック</div>
+        <div class="workflow-note">勤怠チェック / スケジュールアップロード / 経理 / 経費チェック</div>
     </div>
 
     <form id="upload-form" class="workflow-card workflow-card-primary" enctype="multipart/form-data">
@@ -33,6 +33,13 @@
                 <span class="mode-card">
                     <span class="mode-title">スケジュールアップロードモード</span>
                     <span class="mode-desc">画像・Excelなどからスケジュールを読み取り、jinjer用CSVを作ります</span>
+                </span>
+            </label>
+            <label class="mode-option">
+                <input type="radio" name="mode" value="keiri">
+                <span class="mode-card">
+                    <span class="mode-title">経理モード</span>
+                    <span class="mode-desc">jinjer給与明細から freee 取引インポート用の4CSVを作ります</span>
                 </span>
             </label>
             <label class="mode-option">
@@ -417,6 +424,80 @@
     <!-- ============================================================ -->
     <!-- 経費チェックモード — テレワーク日数・出社日数                  -->
     <!-- ============================================================ -->
+    <!-- ==== 経理モード: freee 取引インポート4CSVの生成 ==== -->
+    <div class="workflow-card" id="keiri-card" style="border:2px solid #7030a0; display:none">
+        <div class="step-header">
+            <div>
+                <div class="step-number" style="background:#7030a0">🧾</div>
+                <div class="step-copy">
+                    <div class="section-title">経理モード：freee 取引インポート用4CSVの生成</div>
+                    <p class="hint">支給月を入れて実行すると、jinjer の給与明細から
+                        <b>給与 / 住民税 / 健康保険 / 厚生年金</b> の4CSV（freee 取引インポート17列・cp932）を作ります。
+                        あわせて <b>検算</b> と <b>要確認リスト</b> を出し、経理担当の最終CSVがある月は差分も突き合わせます。
+                        初回は給与明細の取得に数分かかります（2回目以降はキャッシュを使うので速い）。</p>
+                </div>
+            </div>
+        </div>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label style="display:inline-flex; align-items:center; gap:6px">
+                支給月:
+                <input type="text" id="keiri-month" placeholder="例: 2026-08" style="width:160px; padding:6px 10px">
+                <span class="hint" style="margin:0">前月の明細も使うので、前月分も自動で取得します</span>
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:14px; flex-wrap:wrap">
+                <span><input type="checkbox" id="keiri-run-diff" checked> 経理担当の最終CSVと突合する</span>
+                <span><input type="checkbox" id="keiri-refresh-statements"> 給与明細をAPIから取り直す</span>
+                <span><input type="checkbox" id="keiri-refresh-custom"> 部門・人件費区分を取り直す</span>
+            </label>
+            <details style="font-size:12px">
+                <summary style="cursor:pointer; color:#7030a0">詳細設定（ふだんは触らなくて大丈夫です）</summary>
+                <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px">
+                    <label>品目マッピングマスタ（空欄なら共有フォルダの既定）
+                        <input type="text" id="keiri-master-csv" placeholder="Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv"
+                               style="width:100%; padding:6px 10px; margin-top:4px"></label>
+                    <label>経費転記マッピング（空欄なら共有フォルダの既定）
+                        <input type="text" id="keiri-keihi-mapping" placeholder="Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv"
+                               style="width:100%; padding:6px 10px; margin-top:4px"></label>
+                    <label>経費利用履歴 RevN.xlsm（空欄なら支給月フォルダから自動検出）
+                        <input type="text" id="keiri-keihi-book" placeholder="Y:\給与明細\R8年\8月\経費利用履歴 Rev5.xlsm"
+                               style="width:100%; padding:6px 10px; margin-top:4px"></label>
+                    <label style="display:inline-flex; align-items:center; gap:6px">マスタの採用範囲:
+                        <select id="keiri-min-status" style="padding:6px 10px">
+                            <option value="確定" selected>確定のみ（本番）</option>
+                            <option value="推定">推定まで</option>
+                            <option value="要確認">要確認まで（開発用・全行）</option>
+                        </select></label>
+                </div>
+            </details>
+            <div style="margin-top:6px">
+                <button type="button" class="btn btn-primary" id="keiri-run-btn" style="background:#7030a0">🧾 仕訳CSVを作成</button>
+                <span id="keiri-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="keiri-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card"><div class="card-label">対象人数</div><div class="card-value" id="keiri-cnt-emp">0</div></div>
+                <div class="summary-card"><div class="card-label">支払日</div><div class="card-value" id="keiri-paid-on">—</div></div>
+                <div class="summary-card"><div class="card-label">要確認の件数</div><div class="card-value" id="keiri-cnt-alert">0</div></div>
+                <div class="summary-card"><div class="card-label">経費転記の分解</div><div class="card-value" id="keiri-cnt-keihi">0</div></div>
+            </div>
+            <div id="keiri-files" style="margin-bottom:10px"></div>
+            <div id="keiri-diff-area" style="display:none; margin-bottom:10px">
+                <div style="font-weight:bold; margin-bottom:4px">最終CSVとの差分</div>
+                <div id="keiri-diff-summary"></div>
+            </div>
+            <div class="keiri-tabs" style="display:flex; gap:6px; margin:10px 0 0; border-bottom:2px solid #7030a0">
+                <button type="button" class="keiri-tab btn active" data-target="keiri-pane-yokakunin">要確認リスト</button>
+                <button type="button" class="keiri-tab btn" data-target="keiri-pane-kensan">検算</button>
+                <button type="button" class="keiri-tab btn" data-target="keiri-pane-diff">差分の明細</button>
+            </div>
+            <div id="keiri-pane-yokakunin" class="keiri-pane md-view"></div>
+            <div id="keiri-pane-kensan" class="keiri-pane md-view" style="display:none"></div>
+            <div id="keiri-pane-diff" class="keiri-pane md-view" style="display:none"></div>
+        </div>
+        <div id="keiri-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
     <div class="workflow-card" id="expense-card" style="border:2px solid #548235; display:none">
         <div class="step-header">
             <div>

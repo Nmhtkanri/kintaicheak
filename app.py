@@ -1622,6 +1622,109 @@ def route_expense_payroll_import():
     return jsonify(payload)
 
 
+# =============================================================================
+# 経理モード — jinjer給与明細 → freee 取引インポート4CSV
+# =============================================================================
+
+@app.route("/keiri_run", methods=["POST"])
+def route_keiri_run():
+    """支給月ぶんの4CSV（給与/住民税/健康保険/厚生年金）＋検算＋要確認を作る。
+
+    給与明細は jinjer API から取り、月別 JSON にキャッシュする（2回目以降は速い）。
+    マッピング表は共有フォルダ（Config.KEIRI_MASTER_CSV / KEIRI_KEIHI_MAPPING_CSV）を読むので、
+    表を直せば exe の再ビルドなしで次回実行から効く。
+
+    フォーム:
+      - month             : 支給月 YYYY-MM（必須）
+      - master_csv        : 品目マッピングマスタのパス（空欄なら既定）
+      - keihi_mapping_csv : 経費転記マッピングのパス（空欄なら既定）
+      - keihi_book        : 経費利用履歴 RevN.xlsm（空欄なら {M}月フォルダから自動検出）
+      - final_csv_dir     : 経理の最終CSVの親フォルダ（空欄なら既定）
+      - min_status        : マスタの採用範囲（既定 確定）
+      - refresh_statements / refresh_custom : "1" なら API を取り直す
+      - run_diff          : "1"（既定）なら最終CSVと突合する
+    """
+    from services.keiri_engine import generate
+    from services.keiri_diff import compare_month
+    from services.jinjer_api_client import JinjerAPIError
+
+    month = (request.form.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["支給月は YYYY-MM 形式で入力してください（例: 2026-08）"]}), 400
+
+    min_status = (request.form.get("min_status") or "確定").strip()
+    if min_status not in ("確定", "推定", "要確認"):
+        min_status = "確定"
+
+    kwargs = {
+        "master_csv": _clean_path_input(request.form.get("master_csv")) or None,
+        "keihi_mapping_csv": _clean_path_input(request.form.get("keihi_mapping_csv")) or None,
+        "keihi_book": _clean_path_input(request.form.get("keihi_book")) or None,
+        "final_csv_dir": _clean_path_input(request.form.get("final_csv_dir")) or None,
+        "min_status": min_status,
+        "refresh_statements": (request.form.get("refresh_statements") or "") == "1",
+        "refresh_custom": (request.form.get("refresh_custom") or "") == "1",
+    }
+    for key in ("master_csv", "keihi_mapping_csv", "keihi_book"):
+        path = kwargs[key]
+        if path and not os.path.exists(path):
+            return jsonify({"success": False, "errors": [f"指定されたファイルがありません: {path}"]}), 400
+
+    try:
+        result = generate(month, **kwargs)
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except (ValueError, FileNotFoundError) as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except Exception as e:
+        logger.exception("keiri_run failed")
+        return jsonify({"success": False, "errors": [f"生成に失敗しました: {e}"]}), 500
+
+    ym = month.replace("-", "")
+    payload = {
+        "success": True, "month": month, "ym": ym,
+        "out_dir": os.path.abspath(result["out_dir"]),
+        "employees": result["employees"], "paid_on": result["paid_on"],
+        "keihi_book": result["keihi_book"], "master_csv": result["master_csv"],
+        "alerts": result["alerts"],
+        "files": [{"種別": k, "filename": v["filename"],
+                   "取引数": v["transactions"], "行数": v["rows"]}
+                  for k, v in result["files"].items()],
+        "kensan_md": _read_text(result["kensan_path"]),
+        "yokakunin_md": _read_text(result["yokakunin_path"]),
+    }
+
+    if (request.form.get("run_diff") or "1") == "1":
+        try:
+            summary, lines, _out = compare_month(
+                month, result["out_dir"], final_dir=None, by_date=False)
+            payload["diff_summary"] = summary
+            payload["diff_md"] = "\n".join(lines)
+        except Exception as e:
+            logger.exception("keiri diff failed")
+            payload["diff_error"] = f"最終CSVとの突合に失敗しました: {e}"
+    return jsonify(payload)
+
+
+@app.route("/keiri_download/<ym>/<path:filename>")
+def keiri_download(ym, filename):
+    """経理モードの生成物をダウンロードする（outputs/keiri/{YYYYMM}/ 配下のみ）。"""
+    safe_ym = os.path.basename(ym)
+    if not re.fullmatch(r"\d{6}", safe_ym):
+        return jsonify({"error": "月の指定が不正です"}), 400
+    folder = os.path.abspath(os.path.join(Config.KEIRI_OUTPUT_DIR, safe_ym))
+    return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 @app.route("/api/status")
 def api_status():
     return jsonify({"status": "ok", "api_key_set": bool(os.environ.get("ANTHROPIC_API_KEY"))})
