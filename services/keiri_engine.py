@@ -123,8 +123,11 @@ KENPO_AZUKARI = [("salary_other_items:other15", "健康保険料（預り分）"
                  ("salary_deduction_items:child_support", "子ども・子育て支援金（預り分）")]
 KONEN_AZUKARI = [("salary_other_items:other17", "厚生年金保険料（預り分）")]
 
-# C3: 休職者かつ社保が発生している人は暫定支給とは別取引（管理番号・支払期日が空欄）
+# C3: 休職者かつ社保が発生している人は、預り金の行は暫定取引に入れ、仮払金だけを
+#     「1行=1取引」（管理番号・支払期日とも空欄）で末尾に分ける（2026-07-28 経理担当確認）。
 SHAHO_KEYS = ("salary_deduction_items:deduction29", "salary_deduction_items:deduction31")
+# 休職者の仮払金の備考。「（○月分社保）」は何月分かを jinjer から決められないため手入力
+KYUSHOKU_BIKO = "傷病手当金の入金があり次第精算予定"
 
 # 社保調整(deduction4) は月変対応漏れ等の遡及調整。jinjer は1項目にまとめているが、
 # 最終CSVでは 健保／介護／厚年／子ども子育て支援金 の品目別に分かれる。
@@ -592,8 +595,8 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
     m_first = f"{month}-01"
     month_end_m = month_last_day(month)
     prev_end = month_last_day(prev)
-    zantei_rows, jisseki_rows, karibarai_rows = [], [], []
-    kyushoku = {}
+    zantei_rows, jisseki_rows = [], []
+    kyushoku_karibarai = {}
     keihi_details = keihi_details or {}
 
     # 現物支給: 対象者が閾値以上なら支給側を人件費行へ合算（B3）
@@ -656,14 +659,18 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
         # 差引支給額がマイナス＝給与から引ききれない分は仮払金として計上する
         #   （2026-07 実測: 村岡2023017 の -117,300 が最終CSVで仮払金 117,300）
         net = pi_value(pi, "salary_payment_items:payment1")
+        kyushoku = is_kyushoku(pi)
         if net < 0:
-            rows.append(detail_row("仮払金", "対象外", -net, "仮払金", bumon_m, name))
+            karibarai = detail_row("仮払金", "対象外", -net, "仮払金", bumon_m, name,
+                                   KYUSHOKU_BIKO if kyushoku else "")
             alerts["karibarai"].add((emp, name, int(-net)))
-        if is_kyushoku(pi):
-            kyushoku[emp] = rows          # C3: 休職者は1名=1取引（管理番号・支払期日は空欄）
-            alerts["kyushoku"].add((emp, name))
-        else:
-            zantei_rows.extend(rows)
+            if kyushoku:
+                kyushoku_karibarai[emp] = karibarai   # C3: 末尾に1行=1取引で分ける
+            else:
+                rows.append(karibarai)
+        if kyushoku:
+            alerts["kyushoku"].add((emp, name, int(-net) if net < 0 else 0))
+        zantei_rows.extend(rows)          # 預り金の行は休職者も暫定取引の中に入れる
 
         # --- 実績差分（発生日=前月末）: 暫定に入らない支給項目（部門は前月時点＝ルール2） ---
         bumon_p = resolver.bumon(emp, prev_end, f"{prev}実績差分")
@@ -671,6 +678,7 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
         is_honsha = kubun_item != "人件費（本社以外）"
         jinkenhi_diff = 0.0
         others = []
+        genbutsu_torikuzushi = None
         for r in master["j_items"]:
             it = pi_item(pi, r["source_key"])
             if it is None:
@@ -700,15 +708,20 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
                     alerts["keihi_tenki"].add((emp, name, int(v), bumon_p,
                                                int(det_total) if det else None))
                 continue
-            # B3 現物支給: 仮払金の取り崩し行は必ず1人1行（部門=本社・その他本社経費）
+            # B3 現物支給: 仮払金の取り崩し行は必ず1人1行（部門=本社・その他本社経費）。
+            # 経理の最終CSVでは**その人の現物支給行の直下**に入る（2026-07 実測 行310→311 ほか6組）。
+            # bulk で支給側を人件費行へ合算した月は現物支給行が無いので、本人ブロックの末尾に置く
+            # （2026-03 実測 行433・441・449… も従業員ブロックの最後）。
             if key == GENBUTSU_KEY:
-                karibarai_rows.append(detail_row("仮払金", "対象外", -v, "仮払金",
-                                                 "本社", SONOTA_HONSHA, GENBUTSU_BIKO))
+                torikuzushi = detail_row("仮払金", "対象外", -v, "仮払金",
+                                         "本社", SONOTA_HONSHA, GENBUTSU_BIKO)
                 if genbutsu_bulk and not is_honsha:
                     jinkenhi_diff += v       # 支給側は人件費行へ合算
+                    genbutsu_torikuzushi = torikuzushi     # ブロック末尾へ回す
                 else:
                     others.append(detail_row(jinkenhi_account(emp, is_bonus=True), "対象外",
                                              v, kubun_item, bumon_p, name, GENBUTSU_BIKO))
+                    others.append(torikuzushi)
                 continue
             # B2 通勤手当: 本社・育成の人は品目が人件費（…）になる（育成も本社に寄せる）
             if key in TSUKIN_KEYS and is_honsha:
@@ -744,22 +757,26 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
             else:
                 jisseki_rows.append(detail_row(jinkenhi_account(emp), "対象外", jinkenhi_diff,
                                                kubun_item, bumon_p, name))
+        if genbutsu_torikuzushi:
+            others.append(genbutsu_torikuzushi)   # bulk 月は本人ブロックの末尾に置く
         jisseki_rows.extend(others)  # 最終CSVの慣例: 人件費行が従業員の先頭
 
     kanri = min(st_m or st_prev)  # 最終CSV慣例: 管理番号=先頭従業員コード（取引単位）
     transactions = []
-    # 現物支給の仮払金取り崩しは支給側（実績差分）と同じ取引に入れる
-    if jisseki_rows or karibarai_rows:
+    if jisseki_rows:
         transactions.append({"管理番号": kanri, "発生日": jp_date(prev_end),
                              "支払期日": jp_date(paid_on), "取引先": "従業員",
-                             "rows": jisseki_rows + karibarai_rows})
+                             "rows": jisseki_rows})
     if zantei_rows:
         transactions.append({"管理番号": kanri, "発生日": jp_date(f"{month}-15"),
                              "支払期日": jp_date(paid_on), "取引先": "従業員",
                              "rows": zantei_rows})
-    for emp, rows in kyushoku.items():   # C3: 管理番号・支払期日とも空欄
+    # C3: 休職者の仮払金だけは「1行=1取引」で末尾に並べる（管理番号・支払期日とも空欄）。
+    #     預り金の行は暫定取引の中に入れる（2026-07 最終CSV 行2057-2059 が3取引）。
+    for emp in sorted(kyushoku_karibarai):
         transactions.append({"管理番号": "", "発生日": jp_date(f"{month}-15"),
-                             "支払期日": "", "取引先": "従業員", "rows": rows})
+                             "支払期日": "", "取引先": "従業員",
+                             "rows": [kyushoku_karibarai[emp]]})
     return transactions
 
 
@@ -1215,6 +1232,19 @@ def build_yokakunin(month, alerts, master):
     if alerts["karibarai"]:
         for emp, name, amt in sorted(alerts["karibarai"]):
             lines.append(f"- {emp} {name}: {amt:,}円")
+    else:
+        lines.append("- なし")
+    lines += ["", "## 休職者（仮払金を1行=1取引で末尾に分けた人）", "",
+              "休職中で社保が発生している人。**預り金の行は暫定取引の中**に入れ、"
+              "**仮払金だけを「1行=1取引」（管理番号・支払期日とも空欄）で末尾に分けている**"
+              "（2026-07-28 経理担当確認）。"
+              f"備考は「{KYUSHOKU_BIKO}」まで自動で入れているので、"
+              "**末尾に何月分の社保かを追記すること**（例「（5月分社保）」）。", ""]
+    if alerts["kyushoku"]:
+        lines += ["| 社員番号 | 氏名 | 仮払金 |", "|---|---|---|"]
+        for emp, name, amt in sorted(alerts["kyushoku"]):
+            lines.append(f"| {emp} | {name} | {amt:,} |" if amt else
+                         f"| {emp} | {name} | なし（差引支給額が0以上） |")
     else:
         lines.append("- なし")
     lines += ["", "## 立替金を計上しなかった人（本社＝freee へ直接申請済み）", ""]

@@ -6,8 +6,10 @@
 
 import os
 import unittest
+from collections import defaultdict
 
-from services.keiri_engine import (YAKUIN_LOAN, build_kensan, jp_date, master_skipped_report,
+from services.keiri_engine import (GENBUTSU_KEY, KYUSHOKU_BIKO, Resolver, YAKUIN_LOAN,
+                                   build_kensan, build_kyuyo, jp_date, master_skipped_report,
                                    split_halves, split_shaho_chosei, ym_add)
 from services.keiri_keihi_tenki import MAPPING_CSV, classify, decompose, load_mapping
 
@@ -182,6 +184,78 @@ class MasterSkippedReportTests(unittest.TestCase):
                                         {YAKUIN_LOAN["employee_id"]: {"name": "三谷 一志"}})
             self.assertNotIn("⚠️", rep[0]["impact"], key)
             self.assertIn("特別ルールで計上済み", rep[0]["impact"])
+
+
+class KyuyoLayoutTests(unittest.TestCase):
+    """給与CSVの行配置（2026-07-28 経理担当レビューで判明した2件）。
+
+    金額の突合は開発ツールの diff が見るが、**行の位置と取引の切り方は突合されない**ので
+    ここで押さえる。実データの根拠は 2026-07 の最終CSV。
+    """
+
+    MASTER = {
+        "z_jinkenhi": [{"source_key": "salary_items:allowance1", "freee_item": "人件費（{人件費区分}）"}],
+        "z_deduction": [{"source_key": "salary_deduction_items:deduction29",
+                         "freee_account": "預り金", "freee_tax": "対象外",
+                         "freee_item": "健康保険料（預り分）", "amount_sign": "-1"}],
+        "j_items": [{"source_key": GENBUTSU_KEY, "freee_account": "給料手当", "freee_tax": "対象外",
+                     "freee_item": "人件費（{人件費区分}）", "amount_sign": "1"}],
+    }
+    MASTER["z_by_key"] = {r["source_key"]: r for r in MASTER["z_deduction"]}
+
+    def _run(self, st_m, alerts=None):
+        alerts = alerts if alerts is not None else defaultdict(set)
+        resolver = Resolver({}, alerts, {})
+        ridx = {e: {"name": f"社員{e}"} for e in st_m}
+        return build_kyuyo("2026-07", "2026-06", st_m, {}, ridx, resolver, self.MASTER,
+                           "2026-07-25", alerts), alerts
+
+    @staticmethod
+    def _pi(base=0, kenpo=0, net=0, genbutsu=0):
+        return {"salary_items": [{"id": "allowance1", "value": base, "label": "基本給"},
+                                 {"id": GENBUTSU_KEY.split(":")[1], "value": genbutsu,
+                                  "label": "現物支給"}],
+                "salary_deduction_items": [{"id": "deduction29", "value": kenpo}],
+                "salary_payment_items": [{"id": "payment1", "value": net}]}
+
+    def test_kyushoku_karibarai_is_its_own_one_row_transaction(self):
+        """休職者は預り金を暫定取引へ、仮払金だけ1行=1取引で末尾に分ける。"""
+        tx, alerts = self._run({"2018025": self._pi(kenpo=12978, net=-50020)})
+        zantei = [t for t in tx if t["管理番号"]][-1]
+        self.assertEqual([r["品目"] for r in zantei["rows"]], ["健康保険料（預り分）"])
+        tail = [t for t in tx if not t["管理番号"]]
+        self.assertEqual(len(tail), 1)
+        self.assertEqual(tail[0]["支払期日"], "")
+        self.assertEqual(tail[0]["発生日"], "2026/7/15")
+        self.assertEqual(tail[0]["取引先"], "従業員")
+        self.assertEqual(len(tail[0]["rows"]), 1)
+        row = tail[0]["rows"][0]
+        self.assertEqual((row["勘定科目"], row["品目"], row["金額"]), ("仮払金", "仮払金", 50020))
+        self.assertEqual(row["備考"], KYUSHOKU_BIKO)
+        self.assertEqual({e for e, _n, _a in alerts["kyushoku"]}, {"2018025"})
+
+    def test_karibarai_stays_inline_without_shaho(self):
+        """社保が無い人（＝休職者ではない）のマイナス精算は暫定の中のまま。"""
+        tx, _a = self._run({"2024001": self._pi(net=-1000)})
+        self.assertEqual([t["管理番号"] for t in tx if not t["管理番号"]], [])
+        zantei = [t for t in tx if t["管理番号"]][-1]
+        self.assertEqual([r["品目"] for r in zantei["rows"]], ["仮払金"])
+
+    def test_genbutsu_offset_follows_the_payout_row(self):
+        """現物支給の相殺（仮払金）は本人の現物支給行の直下に入る。"""
+        tx, _a = self._run({"2024001": self._pi(genbutsu=3000)})
+        jisseki = [t for t in tx if t["発生日"] == "2026/6/30"][0]
+        items = [(r["勘定科目"], r["金額"], r["従業員"]) for r in jisseki["rows"]]
+        self.assertEqual(items, [("給料手当", 3000, "社員2024001"),
+                                 ("仮払金", -3000, "その他本社経費")])
+        self.assertEqual(jisseki["rows"][1]["部門"], "本社")
+
+    def test_genbutsu_offset_is_per_employee_not_bundled_at_the_end(self):
+        """複数人いても各自の直下に入る（末尾へまとめない）。"""
+        tx, _a = self._run({e: self._pi(genbutsu=3000) for e in ("2024001", "2024002")})
+        jisseki = [t for t in tx if t["発生日"] == "2026/6/30"][0]
+        self.assertEqual([r["勘定科目"] for r in jisseki["rows"]],
+                         ["給料手当", "仮払金", "給料手当", "仮払金"])
 
 
 class DateHelperTests(unittest.TestCase):
