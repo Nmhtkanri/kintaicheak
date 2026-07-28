@@ -1352,8 +1352,12 @@ function keiriRenderMarkdown(md) {
             out.push('<h' + lv + '>' + inline(h[2]) + '</h' + lv + '>');
             continue;
         }
-        if (/^[-*]\s+/.test(line)) {
-            out.push('<div class="keiri-md-li">・' + inline(line.replace(/^[-*]\s+/, '')) + '</div>');
+        const li = line.match(/^(\s*)[-*]\s+(.*)$/);
+        if (li) {
+            // 字下げした箇条書き（例: 住民税の相殺の内訳）は入れ子として描く
+            const sub = li[1].length >= 2;
+            out.push('<div class="keiri-md-li' + (sub ? ' keiri-md-sub' : '') + '">'
+                + (sub ? '－' : '・') + inline(li[2]) + '</div>');
             continue;
         }
         out.push('<p>' + inline(line) + '</p>');

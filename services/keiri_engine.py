@@ -96,11 +96,15 @@ IKUSEI_WATCH_MONTHS = 6
 HONSHA_ITEM = "人件費（本社）"
 HONSHA_BUMON = "本社"
 
-# B6/①: 三谷一志さんの「家賃控除」は役員貸付金の元利均等返済。元本＋利息の2行へ分解する。
+# B6/①: 三谷一志さんの役員貸付金は元利均等返済。元本＋利息の2行へ分解する。
 #     実績7か月（2026-01〜07）に完全フィットするパラメータ。将来1年分も3種の丸めで一致を確認済。
+#     jinjer 側の入力先は月によって揺れる（2026-02/06/07 は「貸付金返済」deduction3、
+#     2026-05 は「家賃控除」deduction2、他の月は未入力）ので**両方を見る**。
+#     ここに挙げた項目は master 側の行を使わず、この特別ルールで生成する（二重計上の防止）。
 YAKUIN_LOAN = {
     "employee_id": "2023004",
-    "source_key": "salary_deduction_items:deduction2",
+    "source_keys": ["salary_deduction_items:deduction3",
+                    "salary_deduction_items:deduction2"],
     "payment": 341659,          # 毎月の返済額（元本＋利息）
     "principal": 20_005_000,    # 当初借入
     "monthly_rate": 0.00081223,  # 月利（年利約0.975%）
@@ -253,6 +257,9 @@ def load_master(path, min_status):
       j_items     : 実績差分側の行リスト（給与）
       juminzei / kenpo / konen : 各納付ファイルの行リスト
       skipped     : min_status で除外された行数（status別）
+      skipped_rows: 同・除外された行そのもの（検算シートで項目名まで出すため）
+      total_n     : マッピング表の全行数
+      offscope    : 仕訳に使わない行数（target_file別＝対象外・賞与スコープ外・要確認）
     """
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -260,19 +267,25 @@ def load_master(path, min_status):
     by_key = defaultdict(list)
     active = []
     skipped = Counter()
+    skipped_rows = []
+    offscope = Counter()
     for r in rows:
         by_key[r["source_key"]].append(r)
         if r["target_file"] in ("対象外", "賞与スコープ外", "要確認"):
+            offscope[r["target_file"]] += 1
             continue
         if STATUS_ORDER.get(r["status"], 9) <= limit:
             active.append(r)
         else:
             skipped[r["status"]] += 1
+            skipped_rows.append(r)
     g = {
         "by_key": by_key,
         "z_jinkenhi": [], "z_deduction": [], "j_items": [],
         "juminzei": [], "kenpo": [], "konen": [],
         "skipped": skipped, "active_n": len(active),
+        "skipped_rows": skipped_rows, "total_n": len(rows),
+        "offscope": offscope, "min_status": min_status, "path": path,
     }
     for r in active:
         if r["target_file"] == "給与":
@@ -603,12 +616,12 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
             rows.append(detail_row(jinkenhi_account(emp), "対象外", base,
                                    resolver.jinkenhi_item(emp, month_end_m), bumon_m, name))
         # ①三谷さんの役員貸付金は返済スケジュールから毎月生成する。
-        #   jinjer 側の家賃控除(deduction2)には毎月入っているとは限らないため API 非依存にする
-        #   （2026-05 のみ計上、6-7月は未入力だが freee には毎月計上されている）。
+        #   jinjer 側は入力先（貸付金返済/家賃控除）も入力の有無も月によって揺れるため
+        #   API 非依存にし、値が入っている月だけ返済額と突き合わせて見張る。
         if emp == YAKUIN_LOAN["employee_id"]:
             n, principal, interest = loan_split(month)
             if 1 <= n <= YAKUIN_LOAN["total_count"]:
-                api_v = pi_value(pi, YAKUIN_LOAN["source_key"])
+                api_v = sum(pi_value(pi, k) for k in YAKUIN_LOAN["source_keys"])
                 if api_v and abs(principal + interest - api_v) >= 1:
                     alerts["loan_mismatch"].add((month, api_v, principal + interest))
                 rows.append(detail_row("役員貸付金", "対象外", -principal, "役員貸付金",
@@ -620,7 +633,7 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
             if not v:
                 continue
             if (emp == YAKUIN_LOAN["employee_id"]
-                    and r["source_key"] == YAKUIN_LOAN["source_key"]):
+                    and r["source_key"] in YAKUIN_LOAN["source_keys"]):
                 continue   # 上で生成済み
             if r["source_key"] == SHAHO_CHOSEI_KEY:
                 # 社保調整は品目別（健保・介護・厚年・子育て支援金）に分けて計上する
@@ -1017,7 +1030,49 @@ def totals_by(transactions, key):
     return c
 
 
-def build_kensan(month, prev, files, st_m, st_prev, master):
+def special_rule_owner(source_key, emp):
+    """master 行の代わりに特別ルールで生成している組み合わせなら、その理由を返す。"""
+    if emp == YAKUIN_LOAN["employee_id"] and source_key in YAKUIN_LOAN["source_keys"]:
+        return "役員貸付金の返済スケジュールから生成（元本＋受取利息の2行）"
+    return ""
+
+
+def master_skipped_report(master, st_m, ridx=None):
+    """status で採用しなかったマスタ行に、当月そもそも金額が出ているかを見に行く。
+
+    「採用マスタ行: 38行（status除外: 推定=1）」だけでは何を見る欄か分からない、という
+    指摘（谷津さん 2026-07-28）への対応。除外した項目名と、当月の実データで金額が
+    出ているかまで出し、出ていなければ「影響なし」と明記する。
+    特別ルールで別途生成している項目（役員貸付金など）は「計上済み」と区別して出す
+    ——ここで誤警報を出すと、本物の漏れを見落とす欄になってしまうため。
+    """
+    ridx = ridx or {}
+    out = []
+    for r in master["skipped_rows"]:
+        missing, handled, total = [], [], 0.0
+        for emp, pi in st_m.items():
+            v = pi_value(pi, r["source_key"])
+            if not v:
+                continue
+            total += v
+            who = f"{emp} {ridx.get(emp, {}).get('name', '')}".strip()
+            why = special_rule_owner(r["source_key"], emp)
+            (handled if why else missing).append((who, v, why))
+        if missing:
+            impact = (f"⚠️ 当月に金額あり（{len(missing)}名 {sum(v for _w, v, _y in missing):,.0f}円）"
+                      "＝生成CSVから漏れています: "
+                      + "、".join(f"{w} {v:,.0f}円" for w, v, _y in missing))
+        elif handled:
+            impact = ("影響なし（特別ルールで計上済み: "
+                      + "、".join(f"{w} {v:,.0f}円 … {y}" for w, v, y in handled) + "）")
+        else:
+            impact = "影響なし（当月は該当者なし）"
+        out.append({"row": r, "people": len(missing) + len(handled), "total": total,
+                    "impact": impact})
+    return out
+
+
+def build_kensan(month, prev, files, st_m, st_prev, master, alerts=None, ridx=None):
     lines = [f"# 検算シート {ym_compact(month)}（C-2骨格）", "",
              f"生成: 勤怠チェッカー 経理モード（{now_iso()}）", "",
              "| ファイル | 取引数 | 行数 | 金額合計 |", "|---|---|---|---|"]
@@ -1032,14 +1087,47 @@ def build_kensan(month, prev, files, st_m, st_prev, master):
     for k, v in sorted(totals_by(files["給与"], "品目").items(), key=lambda kv: -abs(kv[1])):
         lines.append(f"| {k} | {v:,} |")
     # jinjer 側との突合（構成上一致するはずの代表値＝パイプライン健全性チェック）
+    soosai_rows = sorted((alerts or {}).get("juminzei_soosai", set()))
+    soosai = sum(t for _e, _n, t, _a in soosai_rows)
     juminzei_api = sum(pi_value(pi, "salary_deduction_items:deduction41") for pi in st_m.values())
     juminzei_csv = sum(r["金額"] for t in files["住民税"] for r in t["rows"])
-    lines += ["", "## パイプライン健全性（構成上一致するはずの値）", "",
-              f"- 住民税: API合計 {juminzei_api:,.0f} vs 住民税ファイル {juminzei_csv:,} → "
-              f"{'一致' if abs(juminzei_api - juminzei_csv) < 1 else '**不一致**'}",
-              f"- 対象従業員: 当月={len(st_m)}名 / 前月={len(st_prev)}名",
-              f"- 採用マスタ行: {master['active_n']}行（status除外: "
-              + (", ".join(f"{k}={v}" for k, v in master["skipped"].items()) or "なし") + "）"]
+    # 前月に会社が立て替えた分は前月CSVで計上済み＝当月は差し引いて出すのが正しい。
+    # 素の合計と比べると毎月「不一致」で赤くなり本物の異常を見落とすため、相殺後で比べる。
+    zansa = juminzei_api - soosai - juminzei_csv
+    if abs(zansa) < 1:
+        juminzei_verdict = "一致" + (f"（うち前月立替の相殺 {soosai:,}円・{len(soosai_rows)}名）"
+                                   if soosai else "")
+    else:
+        juminzei_verdict = f"**不一致（残差 {zansa:,.0f}円）**"
+    juminzei_line = f"- 住民税: API合計 {juminzei_api:,.0f}"
+    if soosai:
+        juminzei_line += f" − 前月立替の相殺 {soosai:,} = {juminzei_api - soosai:,.0f}"
+    juminzei_line += f" vs 住民税ファイル {juminzei_csv:,} → {juminzei_verdict}"
+    lines += ["", "## パイプライン健全性（構成上一致するはずの値）", "", juminzei_line]
+    for emp, name, tatekae, after in soosai_rows:
+        lines.append(f"    - 相殺の内訳: {emp} {name} 立替 {tatekae:,}円 → 当月計上 {after:,}円")
+    lines += [f"- 対象従業員: 当月={len(st_m)}名 / 前月={len(st_prev)}名"]
+
+    # マッピング表のうち今回の仕訳に使った行数（何を見る欄か分かるように内訳を書く）
+    skipped_report = master_skipped_report(master, st_m, ridx)
+    off_n = sum(master["offscope"].values())
+    off_detail = "・".join(f"{k} {v}行" for k, v in master["offscope"].items()) or "なし"
+    lines += ["", "## 採用マスタ行（マッピング表のうち今回の仕訳に使った行）", "",
+              "マッピング表＝ジンジャーの支給・控除項目を freee の品目へ対応づけた表"
+              f"（`{os.path.basename(master['path'])}`）。この欄はその表のうち何行を今回使ったかを示す。", "",
+              f"- マッピング表 全{master['total_n']}行",
+              f"- うち仕訳に使わない {off_n}行（{off_detail}）＝ freee に計上しない項目",
+              f"- 残り {master['total_n'] - off_n}行のうち status「{master['min_status']}」までを採用 → "
+              f"**{master['active_n']}行を使用**"]
+    if skipped_report:
+        lines += ["", f"### status で採用しなかった {len(skipped_report)}行", "",
+                  "| 項目 | source_key | status | 当月の金額 | 判定 |", "|---|---|---|---|---|"]
+        for s in skipped_report:
+            r = s["row"]
+            amt = f"{s['total']:,.0f}円（{s['people']}名）" if s["people"] else "0円（該当者なし）"
+            lines.append(f"| {r['label']} | {r['source_key']} | {r['status']} | {amt} | {s['impact']} |")
+    else:
+        lines += ["", f"- status で除外した行はなし（{master['min_status']}以外の行が無い）"]
     return lines
 
 
@@ -1364,7 +1452,7 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
 
     kensan_path = os.path.join(out_dir, f"検算_{mc}.md")
     with open(kensan_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(build_kensan(month, prev, files, st_m, st_prev, master)))
+        f.write("\n".join(build_kensan(month, prev, files, st_m, st_prev, master, alerts, ridx)))
     yokakunin_path = os.path.join(out_dir, f"要確認_{mc}.md")
     with open(yokakunin_path, "w", encoding="utf-8") as f:
         f.write("\n".join(build_yokakunin(month, alerts, master)))

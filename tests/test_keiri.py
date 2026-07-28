@@ -7,7 +7,8 @@
 import os
 import unittest
 
-from services.keiri_engine import jp_date, split_halves, split_shaho_chosei, ym_add
+from services.keiri_engine import (YAKUIN_LOAN, build_kensan, jp_date, master_skipped_report,
+                                   split_halves, split_shaho_chosei, ym_add)
 from services.keiri_keihi_tenki import MAPPING_CSV, classify, decompose, load_mapping
 
 
@@ -101,6 +102,86 @@ class KeihiTenkiTests(unittest.TestCase):
         self.assertEqual(total, 550)
         self.assertEqual({k[0]: v for k, v in by_item.items()}, {"雑費": 550})
         self.assertIn("ほか4件", list(biko.values())[0])
+
+
+def _master(skipped_rows=(), active_n=38, total_n=185):
+    """検算シートが読むぶんだけのマスタ（load_master の戻り値の部分集合）。"""
+    from collections import Counter
+    return {"skipped_rows": list(skipped_rows), "active_n": active_n, "total_n": total_n,
+            "skipped": Counter(r["status"] for r in skipped_rows),
+            "offscope": Counter({"対象外": 146}), "min_status": "確定",
+            "path": r"Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv"}
+
+
+def _skipped_row(source_key, label, status="推定"):
+    return {"source_key": source_key, "label": label, "status": status}
+
+
+def _deduction_pi(source_key, value):
+    array, item_id = source_key.split(":")
+    return {array: [{"id": item_id, "value": value}]}
+
+
+class KensanJuminzeiTests(unittest.TestCase):
+    """住民税の『不一致』が毎月赤く出ていた件（谷津さん指摘 2026-07-28）。
+
+    差は前月に会社が立て替えた分の相殺そのもの＝正常。相殺分を引いてから比べる。
+    """
+
+    def _line(self, api_total, csv_total, soosai):
+        st_m = {"2026001": _deduction_pi("salary_deduction_items:deduction41", api_total)}
+        files = {"住民税": [{"rows": [{"金額": csv_total, "勘定科目": "預り金", "品目": "住民税"}]}],
+                 "給与": [], "健康保険": [], "厚生年金": []}
+        alerts = {"juminzei_soosai": soosai}
+        lines = build_kensan("2026-07", "2026-06", files, st_m, st_m, _master(), alerts)
+        return next(l for l in lines if l.startswith("- 住民税:"))
+
+    def test_offset_is_reported_as_match(self):
+        """2026-07 実測: 3,419,600 − 16,900(奥山5,800+柳場11,100) = 3,402,700。"""
+        line = self._line(3419600, 3402700,
+                          {("2025029", "奥山 昌苗", 5800, 4700),
+                           ("2026010", "柳場 涼馬", 11100, 10300)})
+        self.assertIn("一致", line)
+        self.assertNotIn("不一致", line)
+        self.assertIn("前月立替の相殺 16,900円・2名", line)
+
+    def test_plain_match_without_offset(self):
+        line = self._line(3402700, 3402700, set())
+        self.assertIn("一致", line)
+        self.assertNotIn("相殺", line)
+
+    def test_real_gap_still_flagged(self):
+        """相殺で説明できない残差は今までどおり不一致で出す（見張りを殺さない）。"""
+        line = self._line(3419600, 3400000, {("2025029", "奥山 昌苗", 5800, 4700)})
+        self.assertIn("**不一致（残差 13,800円）**", line)
+
+
+class MasterSkippedReportTests(unittest.TestCase):
+    """『採用マスタ行 38行（status除外: 推定=1）』が何の欄か分からない件への対応。"""
+
+    def test_no_amount_this_month_is_harmless(self):
+        row = _skipped_row("salary_deduction_items:deduction3", "貸付金返済")
+        rep = master_skipped_report(_master([row]), {"2026001": _deduction_pi("x:y", 0)})
+        self.assertEqual(rep[0]["people"], 0)
+        self.assertIn("影響なし", rep[0]["impact"])
+
+    def test_amount_without_rule_is_flagged_as_missing(self):
+        row = _skipped_row("salary_deduction_items:deduction3", "貸付金返済")
+        st_m = {"2024001": _deduction_pi("salary_deduction_items:deduction3", 50000)}
+        rep = master_skipped_report(_master([row]), st_m, {"2024001": {"name": "山田 太郎"}})
+        self.assertIn("⚠️", rep[0]["impact"])
+        self.assertIn("漏れています", rep[0]["impact"])
+        self.assertIn("2024001 山田 太郎 50,000円", rep[0]["impact"])
+
+    def test_special_rule_owner_is_not_a_false_alarm(self):
+        """三谷さんの貸付金返済は役員貸付金の特別ルールで生成済み＝漏れではない。"""
+        for key in YAKUIN_LOAN["source_keys"]:
+            row = _skipped_row(key, "貸付金返済")
+            st_m = {YAKUIN_LOAN["employee_id"]: _deduction_pi(key, YAKUIN_LOAN["payment"])}
+            rep = master_skipped_report(_master([row]), st_m,
+                                        {YAKUIN_LOAN["employee_id"]: {"name": "三谷 一志"}})
+            self.assertNotIn("⚠️", rep[0]["impact"], key)
+            self.assertIn("特別ルールで計上済み", rep[0]["impact"])
 
 
 class DateHelperTests(unittest.TestCase):
