@@ -1717,6 +1717,120 @@ def keiri_download(ym, filename):
     return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
 
 
+# =============================================================================
+# メール下書きモード — 一覧表×テンプレート×メール台帳 → Outlook 下書き
+# =============================================================================
+# 作るのは下書きまで（直接送信のルートは存在しない）。送信は人が Outlook で行う。
+
+@app.route("/mail_templates")
+def route_mail_templates():
+    """共有フォルダのテンプレートJSONを一覧で返す（無ければ空）。"""
+    from services.mail_draft import load_templates
+    path = Config.MAIL_TEMPLATES_JSON
+    try:
+        templates = load_templates(path)
+    except ValueError as e:
+        return jsonify({"success": False, "errors": [str(e)], "path": path}), 400
+    return jsonify({"success": True, "templates": templates, "path": path})
+
+
+@app.route("/mail_templates_save", methods=["POST"])
+def route_mail_templates_save():
+    """テンプレートを保存/削除する（delete=1 で削除）。共有JSONなので再ビルド不要で全員に効く。"""
+    from services.mail_draft import save_template
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "errors": ["テンプレート名を入力してください"]}), 400
+    template = {
+        "name": name,
+        "subject": request.form.get("subject") or "",
+        "body": request.form.get("body") or "",
+        "cc": (request.form.get("cc") or "").strip(),
+        "importance": (request.form.get("importance") or "normal").strip(),
+    }
+    try:
+        templates = save_template(Config.MAIL_TEMPLATES_JSON, template,
+                                  delete=(request.form.get("delete") or "") == "1")
+    except (ValueError, OSError) as e:
+        return jsonify({"success": False, "errors": [f"テンプレートを保存できません: {e}"]}), 400
+    return jsonify({"success": True, "templates": templates})
+
+
+def _mail_build_plans_from_form():
+    """preview / drafts 共通: フォーム内容から差し込み計画を作る。(plans, meta, error_response)"""
+    from services.mail_draft import build_plans_for
+    table_path = _clean_path_input(request.form.get("table_path"))
+    if not table_path:
+        return None, None, (jsonify({"success": False,
+                                     "errors": ["対象者の一覧表パスを入力してください"]}), 400)
+    if not os.path.exists(table_path):
+        return None, None, (jsonify({"success": False,
+                                     "errors": [f"一覧表が見つかりません: {table_path}"]}), 400)
+    address_book = _clean_path_input(request.form.get("address_book")) or Config.MAIL_ADDRESS_BOOK
+    if not os.path.exists(address_book):
+        return None, None, (jsonify({"success": False,
+                                     "errors": [f"メール台帳が見つかりません: {address_book}"]}), 400)
+    template = {
+        "subject": request.form.get("subject") or "",
+        "body": request.form.get("body") or "",
+        "cc": (request.form.get("cc") or "").strip(),
+        "importance": (request.form.get("importance") or "normal").strip(),
+    }
+    if not template["subject"].strip() or not template["body"].strip():
+        return None, None, (jsonify({"success": False,
+                                     "errors": ["件名と本文を入力してください"]}), 400)
+    try:
+        plans, meta = build_plans_for(table_path, address_book, template)
+    except (ValueError, FileNotFoundError) as e:
+        return None, None, (jsonify({"success": False, "errors": [str(e)]}), 400)
+    return plans, meta, None
+
+
+@app.route("/mail_preview", methods=["POST"])
+def route_mail_preview():
+    """差し込み結果と宛先突合のプレビュー。この時点では Outlook に一切触らない。"""
+    try:
+        plans, meta, err = _mail_build_plans_from_form()
+    except Exception as e:
+        logger.exception("mail_preview failed")
+        return jsonify({"success": False, "errors": [f"プレビューに失敗しました: {e}"]}), 500
+    if err:
+        return err
+    payload = {"success": True, "plans": plans}
+    payload.update(meta)
+    return jsonify(payload)
+
+
+@app.route("/mail_drafts", methods=["POST"])
+def route_mail_drafts():
+    """プレビューで選択された人だけ Outlook の下書きを作成する（送信はしない）。
+
+    宛先・本文はサーバー側で毎回作り直す（クライアント改変を信用しない）。
+    要確認の人は選択されていても作らない。
+    """
+    from services.mail_draft import create_drafts
+    try:
+        selected = json.loads(request.form.get("selected_ids") or "[]")
+    except json.JSONDecodeError:
+        return jsonify({"success": False, "errors": ["選択内容を読み取れません"]}), 400
+    if not isinstance(selected, list) or not selected:
+        return jsonify({"success": False, "errors": ["作成対象が選択されていません"]}), 400
+    try:
+        plans, meta, err = _mail_build_plans_from_form()
+        if err:
+            return err
+        result = create_drafts(plans, only_ids=[str(item) for item in selected],
+                               log_dir=Config.MAIL_OUTPUT_DIR)
+    except RuntimeError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+    except Exception as e:
+        logger.exception("mail_drafts failed")
+        return jsonify({"success": False, "errors": [f"下書き作成に失敗しました: {e}"]}), 500
+    payload = {"success": True}
+    payload.update(result)
+    return jsonify(payload)
+
+
 def _read_text(path):
     try:
         with open(path, "r", encoding="utf-8") as f:

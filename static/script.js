@@ -115,11 +115,13 @@ function applyModeUI(mode) {
     const batchCompareCard = document.getElementById('batch-compare-card');
     const expenseCard = document.getElementById('expense-card');
     const keiriCard = document.getElementById('keiri-card');
+    const mailCard = document.getElementById('mail-card');
 
     const isSchedule = mode === 'csv_export';
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
-    const isMatch = !isSchedule && !isExpense && !isKeiri;
+    const isMail = mode === 'mail';
+    const isMatch = !isSchedule && !isExpense && !isKeiri && !isMail;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -152,6 +154,11 @@ function applyModeUI(mode) {
     if (expenseCard) expenseCard.style.display = isExpense ? '' : 'none';
     // 経理モード: 仕訳CSV生成カードのみ表示
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
+    // メール下書きモード: メールカードのみ表示（初回表示時にテンプレ一覧を読み込む）
+    if (mailCard) {
+        mailCard.style.display = isMail ? '' : 'none';
+        if (isMail) loadMailTemplates();
+    }
 }
 
 document.querySelectorAll('input[name="mode"]').forEach(radio => {
@@ -1476,6 +1483,234 @@ if (keiriRunBtn) {
             status.textContent = '';
         } finally {
             keiriRunBtn.disabled = false;
+        }
+    });
+}
+
+// =============================================================================
+// メール下書きモード — 一覧表×テンプレート → Outlook下書き（送信機能なし）
+// =============================================================================
+
+let mailPlans = [];
+let mailTemplates = [];
+let mailTemplatesLoaded = false;
+
+function mailEsc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function mailShowError(msgs) {
+    const el = document.getElementById('mail-error-area');
+    if (!el) return;
+    const list = Array.isArray(msgs) ? msgs : [msgs];
+    el.innerHTML = list.map(m => '<div>' + mailEsc(m) + '</div>').join('');
+    el.style.display = list.length ? 'block' : 'none';
+}
+
+async function loadMailTemplates(force) {
+    if (mailTemplatesLoaded && !force) return;
+    const select = document.getElementById('mail-template-select');
+    if (!select) return;
+    try {
+        const res = await fetch('/mail_templates');
+        const data = await res.json();
+        if (!data.success) { mailShowError(data.errors || []); return; }
+        mailTemplates = data.templates || [];
+        const current = select.value;
+        select.innerHTML = '<option value="">（選択すると下の欄に読み込みます）</option>'
+            + mailTemplates.map(t => '<option value="' + mailEsc(t.name) + '">' + mailEsc(t.name) + '</option>').join('');
+        if (current && mailTemplates.some(t => t.name === current)) select.value = current;
+        mailTemplatesLoaded = true;
+    } catch (e) {
+        mailShowError('テンプレート一覧の取得に失敗しました: ' + e);
+    }
+}
+
+const mailTemplateSelect = document.getElementById('mail-template-select');
+if (mailTemplateSelect) {
+    mailTemplateSelect.addEventListener('change', () => {
+        const tpl = mailTemplates.find(t => t.name === mailTemplateSelect.value);
+        if (!tpl) return;
+        document.getElementById('mail-template-name').value = tpl.name;
+        document.getElementById('mail-subject').value = tpl.subject || '';
+        document.getElementById('mail-body').value = tpl.body || '';
+        document.getElementById('mail-cc').value = tpl.cc || '';
+        document.getElementById('mail-importance').value = tpl.importance || 'normal';
+    });
+}
+
+const mailTemplateSaveBtn = document.getElementById('mail-template-save-btn');
+if (mailTemplateSaveBtn) {
+    mailTemplateSaveBtn.addEventListener('click', async () => {
+        mailShowError([]);
+        const name = (document.getElementById('mail-template-name').value || '').trim();
+        if (!name) { mailShowError('テンプレート名を入力してください'); return; }
+        const fd = new FormData();
+        fd.append('name', name);
+        fd.append('subject', document.getElementById('mail-subject').value);
+        fd.append('body', document.getElementById('mail-body').value);
+        fd.append('cc', document.getElementById('mail-cc').value);
+        fd.append('importance', document.getElementById('mail-importance').value);
+        try {
+            const res = await fetch('/mail_templates_save', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['保存に失敗しました']); return; }
+            await loadMailTemplates(true);
+            document.getElementById('mail-template-select').value = name;
+            document.getElementById('mail-status').textContent = 'テンプレート「' + name + '」を保存しました';
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+        }
+    });
+}
+
+const mailTemplateDeleteBtn = document.getElementById('mail-template-delete-btn');
+if (mailTemplateDeleteBtn) {
+    mailTemplateDeleteBtn.addEventListener('click', async () => {
+        mailShowError([]);
+        const select = document.getElementById('mail-template-select');
+        const name = select ? select.value : '';
+        if (!name) { mailShowError('削除するテンプレートをプルダウンで選んでください'); return; }
+        if (!window.confirm('テンプレート「' + name + '」を削除します。よろしいですか？')) return;
+        const fd = new FormData();
+        fd.append('name', name);
+        fd.append('delete', '1');
+        try {
+            const res = await fetch('/mail_templates_save', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['削除に失敗しました']); return; }
+            await loadMailTemplates(true);
+            document.getElementById('mail-status').textContent = 'テンプレート「' + name + '」を削除しました';
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+        }
+    });
+}
+
+function mailFormData() {
+    const fd = new FormData();
+    fd.append('table_path', document.getElementById('mail-table-path').value);
+    fd.append('address_book', document.getElementById('mail-address-book').value);
+    fd.append('subject', document.getElementById('mail-subject').value);
+    fd.append('body', document.getElementById('mail-body').value);
+    fd.append('cc', document.getElementById('mail-cc').value);
+    fd.append('importance', document.getElementById('mail-importance').value);
+    return fd;
+}
+
+function mailSelectedIds() {
+    return Array.from(document.querySelectorAll('.mail-plan-check:checked')).map(cb => cb.dataset.id);
+}
+
+function mailUpdateDraftsButton() {
+    const btn = document.getElementById('mail-drafts-btn');
+    if (!btn) return;
+    const count = mailSelectedIds().length;
+    btn.disabled = count === 0;
+    btn.textContent = '✉️ 選択した ' + count + ' 件の下書きをOutlookに作成';
+}
+
+function mailRenderPlans(data) {
+    const hint = document.getElementById('mail-columns-hint');
+    if (hint) {
+        hint.innerHTML = '差し込みに使える列: ' + (data.columns || [])
+            .map(c => '<code>{{' + mailEsc(c) + '}}</code>').join(' ');
+    }
+    let html = '<table class="keiri-md-table"><tr><th>作成</th><th>社員番号</th><th>氏名</th>'
+             + '<th>宛先</th><th>件名</th><th>状態</th><th>本文</th></tr>';
+    for (const p of mailPlans) {
+        const ok = p.status === 'OK';
+        const check = ok
+            ? '<input type="checkbox" class="mail-plan-check" data-id="' + mailEsc(p.employee_id) + '" checked>'
+            : '—';
+        const to = p.to.length ? mailEsc(p.to.join('; ')) : '<span style="color:#c00">なし</span>';
+        const bcc = p.bcc.length ? '<br><span class="hint">BCC: ' + mailEsc(p.bcc.join('; ')) + '</span>' : '';
+        const breakdown = p.breakdown ? '<br><span class="hint">' + mailEsc(p.breakdown) + '</span>' : '';
+        const status = ok
+            ? '<span style="color:#2e7d32">OK</span>'
+            : '<span style="color:#c00; font-weight:bold">要確認</span>';
+        const issues = (p.issues || []).length
+            ? '<br><span class="hint" style="color:#c00">' + p.issues.map(mailEsc).join('<br>') + '</span>' : '';
+        html += '<tr' + (ok ? '' : ' style="background:#fdecec"') + '>'
+            + '<td style="text-align:center">' + check + '</td>'
+            + '<td>' + mailEsc(p.employee_id) + '</td>'
+            + '<td>' + mailEsc(p.name) + '</td>'
+            + '<td>' + to + bcc + breakdown + '</td>'
+            + '<td>' + mailEsc(p.subject) + '</td>'
+            + '<td>' + status + issues + '</td>'
+            + '<td><details><summary style="cursor:pointer">本文</summary><pre style="white-space:pre-wrap; font-size:11px; margin:4px 0">'
+            + mailEsc(p.body) + '</pre></details></td></tr>';
+    }
+    html += '</table>';
+    const el = document.getElementById('mail-plans');
+    el.innerHTML = html;
+    el.querySelectorAll('.mail-plan-check').forEach(cb => cb.addEventListener('change', mailUpdateDraftsButton));
+    mailUpdateDraftsButton();
+}
+
+const mailPreviewBtn = document.getElementById('mail-preview-btn');
+if (mailPreviewBtn) {
+    mailPreviewBtn.addEventListener('click', async () => {
+        const status = document.getElementById('mail-status');
+        mailShowError([]);
+        document.getElementById('mail-drafts-result').style.display = 'none';
+        mailPreviewBtn.disabled = true;
+        status.textContent = 'プレビューを作成中…';
+        try {
+            const res = await fetch('/mail_preview', { method: 'POST', body: mailFormData() });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['プレビューに失敗しました']); status.textContent = ''; return; }
+            mailPlans = data.plans || [];
+            document.getElementById('mail-cnt-total').textContent = data.counts.total;
+            document.getElementById('mail-cnt-ok').textContent = data.counts.ok;
+            document.getElementById('mail-cnt-warn').textContent = data.counts.warn;
+            mailRenderPlans(data);
+            document.getElementById('mail-result-area').style.display = 'block';
+            status.textContent = 'プレビューを確認して、作成する人にチェックを入れてください（まだ何も作られていません）';
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            mailPreviewBtn.disabled = false;
+        }
+    });
+}
+
+const mailDraftsBtn = document.getElementById('mail-drafts-btn');
+if (mailDraftsBtn) {
+    mailDraftsBtn.addEventListener('click', async () => {
+        const status = document.getElementById('mail-drafts-status');
+        mailShowError([]);
+        const ids = mailSelectedIds();
+        if (!ids.length) return;
+        if (!window.confirm(ids.length + '件の下書きをOutlookに作成します。よろしいですか？\n（送信はされません。送信はOutlookで1通ずつ確認してから行ってください）')) return;
+        const fd = mailFormData();
+        fd.append('selected_ids', JSON.stringify(ids));
+        mailDraftsBtn.disabled = true;
+        status.textContent = 'Outlookに下書きを作成中…';
+        try {
+            const res = await fetch('/mail_drafts', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['下書き作成に失敗しました']); status.textContent = ''; return; }
+            const failed = (data.results || []).filter(r => r.result !== '下書き作成済');
+            let html = '✅ 下書き作成 ' + data.processed + '件 / スキップ ' + data.skipped + '件 / 失敗 ' + data.failed + '件';
+            html += '<br>ログ: <code>' + mailEsc(data.log_path) + '</code>';
+            if (failed.length) {
+                html += '<br><span style="color:#c00">' + failed.map(r =>
+                    mailEsc(r.employee_id + ' ' + r.name + ': ' + r.result)).join('<br>') + '</span>';
+            }
+            html += '<br><b>Outlook の「下書き」フォルダを開いて、内容を確認してから送信してください。</b>';
+            const el = document.getElementById('mail-drafts-result');
+            el.innerHTML = html;
+            el.style.display = 'block';
+            status.textContent = '完了';
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            mailDraftsBtn.disabled = false;
+            mailUpdateDraftsButton();
         }
     });
 }

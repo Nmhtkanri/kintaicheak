@@ -15,7 +15,7 @@
             <div class="workflow-kicker">処理モード</div>
             <h2>やりたい作業を選んでください</h2>
         </div>
-        <div class="workflow-note">勤怠チェック / スケジュールアップロード / 経理 / 経費チェック</div>
+        <div class="workflow-note">勤怠チェック / スケジュールアップロード / 経理 / 経費チェック / メール下書き</div>
     </div>
 
     <form id="upload-form" class="workflow-card workflow-card-primary" enctype="multipart/form-data">
@@ -47,6 +47,13 @@
                 <span class="mode-card">
                     <span class="mode-title">経費チェックモード</span>
                     <span class="mode-desc">jinjer勤怠からテレワーク日数・出社日数を集計します</span>
+                </span>
+            </label>
+            <label class="mode-option">
+                <input type="radio" name="mode" value="mail">
+                <span class="mode-card">
+                    <span class="mode-title">メール下書きモード</span>
+                    <span class="mode-desc">一覧表とテンプレートから Outlook の下書きを一括作成します（送信はしません）</span>
                 </span>
             </label>
         </div>
@@ -497,6 +504,81 @@
         </div>
         <div id="keiri-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
+
+    {% raw %}
+    <!-- ==== メール下書きモード: 一覧表×テンプレート → Outlook下書き（送信機能なし）==== -->
+    <div class="workflow-card" id="mail-card" style="border:2px solid #0070c0; display:none">
+        <div class="step-header">
+            <div>
+                <div class="step-number" style="background:#0070c0">✉️</div>
+                <div class="step-copy">
+                    <div class="section-title">メール下書き：一覧表とテンプレートから個別メールを一括作成</div>
+                    <p class="hint">社員番号入りの一覧表（Excel/CSV）を読み込み、メール台帳と突合して
+                        <b>1人1通の Outlook 下書き</b>を作ります。件名・本文には <code>{{列名}}</code> で一覧表の値を差し込めます。
+                        台帳に無い人・氏名相違・差し込みできない人は「要確認」として自動で対象外になります。
+                        <b>このモードが作るのは下書きまでです。送信は Outlook で内容を確認してから自分で行ってください。</b></p>
+                </div>
+            </div>
+        </div>
+        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+            <label>対象者の一覧表（Excel/CSV・「社員番号」列が必要。他の列は差し込みに使えます）:
+                <input type="text" id="mail-table-path" placeholder="例: Z:\API連携\outputs\jinjer_paid_leave\有休取得4日以下_20260401-20260727.xlsx"
+                       style="width:100%; padding:6px 10px; margin-top:4px"></label>
+            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
+                <label style="font-size:12px">テンプレート<br>
+                    <select id="mail-template-select" style="padding:6px 10px; min-width:240px; margin-top:3px">
+                        <option value="">（選択すると下の欄に読み込みます）</option>
+                    </select></label>
+                <button type="button" class="btn" id="mail-template-save-btn">💾 現在の内容を保存</button>
+                <button type="button" class="btn" id="mail-template-delete-btn">🗑 選択中を削除</button>
+            </div>
+            <label>テンプレート名（保存するときの名前）:
+                <input type="text" id="mail-template-name" placeholder="例: 有休取得のお願い"
+                       style="width:60%; padding:6px 10px; margin-top:4px"></label>
+            <label>件名:
+                <input type="text" id="mail-subject" placeholder="例: 【ご確認】年次有給休暇の取得について"
+                       style="width:100%; padding:6px 10px; margin-top:4px"></label>
+            <label>本文（{{列名}} で一覧表の値を差し込み）:
+                <textarea id="mail-body" rows="9" placeholder="{{氏名}}さん&#10;&#10;お疲れさまです。管理部です。…"
+                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:inherit"></textarea></label>
+            <div style="display:flex; gap:14px; flex-wrap:wrap">
+                <label>CC（任意・; 区切り）:
+                    <input type="text" id="mail-cc" placeholder="例: kanri@nmht.co.jp"
+                           style="width:300px; padding:6px 10px; margin-top:4px"></label>
+                <label>重要度:
+                    <select id="mail-importance" style="padding:6px 10px; margin-top:4px">
+                        <option value="normal" selected>通常</option>
+                        <option value="high">高</option>
+                    </select></label>
+            </div>
+            <details style="font-size:12px">
+                <summary style="cursor:pointer; color:#0070c0">詳細設定（ふだんは触らなくて大丈夫です）</summary>
+                <label style="display:block; margin-top:8px">メール台帳（空欄なら共有フォルダの既定。B=社員番号/C=氏名/D=社用/E=就業先/F=個人）
+                    <input type="text" id="mail-address-book" placeholder="Z:\NMHT社員勤務表\便利マクロ\メール一斉送信マクロ.xlsm"
+                           style="width:100%; padding:6px 10px; margin-top:4px"></label>
+            </details>
+            <div style="margin-top:6px">
+                <button type="button" class="btn btn-primary" id="mail-preview-btn" style="background:#0070c0">👀 プレビュー（まだ何も作りません）</button>
+                <span id="mail-status" style="margin-left:12px; color:#666"></span>
+            </div>
+        </div>
+        <div id="mail-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card"><div class="card-label">一覧表の人数</div><div class="card-value" id="mail-cnt-total">0</div></div>
+                <div class="summary-card"><div class="card-label">作成できる</div><div class="card-value" id="mail-cnt-ok">0</div></div>
+                <div class="summary-card"><div class="card-label">要確認（対象外）</div><div class="card-value" id="mail-cnt-warn">0</div></div>
+            </div>
+            <div class="hint" id="mail-columns-hint" style="margin-bottom:8px"></div>
+            <div id="mail-plans" style="max-height:420px; overflow:auto"></div>
+            <div style="margin-top:10px">
+                <button type="button" class="btn btn-primary" id="mail-drafts-btn" style="background:#0070c0" disabled>✉️ 選択した下書きをOutlookに作成</button>
+                <span id="mail-drafts-status" style="margin-left:12px; color:#666"></span>
+            </div>
+            <div id="mail-drafts-result" style="display:none; margin-top:8px; font-size:13px"></div>
+        </div>
+        <div id="mail-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+    {% endraw %}
 
     <div class="workflow-card" id="expense-card" style="border:2px solid #548235; display:none">
         <div class="step-header">

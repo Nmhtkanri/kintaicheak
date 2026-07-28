@@ -102,6 +102,17 @@ class Config:
     # 勤怠管理者ロールを付与してから .env に JINJER_IMPORT_EXECUTOR_ID=9999999 を設定する。
     JINJER_IMPORT_EXECUTOR_ID = os.environ.get("JINJER_IMPORT_EXECUTOR_ID", "")
 
+    # ------------------------------------------------------------------
+    # メール下書きモード（Outlook 下書きの一括作成。送信機能は作らない）
+    # ------------------------------------------------------------------
+    # 台帳・テンプレートは共有フォルダを読む（経理モードのマッピング表方式。再ビルド不要）。
+    MAIL_ADDRESS_BOOK = os.environ.get(
+        "MAIL_ADDRESS_BOOK", r"Z:\NMHT社員勤務表\便利マクロ\メール一斉送信マクロ.xlsm")
+    MAIL_TEMPLATES_JSON = os.environ.get(
+        "MAIL_TEMPLATES_JSON", r"Z:\API連携\docs\メールテンプレート.json")
+    # 下書き作成ログ（宛先を含むのでローカル）
+    MAIL_OUTPUT_DIR = os.environ.get("MAIL_OUTPUT_DIR", "outputs/mail")
+
     # jinjer CSV カラムマッピング候補
     # ※先頭に置くほど優先度が高い（完全一致を試みたあと部分一致）
     JINJER_COLUMN_MAPPING = {

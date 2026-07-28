@@ -32,6 +32,7 @@ python -m PyInstaller ^
   --hidden-import services.keiri_keihi_tenki ^
   --hidden-import services.keiri_api ^
   --hidden-import services.keiri_diff ^
+  --hidden-import services.mail_draft ^
   launcher.py
 
 if errorlevel 1 goto :build_failed
