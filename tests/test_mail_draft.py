@@ -88,13 +88,20 @@ class BuildPlansTest(unittest.TestCase):
         self.row = {"社員番号": "2024001", "氏名": "山田太郎", "不足日数": 2.0}
         self.book = {"2024001": [entry(company=("c@x.jp",), personal=("p@z.jp",))]}
 
-    def test_ok_plan(self):
+    def test_ok_plan_default_is_to_only(self):
         plan = plans_for([self.row], self.book)[0]
         self.assertEqual(plan["status"], STATUS_OK)
         self.assertEqual(plan["to"], ["c@x.jp"])
-        self.assertEqual(plan["bcc"], ["p@z.jp"])
+        self.assertEqual(plan["bcc"], [])  # 既定はToのみ（2026-07-29変更）
+        self.assertEqual(plan["breakdown"], "To:社用")
         self.assertEqual(plan["subject"], "【連絡】山田太郎さんへ")
         self.assertIn("あと2日です", plan["body"])
+
+    def test_bcc_mode_adds_personal_bcc(self):
+        template = dict(TEMPLATE, bcc_mode="bcc")
+        plan = plans_for([self.row], self.book, template)[0]
+        self.assertEqual(plan["bcc"], ["p@z.jp"])
+        self.assertEqual(plan["breakdown"], "To:社用 / BCC:個人")
 
     def test_missing_ledger_entry(self):
         plan = plans_for([{"社員番号": "9999999", "氏名": "誰か", "不足日数": 1}], self.book)[0]

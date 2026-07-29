@@ -1747,7 +1747,7 @@ def route_mail_templates_save():
         "subject": request.form.get("subject") or "",
         "body": request.form.get("body") or "",
         "cc": (request.form.get("cc") or "").strip(),
-        "bcc_mode": (request.form.get("bcc_mode") or "bcc").strip(),
+        "bcc_mode": (request.form.get("bcc_mode") or "to_only").strip(),
         "importance": (request.form.get("importance") or "normal").strip(),
     }
     try:
@@ -1777,7 +1777,7 @@ def _mail_build_plans_from_form():
         "body": request.form.get("body") or "",
         # CC空欄は管理部の既定CCを自動適用（谷津さん指定: CCなし運用はあり得ないため）
         "cc": (request.form.get("cc") or "").strip() or Config.MAIL_DEFAULT_CC,
-        "bcc_mode": (request.form.get("bcc_mode") or "bcc").strip(),
+        "bcc_mode": (request.form.get("bcc_mode") or "to_only").strip(),
         "importance": (request.form.get("importance") or "normal").strip(),
     }
     if not template["subject"].strip() or not template["body"].strip():

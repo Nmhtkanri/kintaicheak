@@ -1540,7 +1540,7 @@ if (mailTemplateSelect) {
         document.getElementById('mail-subject').value = tpl.subject || '';
         document.getElementById('mail-body').value = tpl.body || '';
         document.getElementById('mail-cc').value = tpl.cc || mailDefaultCc;
-        document.getElementById('mail-bcc-mode').value = (tpl.bcc_mode === 'to_only') ? 'to_only' : 'bcc';
+        document.getElementById('mail-bcc-mode').value = (tpl.bcc_mode === 'bcc') ? 'bcc' : 'to_only';
         document.getElementById('mail-importance').value = tpl.importance || 'normal';
     });
 }
