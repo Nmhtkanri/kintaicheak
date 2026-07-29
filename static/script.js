@@ -1494,6 +1494,7 @@ if (keiriRunBtn) {
 let mailPlans = [];
 let mailTemplates = [];
 let mailTemplatesLoaded = false;
+let mailDefaultCc = '';
 
 function mailEsc(s) {
     return String(s == null ? '' : s)
@@ -1517,6 +1518,9 @@ async function loadMailTemplates(force) {
         const data = await res.json();
         if (!data.success) { mailShowError(data.errors || []); return; }
         mailTemplates = data.templates || [];
+        mailDefaultCc = data.default_cc || '';
+        const ccField = document.getElementById('mail-cc');
+        if (ccField && !ccField.value && mailDefaultCc) ccField.value = mailDefaultCc;
         const current = select.value;
         select.innerHTML = '<option value="">（選択すると下の欄に読み込みます）</option>'
             + mailTemplates.map(t => '<option value="' + mailEsc(t.name) + '">' + mailEsc(t.name) + '</option>').join('');
@@ -1535,7 +1539,8 @@ if (mailTemplateSelect) {
         document.getElementById('mail-template-name').value = tpl.name;
         document.getElementById('mail-subject').value = tpl.subject || '';
         document.getElementById('mail-body').value = tpl.body || '';
-        document.getElementById('mail-cc').value = tpl.cc || '';
+        document.getElementById('mail-cc').value = tpl.cc || mailDefaultCc;
+        document.getElementById('mail-bcc-mode').value = (tpl.bcc_mode === 'to_only') ? 'to_only' : 'bcc';
         document.getElementById('mail-importance').value = tpl.importance || 'normal';
     });
 }
@@ -1551,6 +1556,7 @@ if (mailTemplateSaveBtn) {
         fd.append('subject', document.getElementById('mail-subject').value);
         fd.append('body', document.getElementById('mail-body').value);
         fd.append('cc', document.getElementById('mail-cc').value);
+        fd.append('bcc_mode', document.getElementById('mail-bcc-mode').value);
         fd.append('importance', document.getElementById('mail-importance').value);
         try {
             const res = await fetch('/mail_templates_save', { method: 'POST', body: fd });
@@ -1595,6 +1601,7 @@ function mailFormData() {
     fd.append('subject', document.getElementById('mail-subject').value);
     fd.append('body', document.getElementById('mail-body').value);
     fd.append('cc', document.getElementById('mail-cc').value);
+    fd.append('bcc_mode', document.getElementById('mail-bcc-mode').value);
     fd.append('importance', document.getElementById('mail-importance').value);
     return fd;
 }

@@ -124,6 +124,14 @@ class BuildPlansTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             plans_for([self.row], self.book, template)
 
+    def test_to_only_mode_drops_bcc(self):
+        template = dict(TEMPLATE, bcc_mode="to_only")
+        plan = plans_for([self.row], self.book, template)[0]
+        self.assertEqual(plan["status"], STATUS_OK)
+        self.assertEqual(plan["to"], ["c@x.jp"])
+        self.assertEqual(plan["bcc"], [])
+        self.assertEqual(plan["breakdown"], "To:社用")
+
 
 class DummyMailer:
     def __init__(self, fail_times=0):
@@ -168,10 +176,11 @@ class TemplateStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "テンプレ.json")
             save_template(path, {"name": "案内", "subject": "S", "body": "B",
-                                 "cc": "", "importance": "high"})
+                                 "cc": "", "bcc_mode": "to_only", "importance": "high"})
             templates = load_templates(path)
             self.assertEqual(len(templates), 1)
             self.assertEqual(templates[0]["importance"], "high")
+            self.assertEqual(templates[0]["bcc_mode"], "to_only")
             save_template(path, {"name": "案内"}, delete=True)
             self.assertEqual(load_templates(path), [])
 

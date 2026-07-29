@@ -110,6 +110,8 @@ class Config:
         "MAIL_ADDRESS_BOOK", r"Z:\NMHT社員勤務表\便利マクロ\メール一斉送信マクロ.xlsm")
     MAIL_TEMPLATES_JSON = os.environ.get(
         "MAIL_TEMPLATES_JSON", r"Z:\API連携\docs\メールテンプレート.json")
+    # CC が空欄のときに自動で入れる既定CC（管理部の控え。谷津さん指定 2026-07-29）
+    MAIL_DEFAULT_CC = os.environ.get("MAIL_DEFAULT_CC", "kanri@nmht.co.jp")
     # 下書き作成ログ（宛先を含むのでローカル）
     MAIL_OUTPUT_DIR = os.environ.get("MAIL_OUTPUT_DIR", "outputs/mail")
 

@@ -1731,7 +1731,8 @@ def route_mail_templates():
         templates = load_templates(path)
     except ValueError as e:
         return jsonify({"success": False, "errors": [str(e)], "path": path}), 400
-    return jsonify({"success": True, "templates": templates, "path": path})
+    return jsonify({"success": True, "templates": templates, "path": path,
+                    "default_cc": Config.MAIL_DEFAULT_CC})
 
 
 @app.route("/mail_templates_save", methods=["POST"])
@@ -1746,6 +1747,7 @@ def route_mail_templates_save():
         "subject": request.form.get("subject") or "",
         "body": request.form.get("body") or "",
         "cc": (request.form.get("cc") or "").strip(),
+        "bcc_mode": (request.form.get("bcc_mode") or "bcc").strip(),
         "importance": (request.form.get("importance") or "normal").strip(),
     }
     try:
@@ -1773,7 +1775,9 @@ def _mail_build_plans_from_form():
     template = {
         "subject": request.form.get("subject") or "",
         "body": request.form.get("body") or "",
-        "cc": (request.form.get("cc") or "").strip(),
+        # CC空欄は管理部の既定CCを自動適用（谷津さん指定: CCなし運用はあり得ないため）
+        "cc": (request.form.get("cc") or "").strip() or Config.MAIL_DEFAULT_CC,
+        "bcc_mode": (request.form.get("bcc_mode") or "bcc").strip(),
         "importance": (request.form.get("importance") or "normal").strip(),
     }
     if not template["subject"].strip() or not template["body"].strip():

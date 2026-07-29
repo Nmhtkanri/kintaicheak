@@ -287,6 +287,10 @@ def build_mail_plans(
     importance = str(template.get("importance") or "normal")
     if importance not in IMPORTANCE_LEVELS:
         raise ValueError(f"重要度は normal / high を指定してください: {importance}")
+    # bcc: 就業先・個人を本人BCCに入れる（既定） / to_only: Toだけに送る
+    bcc_mode = str(template.get("bcc_mode") or "bcc")
+    if bcc_mode not in ("bcc", "to_only"):
+        bcc_mode = "bcc"
     cc_addresses = split_addresses(template.get("cc"))
     bad_cc = invalid_addresses(cc_addresses)
     if bad_cc:
@@ -328,6 +332,9 @@ def build_mail_plans(
                 problems.append("利用できるメールアドレスがありません")
             elif not problems:
                 to_addresses, bcc_addresses, breakdown = select_recipients(entry)
+                if bcc_mode == "to_only":
+                    bcc_addresses = ()
+                    breakdown = breakdown.split(" / BCC:")[0]
 
         subject, missing_subject = render_template_text(template.get("subject", ""), row, header_set)
         body, missing_body = render_template_text(template.get("body", ""), row, header_set)
@@ -404,11 +411,14 @@ def save_template(path: str | Path, template: dict[str, Any], *, delete: bool = 
             "subject": str(template.get("subject", "")),
             "body": str(template.get("body", "")),
             "cc": str(template.get("cc", "")).strip(),
+            "bcc_mode": str(template.get("bcc_mode", "bcc")),
             "importance": str(template.get("importance", "normal")),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
         if record["importance"] not in IMPORTANCE_LEVELS:
             record["importance"] = "normal"
+        if record["bcc_mode"] not in ("bcc", "to_only"):
+            record["bcc_mode"] = "bcc"
         templates.append(record)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "templates": templates}

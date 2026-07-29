@@ -542,9 +542,14 @@
                 <textarea id="mail-body" rows="9" placeholder="{{氏名}}さん&#10;&#10;お疲れさまです。管理部です。…"
                           style="width:100%; padding:6px 10px; margin-top:4px; font-family:inherit"></textarea></label>
             <div style="display:flex; gap:14px; flex-wrap:wrap">
-                <label>CC（任意・; 区切り）:
-                    <input type="text" id="mail-cc" placeholder="例: kanri@nmht.co.jp"
+                <label>CC（; 区切り・空欄なら管理部の既定CCが自動で入ります）:
+                    <input type="text" id="mail-cc" placeholder="kanri@nmht.co.jp"
                            style="width:300px; padding:6px 10px; margin-top:4px"></label>
+                <label>宛先の扱い:
+                    <select id="mail-bcc-mode" style="padding:6px 10px; margin-top:4px">
+                        <option value="bcc" selected>To＋就業先・個人を本人BCC（既定）</option>
+                        <option value="to_only">Toのみ（BCCに入れない）</option>
+                    </select></label>
                 <label>重要度:
                     <select id="mail-importance" style="padding:6px 10px; margin-top:4px">
                         <option value="normal" selected>通常</option>
