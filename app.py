@@ -1835,6 +1835,75 @@ def route_mail_drafts():
     return jsonify(payload)
 
 
+def _mail_ledger_diff_from_form():
+    """台帳とjinjerの差分を計算する（読み取りのみ）。(diff, address_book_path, error_response)"""
+    from services.mail_draft import load_address_book
+    from services.mail_ledger_sync import compute_ledger_diff, fetch_jinjer_directory
+    address_book = _clean_path_input(request.form.get("address_book")) or Config.MAIL_ADDRESS_BOOK
+    if not os.path.exists(address_book):
+        return None, None, (jsonify({"success": False,
+                                     "errors": [f"メール台帳が見つかりません: {address_book}"]}), 400)
+    book = load_address_book(address_book)
+    directory = fetch_jinjer_directory()
+    return compute_ledger_diff(book, directory), address_book, None
+
+
+@app.route("/mail_ledger_diff", methods=["POST"])
+def route_mail_ledger_diff():
+    """台帳更新のプレビュー。jinjerから最新の従業員・メールを取得して差分だけ返す。"""
+    from services.jinjer_api_client import JinjerAPIError
+    try:
+        diff, address_book, err = _mail_ledger_diff_from_form()
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except (ValueError, FileNotFoundError) as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except Exception as e:
+        logger.exception("mail_ledger_diff failed")
+        return jsonify({"success": False, "errors": [f"差分の取得に失敗しました: {e}"]}), 500
+    if err:
+        return err
+    payload = {"success": True, "address_book": address_book}
+    payload.update(diff)
+    return jsonify(payload)
+
+
+@app.route("/mail_ledger_apply", methods=["POST"])
+def route_mail_ledger_apply():
+    """確認済みの追加・削除だけを台帳に反映する（バックアップ作成→COM書き込み）。
+
+    差分はサーバー側で再計算し、画面で選ばれたIDとの積集合だけを反映する。
+    """
+    from services.jinjer_api_client import JinjerAPIError
+    from services.mail_ledger_sync import apply_ledger_update
+    try:
+        add_ids = set(map(str, json.loads(request.form.get("add_ids") or "[]")))
+        delete_ids = set(map(str, json.loads(request.form.get("delete_ids") or "[]")))
+    except json.JSONDecodeError:
+        return jsonify({"success": False, "errors": ["選択内容を読み取れません"]}), 400
+    if not add_ids and not delete_ids:
+        return jsonify({"success": False, "errors": ["反映対象が選択されていません"]}), 400
+    try:
+        diff, address_book, err = _mail_ledger_diff_from_form()
+        if err:
+            return err
+        additions = [item for item in diff["additions"] if item["id"] in add_ids]
+        retiree_ids = [item["id"] for item in diff["retirees"] if item["id"] in delete_ids]
+        result = apply_ledger_update(address_book, additions, retiree_ids,
+                                     log_dir=Config.MAIL_OUTPUT_DIR)
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except RuntimeError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+    except Exception as e:
+        logger.exception("mail_ledger_apply failed")
+        return jsonify({"success": False, "errors": [f"台帳の更新に失敗しました: {e}"]}), 500
+    payload = {"success": True, "requested_add": len(additions),
+               "requested_delete": len(retiree_ids)}
+    payload.update(result)
+    return jsonify(payload)
+
+
 def _read_text(path):
     try:
         with open(path, "r", encoding="utf-8") as f:

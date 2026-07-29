@@ -1721,3 +1721,126 @@ if (mailDraftsBtn) {
         }
     });
 }
+
+// --- メール台帳の更新（jinjerと同期。確認→反映の2段階） ---
+
+const mailLedgerDiffBtn = document.getElementById('mail-ledger-diff-btn');
+if (mailLedgerDiffBtn) {
+    mailLedgerDiffBtn.addEventListener('click', async () => {
+        const status = document.getElementById('mail-ledger-status');
+        mailShowError([]);
+        mailLedgerDiffBtn.disabled = true;
+        status.textContent = 'jinjerから最新の従業員情報を取得中…（数十秒かかります）';
+        document.getElementById('mail-ledger-apply-result').style.display = 'none';
+        try {
+            const fd = new FormData();
+            fd.append('address_book', document.getElementById('mail-address-book').value);
+            const res = await fetch('/mail_ledger_diff', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['差分の取得に失敗しました']); status.textContent = ''; return; }
+            mailLedgerRender(data);
+            status.textContent = '差分を確認して、反映する行にチェックを入れてください（まだ台帳は書き換えていません）';
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            mailLedgerDiffBtn.disabled = false;
+        }
+    });
+}
+
+function mailLedgerSelected(cls) {
+    return Array.from(document.querySelectorAll('.' + cls + ':checked')).map(cb => cb.dataset.id);
+}
+
+function mailLedgerUpdateApplyButton() {
+    const btn = document.getElementById('mail-ledger-apply-btn');
+    if (!btn) return;
+    const n = mailLedgerSelected('ledger-add-check').length + mailLedgerSelected('ledger-del-check').length;
+    btn.disabled = n === 0;
+    btn.textContent = '📥 チェックした ' + n + ' 件を台帳に反映する';
+}
+
+function mailLedgerRender(data) {
+    const adds = data.additions || [];
+    const dels = data.retirees || [];
+    const summary = '追加候補 <b>' + adds.length + '人</b> / 退職の削除候補 <b>' + dels.length + '人</b>'
+        + ' / アドレス不一致 ' + (data.mismatches || []).length + '件'
+        + ' / 台帳にあるがjinjerに無い番号 ' + (data.missing_in_jinjer || []).length + '件';
+    document.getElementById('mail-ledger-summary').innerHTML = summary;
+    let html = '';
+    if (adds.length) {
+        html += '<div style="font-weight:600; margin:6px 0 2px">追加候補（新入社員）</div>'
+            + '<table class="keiri-md-table"><tr><th>反映</th><th>社員番号</th><th>氏名</th><th>社用(D列)</th><th>個人(F列)</th></tr>';
+        for (const a of adds) {
+            const warn = a.no_email ? ' <span style="color:#c00">jinjerにメール未登録</span>' : '';
+            html += '<tr><td style="text-align:center"><input type="checkbox" class="ledger-add-check" data-id="' + mailEsc(a.id) + '" checked></td>'
+                + '<td>' + mailEsc(a.id) + '</td><td>' + mailEsc(a.name) + warn + '</td>'
+                + '<td>' + mailEsc(a.company_email || '—') + '</td><td>' + mailEsc(a.personal_email || '—') + '</td></tr>';
+        }
+        html += '</table>';
+    }
+    if (dels.length) {
+        html += '<div style="font-weight:600; margin:10px 0 2px; color:#c00000">削除候補（jinjerで退職）</div>'
+            + '<table class="keiri-md-table"><tr><th>反映</th><th>社員番号</th><th>氏名</th><th>退職日</th></tr>';
+        for (const d of dels) {
+            html += '<tr><td style="text-align:center"><input type="checkbox" class="ledger-del-check" data-id="' + mailEsc(d.id) + '" checked></td>'
+                + '<td>' + mailEsc(d.id) + '</td><td>' + mailEsc(d.name) + '</td><td>' + mailEsc(d.retirement_date || '') + '</td></tr>';
+        }
+        html += '</table>';
+    }
+    if ((data.mismatches || []).length) {
+        html += '<div style="font-weight:600; margin:10px 0 2px">アドレス不一致（報告のみ・台帳は変更しません）</div>'
+            + data.mismatches.map(m => '<div class="hint">' + mailEsc(m) + '</div>').join('');
+    }
+    if ((data.missing_in_jinjer || []).length) {
+        html += '<div style="font-weight:600; margin:10px 0 2px">台帳にあるがjinjerに見つからない番号（報告のみ・要確認）</div>'
+            + data.missing_in_jinjer.map(m => '<div class="hint">' + mailEsc(m.id + ' ' + m.name) + '</div>').join('');
+    }
+    if (!adds.length && !dels.length) {
+        html += '<div class="hint">追加・削除はありません。台帳はjinjerと同期できています。</div>';
+    }
+    const tables = document.getElementById('mail-ledger-tables');
+    tables.innerHTML = html;
+    tables.querySelectorAll('.ledger-add-check, .ledger-del-check')
+        .forEach(cb => cb.addEventListener('change', mailLedgerUpdateApplyButton));
+    document.getElementById('mail-ledger-result').style.display = 'block';
+    mailLedgerUpdateApplyButton();
+}
+
+const mailLedgerApplyBtn = document.getElementById('mail-ledger-apply-btn');
+if (mailLedgerApplyBtn) {
+    mailLedgerApplyBtn.addEventListener('click', async () => {
+        const status = document.getElementById('mail-ledger-apply-status');
+        mailShowError([]);
+        const addIds = mailLedgerSelected('ledger-add-check');
+        const delIds = mailLedgerSelected('ledger-del-check');
+        if (!addIds.length && !delIds.length) return;
+        const msg = '台帳を更新します。\n追加 ' + addIds.length + '人 / 削除 ' + delIds.length + '人\n'
+            + '実行前に台帳のバックアップを自動作成します。よろしいですか？';
+        if (!window.confirm(msg)) return;
+        const fd = new FormData();
+        fd.append('address_book', document.getElementById('mail-address-book').value);
+        fd.append('add_ids', JSON.stringify(addIds));
+        fd.append('delete_ids', JSON.stringify(delIds));
+        mailLedgerApplyBtn.disabled = true;
+        status.textContent = '台帳を更新中…（バックアップ→Excel書き込み）';
+        try {
+            const res = await fetch('/mail_ledger_apply', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['台帳の更新に失敗しました']); status.textContent = ''; return; }
+            const el = document.getElementById('mail-ledger-apply-result');
+            el.innerHTML = '✅ 追加 ' + data.added + '人 / 削除 ' + data.deleted + '人 を反映しました'
+                + '<br>バックアップ: <code>' + mailEsc(data.backup_path) + '</code>'
+                + '<br>ログ: <code>' + mailEsc(data.log_path) + '</code>'
+                + '<br><b>もう一度「👀 プレビュー」を押すと、新しい台帳で宛先が突合されます。</b>';
+            el.style.display = 'block';
+            status.textContent = '完了';
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            mailLedgerUpdateApplyButton();
+        }
+    });
+}

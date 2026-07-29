@@ -562,6 +562,22 @@
                     <input type="text" id="mail-address-book" placeholder="Z:\NMHT社員勤務表\便利マクロ\メール一斉送信マクロ.xlsm"
                            style="width:100%; padding:6px 10px; margin-top:4px"></label>
             </details>
+            <div style="margin-top:8px; padding:10px 12px; border:1px dashed #0070c0; border-radius:6px">
+                <div style="font-weight:600; margin-bottom:4px">メール台帳の更新（jinjerと同期）</div>
+                <p class="hint" style="margin:0 0 8px">jinjerの最新の従業員情報と台帳を突き合わせ、<b>新入社員の追加</b>と<b>退職者の削除</b>を行います。
+                    就業先メール（E列）と既存行の内容は変更しません。反映前に必ず台帳のバックアップを作ります。</p>
+                <button type="button" class="btn" id="mail-ledger-diff-btn">🔄 最新のメールアドレスを取得（確認のみ・まだ書き込みません）</button>
+                <span id="mail-ledger-status" style="margin-left:12px; color:#666"></span>
+                <div id="mail-ledger-result" style="display:none; margin-top:8px">
+                    <div id="mail-ledger-summary" style="margin-bottom:6px"></div>
+                    <div id="mail-ledger-tables" style="max-height:320px; overflow:auto"></div>
+                    <div style="margin-top:8px">
+                        <button type="button" class="btn btn-primary" id="mail-ledger-apply-btn" style="background:#c00000" disabled>📥 チェックした内容を台帳に反映する</button>
+                        <span id="mail-ledger-apply-status" style="margin-left:12px; color:#666"></span>
+                    </div>
+                    <div id="mail-ledger-apply-result" style="display:none; margin-top:6px; font-size:13px"></div>
+                </div>
+            </div>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="mail-preview-btn" style="background:#0070c0">👀 プレビュー（まだ何も作りません）</button>
                 <span id="mail-status" style="margin-left:12px; color:#666"></span>
