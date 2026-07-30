@@ -817,6 +817,7 @@ def parse_structured_files(
     legend_paths: list[str] = []
     shift_paths: list[str] = []
     monthly_shift_paths: list[str] = []
+    higashi_shift_paths: list[str] = []
     kdx_pdf_paths: list[str] = []
     for p in paths:
         low = p.lower()
@@ -831,6 +832,11 @@ def parse_structured_files(
         if not low.endswith((".xlsx", ".xls")):
             continue
         try:
+            if low.endswith(".xlsx"):
+                from services.higashi_shift_parser import is_higashi_shift_xlsx
+                if is_higashi_shift_xlsx(p):
+                    higashi_shift_paths.append(p)
+                    continue
             if is_multi_year_shift_xlsx(p):
                 shift_paths.append(p)
             elif is_monthly_shift_xlsx(p):
@@ -840,7 +846,8 @@ def parse_structured_files(
         except Exception as e:
             logger.warning("xlsx sniff 失敗 %s: %s", p, e)
 
-    if not shift_paths and not monthly_shift_paths and not kdx_pdf_paths:
+    if (not shift_paths and not monthly_shift_paths
+            and not higashi_shift_paths and not kdx_pdf_paths):
         return None
 
     # 凡例をマージ（複数渡された場合は重複コードを除外しつつ全件統合）
@@ -881,6 +888,29 @@ def parse_structured_files(
             "section_info": result.get("section_info"),
         })
         consumed.append(kp)
+
+    for hp in higashi_shift_paths:
+        try:
+            from services.higashi_shift_parser import parse_higashi_shift_xlsx
+            result = parse_higashi_shift_xlsx(hp, target_year, target_month)
+        except Exception as e:
+            logger.warning("東さん形式シフト表 %s の構造化解析に失敗: %s", hp, e)
+            warnings.append(
+                f"東さん形式シフト表の構造化解析に失敗したため "
+                f"AI 読み取りへフォールバックします: {os.path.basename(hp)} — {e}"
+            )
+            continue
+        sheets.append({
+            "mode": "code",
+            "filename": result["filename"],
+            "legend": result["legend"],
+            "employees": result["employees"],
+            "off_markers": result["off_markers"],
+            "year": result["year"],
+            "month": result["month"],
+            "section_info": result.get("section_info"),
+        })
+        consumed.append(hp)
 
     # xlsx 系の構造化パースは対象年月の指定が必須（多年度表から対象月を切り出すため）
     if (monthly_shift_paths or shift_paths) and not (target_year and target_month):
