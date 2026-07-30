@@ -18,8 +18,10 @@ if errorlevel 1 (
 )
 
 echo Building EXE...
-REM 経理モードの services/keiri_* は app.py の route 内で import しているため
-REM PyInstaller の静的解析では拾えない。hidden-import で明示しないと exe から欠落する。
+REM 関数内 import しかされない services/* を hidden-import で明示する（保険）。
+REM PyInstaller の解析は関数内 import も追えるので通常は無くても同梱されるが、
+REM 呼び出し元をリファクタしたときに黙って exe から落ちるのを防ぐため列挙しておく。
+REM ここに足し忘れても即欠落するわけではない一方、足しておけば確実に入る。
 python -m PyInstaller ^
   --noconfirm ^
   --onedir ^
@@ -34,6 +36,8 @@ python -m PyInstaller ^
   --hidden-import services.keiri_diff ^
   --hidden-import services.mail_draft ^
   --hidden-import services.mail_ledger_sync ^
+  --hidden-import services.higashi_shift_parser ^
+  --hidden-import services.kdx_shift_parser ^
   launcher.py
 
 if errorlevel 1 goto :build_failed

@@ -31,6 +31,19 @@ from typing import Iterable
 
 import openpyxl
 
+# 他形式のシフト表パーサ。以前は sniff/parse の関数内で import していたが、
+# 1 本の ImportError が同じ try ブロックにいる無関係な形式判定
+# （多年度シフト・月次シフト・凡例）まで巻き添えでスキップさせ、
+# except Exception が warning ログに落とすだけで静かに壊れる作りだった。
+# モジュール先頭に上げて、モジュールが欠けているなら起動時に大きく落ちるようにする。
+# （どちらも stdlib と openpyxl しか import せず循環参照は無い。
+#   kdx 側の pdfplumber は関数内 import なので起動コストも増えない）
+from services.higashi_shift_parser import (
+    is_higashi_shift_xlsx,
+    parse_higashi_shift_xlsx,
+)
+from services.kdx_shift_parser import is_kdx_shift_pdf, parse_kdx_shift_pdf
+
 logger = logging.getLogger(__name__)
 
 
@@ -823,7 +836,6 @@ def parse_structured_files(
         low = p.lower()
         if low.endswith(".pdf"):
             try:
-                from services.kdx_shift_parser import is_kdx_shift_pdf
                 if is_kdx_shift_pdf(p):
                     kdx_pdf_paths.append(p)
             except Exception as e:
@@ -833,7 +845,6 @@ def parse_structured_files(
             continue
         try:
             if low.endswith(".xlsx"):
-                from services.higashi_shift_parser import is_higashi_shift_xlsx
                 if is_higashi_shift_xlsx(p):
                     higashi_shift_paths.append(p)
                     continue
@@ -869,7 +880,6 @@ def parse_structured_files(
 
     for kp in kdx_pdf_paths:
         try:
-            from services.kdx_shift_parser import parse_kdx_shift_pdf
             result = parse_kdx_shift_pdf(kp, target_year, target_month)
         except Exception as e:
             logger.warning("KDXシフト表 %s の構造化解析に失敗: %s", kp, e)
@@ -891,7 +901,6 @@ def parse_structured_files(
 
     for hp in higashi_shift_paths:
         try:
-            from services.higashi_shift_parser import parse_higashi_shift_xlsx
             result = parse_higashi_shift_xlsx(hp, target_year, target_month)
         except Exception as e:
             logger.warning("東さん形式シフト表 %s の構造化解析に失敗: %s", hp, e)
