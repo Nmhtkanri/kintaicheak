@@ -417,16 +417,33 @@ def test_total_work_diff_is_included_in_judgment():
     assert result.iloc[0]["判定"] == "NG"
 
 
+def test_explicit_total_work_is_displayed_and_compared_when_both_sides_have_it():
+    jinjer = make_df([("山田太郎", date(2024, 1, 15), time(9, 0), time(18, 0))], "jinjer")
+    sheet = make_df([("山田太郎", date(2024, 1, 15), time(9, 0), time(18, 0))], "勤務表")
+    jinjer["総労働時間(分)"] = [420]
+    sheet["総労働時間(分)"] = [450]
+
+    result, _ = match(jinjer, sheet, threshold_minutes=10)
+    row = result.iloc[0]
+
+    assert row["勤務表_総労働時間"] == "7:30"
+    assert row["jinjer_総労働時間"] == "7:00"
+    assert row["総労働差分(分)"] == 30
+    assert row["判定"] == "NG"
+
+
 def test_actual_work_minutes_from_timesheet():
     """請求勤怠ファイル記載の正味労働(分)が 勤務表_実働時間 として出力される。
-    手順1の 勤務表_総労働時間 は従来どおり拘束時間(退勤−出勤)のまま据え置く。"""
+    jinjer側が未取得なら双方の総労働表示は従来の経過時間へフォールバックする。"""
     jinjer = make_df([("山田太郎", date(2024, 1, 15), time(9, 0), time(18, 0))], "jinjer")
     sheet = make_df([("山田太郎", date(2024, 1, 15), time(9, 0), time(18, 0))], "勤務表")
     sheet["総労働時間(分)"] = [420]  # 休憩1h控除後の正味 7:00
 
     result, _ = match(jinjer, sheet, threshold_minutes=10)
     assert result.iloc[0]["勤務表_実働時間"] == "7:00"
-    assert result.iloc[0]["勤務表_総労働時間"] == "9:00"  # 拘束時間は不変
+    assert result.iloc[0]["勤務表_総労働時間"] == "9:00"
+    assert result.iloc[0]["jinjer_総労働時間"] == "9:00"
+    assert result.iloc[0]["総労働差分(分)"] == 0
 
 
 def test_actual_work_minutes_absent_fallback():

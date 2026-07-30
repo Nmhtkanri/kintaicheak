@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 # matcher.py / 既存パイプラインと完全一致させる列構成
-RECORD_COLUMNS = ["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"]
+RECORD_COLUMNS = ["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"]
 
 # デフォルトで「休扱い」とみなす記号・空欄パターン
 DEFAULT_OFF_MARKERS = {"", "—", "ー", "-", "休", "公休", "週休", "公", "×", "✕", "\u3000"}
@@ -143,6 +143,21 @@ def _times_equal_at_midnight(t1, t2):
     return t1 == time(0, 0) and t2 == time(0, 0)
 
 
+def _net_work_minutes(start, end, break_minutes=0):
+    if not isinstance(start, time) or not isinstance(end, time):
+        return None
+    start_min = start.hour * 60 + start.minute
+    end_min = end.hour * 60 + end.minute
+    if end_min < start_min:
+        end_min += 24 * 60
+    try:
+        break_min = max(0, int(break_minutes or 0))
+    except (TypeError, ValueError):
+        break_min = 0
+    net = end_min - start_min - break_min
+    return net if net > 0 else None
+
+
 def _merge_consecutive_overnight(records: list[dict]) -> list[dict]:
     """連続日のシフトを統合する
 
@@ -193,6 +208,16 @@ def _merge_consecutive_overnight(records: list[dict]) -> list[dict]:
                     break
                 # 結合: 退勤時刻 を nxt の退勤に置き換える
                 current["退勤時刻"] = nxt.get("退勤時刻")
+                current_total = current.get("総労働時間(分)")
+                next_total = nxt.get("総労働時間(分)")
+                try:
+                    current["総労働時間(分)"] = (
+                        int(current_total) + int(next_total)
+                        if current_total is not None and next_total is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    current["総労働時間(分)"] = None
                 # コメントも結合（あれば）
                 merged_comments = [
                     c for c in [current.get("コメント"), nxt.get("コメント")] if c
@@ -284,6 +309,7 @@ def resolve_shifts(
                 "退勤時刻": end,
                 "コメント": comment,
                 "データソース": source_label,
+                "総労働時間(分)": _net_work_minutes(start, end, entry.get("break_minutes")),
             })
 
     if merge_overnight:

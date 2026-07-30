@@ -75,6 +75,29 @@ def _parse_time(value):
     return None
 
 
+def _parse_duration_minutes(value):
+    """HH:MM[:SS] の継続時間を分へ変換する（24時間超も保持）。"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    value_str = str(value).strip()
+    if not value_str or value_str in ("nan", "None"):
+        return None
+    m = re.fullmatch(r"(\d{1,3}):(\d{2})(?::(\d{2}))?", value_str)
+    if not m:
+        return None
+    hours, minutes, seconds = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    if minutes >= 60 or seconds >= 60:
+        return None
+    total = hours * 60 + minutes + round(seconds / 60)
+    return total if total > 0 else None
+
+
 def _parse_date(value):
     """日付を datetime.date に変換"""
     if value is None:
@@ -125,7 +148,8 @@ def parse_jinjer_csv(filepath):
     jinjer CSVを解析して統一 DataFrame を返す。
 
     Returns:
-        DataFrame with columns: 氏名, 日付, 出勤時刻, 退勤時刻, コメント, データソース
+        DataFrame with columns: 氏名, 日付, 出勤時刻, 退勤時刻, コメント,
+        データソース, 総労働時間(分)
     """
     # ヘッダー行を自動検出（氏名候補カラムが含まれる行を探す）
     raw = _read_csv_auto_encoding(filepath, header=None, dtype=str)
@@ -146,6 +170,7 @@ def parse_jinjer_csv(filepath):
     col_date    = _find_column(df.columns, mapping["日付"])
     col_start   = _find_column(df.columns, mapping["出勤時刻"])
     col_end     = _find_column(df.columns, mapping["退勤時刻"])
+    col_total   = "総労働時間" if "総労働時間" in df.columns else None
     col_scheduled_start = _find_column(df.columns, ["出勤予定時刻"])
     col_scheduled_end = _find_column(df.columns, ["退勤予定時刻"])
     col_comment = _find_column(df.columns, mapping["コメント"])
@@ -186,6 +211,7 @@ def parse_jinjer_csv(filepath):
             "退勤時刻": end,
             "コメント": comment,
             "データソース": "jinjer",
+            "総労働時間(分)": _parse_duration_minutes(row.get(col_total)) if col_total else None,
         })
 
-    return pd.DataFrame(records, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"])
+    return pd.DataFrame(records, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])

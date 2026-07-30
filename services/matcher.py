@@ -92,6 +92,16 @@ def elapsed_minutes(start, end):
     return end_min - start_min
 
 
+def _coerce_positive_minutes(value):
+    try:
+        if pd.isna(value):
+            return None
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return None
+    return minutes if minutes > 0 else None
+
+
 def format_duration(minutes):
     if minutes is None or pd.isna(minutes):
         return ""
@@ -426,6 +436,8 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     # 後段で参照できるよう、無ければ None 列を補完しておく。
     if "総労働時間(分)" not in timesheet_df.columns:
         timesheet_df["総労働時間(分)"] = None
+    if "総労働時間(分)" not in jinjer_df.columns:
+        jinjer_df["総労働時間(分)"] = None
     # 「特記」列（月末跨ぎ・Fieldglass時刻なし等の注記）も同様に補完する。
     if "特記" not in timesheet_df.columns:
         timesheet_df["特記"] = ""
@@ -538,6 +550,7 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
         "出勤時刻": "jinjer_出勤時刻",
         "退勤時刻": "jinjer_退勤時刻",
         "コメント": "jinjer_コメント",
+        "総労働時間(分)": "jinjer_実働(分)",
     })
 
     sheet_renamed = timesheet_df.rename(columns={
@@ -599,14 +612,21 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     merged["出勤差分(分)"] = merged.apply(lambda r: calc_diff(r, "勤務表_出勤時刻", "jinjer_出勤時刻"), axis=1)
     merged["退勤差分(分)"] = merged.apply(lambda r: calc_diff(r, "勤務表_退勤時刻", "jinjer_退勤時刻"), axis=1)
 
-    merged["勤務表_総労働時間(分)"] = merged.apply(
-        lambda r: elapsed_minutes(r.get("勤務表_出勤時刻"), r.get("勤務表_退勤時刻")),
-        axis=1,
-    )
-    merged["jinjer_総労働時間(分)"] = merged.apply(
-        lambda r: elapsed_minutes(r.get("jinjer_出勤時刻"), r.get("jinjer_退勤時刻")),
-        axis=1,
-    )
+    # 双方に明示された正味時間がある行だけ、その値を表示・比較する。
+    # 片側でも未取得なら、値の意味が混在しないよう双方とも従来の経過時間へ戻す。
+    total_pairs = []
+    for _, row in merged.iterrows():
+        sheet_explicit = _coerce_positive_minutes(row.get("勤務表_実働(分)"))
+        jinjer_explicit = _coerce_positive_minutes(row.get("jinjer_実働(分)"))
+        if sheet_explicit is not None and jinjer_explicit is not None:
+            total_pairs.append((sheet_explicit, jinjer_explicit))
+        else:
+            total_pairs.append((
+                elapsed_minutes(row.get("勤務表_出勤時刻"), row.get("勤務表_退勤時刻")),
+                elapsed_minutes(row.get("jinjer_出勤時刻"), row.get("jinjer_退勤時刻")),
+            ))
+    merged["勤務表_総労働時間(分)"] = [pair[0] for pair in total_pairs]
+    merged["jinjer_総労働時間(分)"] = [pair[1] for pair in total_pairs]
     merged["総労働差分(分)"] = merged.apply(
         lambda r: (
             abs(r.get("勤務表_総労働時間(分)") - r.get("jinjer_総労働時間(分)"))
@@ -618,9 +638,7 @@ def match(jinjer_df, timesheet_df, threshold_minutes=10):
     merged["勤務表_総労働時間"] = merged["勤務表_総労働時間(分)"].apply(format_duration)
     merged["jinjer_総労働時間"] = merged["jinjer_総労働時間(分)"].apply(format_duration)
 
-    # 請求勤怠ファイルに日別の正味労働時間（実働）が記載されていればそれを保持する。
-    # 手順1の「総労働時間」表示は拘束時間(退勤−出勤)のまま据え置き（jinjer側も拘束のため整合）、
-    # 差異一覧(quick_compare)はこの正味列を優先して正味同士で突合する。
+    # 請求勤怠ファイルに日別の正味労働時間（実働）が記載されていれば互換列にも保持する。
     if "勤務表_実働(分)" not in merged.columns:
         merged["勤務表_実働(分)"] = None
     merged["勤務表_実働時間"] = merged["勤務表_実働(分)"].apply(format_duration)

@@ -118,6 +118,7 @@ def test_kojima_pattern_simple_resolve():
     assert all(df["氏名"] == "小嶋桃子")
     assert all(df["出勤時刻"] == time(12, 30))
     assert all(df["退勤時刻"] == time(21, 0))
+    assert all(df["総労働時間(分)"] == 450)
 
 
 # =============================================================================
@@ -152,6 +153,7 @@ def test_tomatsu_pattern_yakkin_and_meike():
     yakkin = df[df["日付"] == date(2026, 4, 5)].iloc[0]
     assert yakkin["出勤時刻"] == time(16, 30)
     assert yakkin["退勤時刻"] == time(1, 0)
+    assert yakkin["総労働時間(分)"] == 450
 
     nicchu = df[df["日付"] == date(2026, 4, 2)].iloc[0]
     assert nicchu["出勤時刻"] == time(9, 0)
@@ -192,6 +194,7 @@ def test_tamura_pattern_consecutive_merge():
     rec4 = df[df["日付"] == date(2026, 4, 4)].iloc[0]
     assert rec4["出勤時刻"] == time(16, 30)
     assert rec4["退勤時刻"] == time(9, 0)
+    assert rec4["総労働時間(分)"] == 870
 
     # 5日のレコードは存在しない（4日に統合された）
     assert len(df[df["日付"] == date(2026, 4, 5)]) == 0
@@ -314,7 +317,7 @@ def test_empty_input_returns_empty_df():
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 0
     # 列構成は維持されている
-    assert list(df.columns) == ["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース"]
+    assert list(df.columns) == ["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"]
 
 
 def test_custom_off_markers():

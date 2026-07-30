@@ -73,7 +73,7 @@ LEGEND_SYSTEM_PROMPT = """あなたは勤務シフト表を解析する専門家
     {
       "employee_name": "氏名",
       "records": [
-        {"date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "comment": null}
+        {"date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "total_work_time": "HH:MM", "comment": null}
       ]
     }
   ]
@@ -82,6 +82,11 @@ LEGEND_SYSTEM_PROMPT = """あなたは勤務シフト表を解析する専門家
 ルール:
 - 日付は必ず YYYY-MM-DD 形式
 - 時刻は必ず HH:MM (24時間制)。深夜跨ぎは "25:00" "33:00" のように 24h+ で表記
+- direct モードの total_work_time は、その日の休憩控除後の総労働時間を HH:MM で返す
+- 日別の「実働」「実労働」「稼働時間」「作業時間」「業務時間数」「合計時間」を優先する
+- 日別の正味時間が無ければ、同じ行の出勤・退勤・休憩、または時間内＋時間外から算出する
+- 「時間内 8時間以内」のような説明や上限値は総労働時間として扱わない
+- 根拠を持って算出できない場合は total_work_time を null にする
 - 凡例に記載のある記号はすべて legend に列挙する
 - 凡例や時刻定義が画像内で確認できない場合は推測で legend に追加しない
 - 記号式の表だが凡例が見えない場合も "code" モードで返し、legend は [] にする

@@ -30,6 +30,7 @@ SYSTEM_PROMPT = """あなたは勤務表データを解析する専門家です�
       "date": "YYYY-MM-DD",
       "start_time": "HH:MM",
       "end_time": "HH:MM",
+      "total_work_time": "HH:MM",
       "comment": "備考があれば記載、なければnull"
     }
   ]
@@ -38,6 +39,12 @@ SYSTEM_PROMPT = """あなたは勤務表データを解析する専門家です�
 ルール:
 - 日付は必ず YYYY-MM-DD 形式にする
 - 時刻は必ず HH:MM（24時間制）にする
+- total_work_time は、その日の休憩控除後の総労働時間を HH:MM 形式で返す
+- 日別の「実働」「実労働」「稼働時間」「作業時間」「業務時間数」「合計時間」を優先する
+- 日別の正味時間が無く、同じ行に出勤・退勤・休憩があれば退勤－出勤－休憩で算出する
+- 時間内・時間外が別列なら両方を合算する
+- 「時間内 8時間以内」のような説明や上限表示を総労働時間として扱わない
+- 根拠を持って算出できない場合は total_work_time を null にする
 - 休日・休暇の行は含めない（出退勤時刻がある行のみ抽出）
 - 深夜勤務で日付をまたぐ場合、退勤時刻は翌日の時刻として "25:00" のように表記する
 - 氏名が見つからない場合は "employee_name": "不明" とする
@@ -223,6 +230,7 @@ def _normalize_records(claude_result, source_label="勤務表"):
             comment = rec.get("comment")
             if comment == "null":
                 comment = None
+            total_min = _duration_to_minutes(rec.get("total_work_time"))
 
             if start is None and end is None:
                 continue
@@ -234,8 +242,7 @@ def _normalize_records(claude_result, source_label="勤務表"):
                 "退勤時刻": end,
                 "コメント": comment,
                 "データソース": source_label,
-                # AI解析は時刻のみ抽出。正味労働は matcher で拘束時間にフォールバック。
-                "総労働時間(分)": None,
+                "総労働時間(分)": total_min,
             })
 
     if isinstance(claude_result, list):
@@ -352,6 +359,55 @@ def _parse_hour_minute_cells(hour_value, minute_value):
         return dt_time(hour % 24, minute)
     except ValueError:
         return None
+
+
+def _duration_to_minutes(value):
+    """Convert a net work duration to minutes; return None for empty/invalid values."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, dt_time):
+        minutes = value.hour * 60 + value.minute + round(value.second / 60)
+        return minutes if minutes > 0 else None
+
+    if hasattr(value, "total_seconds"):
+        try:
+            minutes = round(value.total_seconds() / 60)
+            return minutes if minutes > 0 else None
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+    s = str(value).strip()
+    if not s or s in ("nan", "None", "NaT", "-"):
+        return None
+
+    m = re.fullmatch(r"(\d{1,3}):(\d{2})(?::(\d{2}))?", s)
+    if m:
+        seconds = int(m.group(3) or 0)
+        minutes = int(m.group(1)) * 60 + int(m.group(2)) + round(seconds / 60)
+        return minutes if minutes > 0 else None
+
+    m = re.fullmatch(r"(\d+)\s*時間(?:\s*(\d+)\s*分)?", s)
+    if m:
+        minutes = int(m.group(1)) * 60 + int(m.group(2) or 0)
+        return minutes if minutes > 0 else None
+
+    m = re.fullmatch(r"(\d+)\s*h(?:\s*(\d+)\s*m)?", s, flags=re.IGNORECASE)
+    if m:
+        minutes = int(m.group(1)) * 60 + int(m.group(2) or 0)
+        return minutes if minutes > 0 else None
+
+    try:
+        hours = float(s)
+    except (TypeError, ValueError):
+        return None
+    minutes = round(hours * 60)
+    return minutes if minutes > 0 else None
 
 
 def _decimal_hours_to_minutes(value):
@@ -547,8 +603,9 @@ def _parse_itone_dispatch_timesheet_file(filepath):
             comment = ws.cell(row_idx, 12).value or ws.cell(row_idx, 8).value  # L / H
             if comment is not None:
                 comment = str(comment).strip() or None
+            total_min = _duration_to_minutes(ws[f"CO{row_idx}"].value)
 
-            # 実働時間列の所在が未確定のため None（matcher 側で拘束時間にフォールバック）
+            # CO列は休憩控除後の日別総労働時間
             rows.append({
                 "氏名": employee_name,
                 "日付": work_date,
@@ -556,7 +613,7 @@ def _parse_itone_dispatch_timesheet_file(filepath):
                 "退勤時刻": end,
                 "コメント": comment,
                 "データソース": "勤務表",
-                "総労働時間(分)": None,
+                "総労働時間(分)": total_min,
             })
 
         if not rows:
@@ -572,6 +629,168 @@ def _parse_itone_dispatch_timesheet_file(filepath):
                 os.remove(converted_path)
             except OSError:
                 pass
+
+
+def _parse_employment_record_file(filepath):
+    """Parse the stable 就業記録表 layout without using AI."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in (".xlsx", ".xlsb"):
+        return None
+
+    workbook_path = filepath
+    converted_path = None
+    if ext == ".xlsb":
+        converted_path = _convert_xlsb_to_xlsx(filepath)
+        if converted_path is None:
+            return None
+        workbook_path = converted_path
+
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(workbook_path, data_only=True)
+        if "就業記録表" not in wb.sheetnames:
+            return None
+        ws = wb["就業記録表"]
+        title = re.sub(r"\s+", "", str(ws["A1"].value or ""))
+        if title != "就業記録表":
+            return None
+        if str(ws["A12"].value or "").strip() != "日付":
+            return None
+        if "開始時刻" not in str(ws["D12"].value or ""):
+            return None
+        if "終了時刻" not in str(ws["E12"].value or ""):
+            return None
+
+        employee_name = str(ws["M3"].value or "").strip()
+        if not employee_name:
+            return None
+
+        rows = []
+        for row_idx in range(13, ws.max_row + 1):
+            work_date = _parse_excel_date(ws.cell(row_idx, 1).value)  # A
+            if work_date is None:
+                continue
+            start = _parse_excel_time(ws.cell(row_idx, 4).value)  # D
+            end = _parse_excel_time(ws.cell(row_idx, 5).value)  # E
+            if start is None and end is None:
+                continue
+
+            total_parts = [
+                _duration_to_minutes(ws.cell(row_idx, 7).value),  # G: 所定内
+                _duration_to_minutes(ws.cell(row_idx, 8).value),  # H: 所定外
+            ]
+            total_values = [v for v in total_parts if v is not None]
+            total_min = sum(total_values) if total_values else None
+            comment = ws.cell(row_idx, 10).value  # J
+            if comment is not None:
+                comment = str(comment).strip() or None
+
+            rows.append({
+                "氏名": employee_name,
+                "日付": work_date,
+                "出勤時刻": start,
+                "退勤時刻": end,
+                "コメント": comment,
+                "データソース": "勤務表",
+                "総労働時間(分)": total_min,
+            })
+
+        if not rows:
+            return None
+        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
+    except Exception:
+        logger.exception("就業記録表の解析に失敗しました: %s", filepath)
+        return None
+    finally:
+        if converted_path:
+            try:
+                os.remove(converted_path)
+            except OSError:
+                pass
+
+
+def _parse_work_result_report_file(filepath):
+    """Parse the stable 作業実績報告書 layout without using AI."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in (".xlsx", ".xlsb"):
+        return None
+
+    workbook_path = filepath
+    converted_path = None
+    if ext == ".xlsb":
+        converted_path = _convert_xlsb_to_xlsx(filepath)
+        if converted_path is None:
+            return None
+        workbook_path = converted_path
+
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(workbook_path, data_only=True)
+        if "作業実績報告書" not in wb.sheetnames:
+            return None
+        ws = wb["作業実績報告書"]
+        if str(ws["A1"].value or "").strip() != "作業実績報告書":
+            return None
+        if str(ws["A14"].value or "").strip() != "日付":
+            return None
+        if str(ws["P15"].value or "").strip() != "実労働":
+            return None
+
+        employee_name = str(ws["D7"].value or "").strip()
+        if not employee_name:
+            return None
+
+        rows = []
+        for row_idx in range(16, ws.max_row + 1):
+            work_date = _parse_excel_date(ws.cell(row_idx, 1).value)  # A
+            if work_date is None:
+                continue
+            start = _parse_excel_time(ws.cell(row_idx, 4).value)  # D
+            end = _parse_excel_time(ws.cell(row_idx, 5).value)  # E
+            if start is None and end is None:
+                continue
+
+            comment_parts = []
+            for col_idx in (13, 14):  # M: 勤怠区分 / N: 備考
+                value = ws.cell(row_idx, col_idx).value
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if text and text not in comment_parts:
+                    comment_parts.append(text)
+
+            rows.append({
+                "氏名": employee_name,
+                "日付": work_date,
+                "出勤時刻": start,
+                "退勤時刻": end,
+                "コメント": " / ".join(comment_parts) or None,
+                "データソース": "勤務表",
+                "総労働時間(分)": _duration_to_minutes(ws.cell(row_idx, 16).value),  # P
+            })
+
+        if not rows:
+            return None
+        return pd.DataFrame(rows, columns=["氏名", "日付", "出勤時刻", "退勤時刻", "コメント", "データソース", "総労働時間(分)"])
+    except Exception:
+        logger.exception("作業実績報告書の解析に失敗しました: %s", filepath)
+        return None
+    finally:
+        if converted_path:
+            try:
+                os.remove(converted_path)
+            except OSError:
+                pass
+
+
+def _extract_nmht_name_from_filename(filepath):
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    match = re.search(r"勤務表[（(]([^）)]+)[）)]", stem)
+    if match:
+        return match.group(1).strip()
+    return _extract_itone_name_from_filename(filepath)
 
 
 def _parse_nmht_work_time_report_file(filepath):
@@ -602,7 +821,7 @@ def _parse_nmht_work_time_report_file(filepath):
         if str(ws["C11"].value or "").strip() != "日" or str(ws["E11"].value or "").strip() != "勤務":
             return None
 
-        employee_name = ws["E6"].value or _extract_itone_name_from_filename(filepath)
+        employee_name = ws["E6"].value or _extract_nmht_name_from_filename(filepath)
         if not employee_name:
             return None
         employee_name = str(employee_name).strip()
@@ -1108,6 +1327,8 @@ def _parse_known_timesheet_file(filepath):
     for parser in (
         _parse_nmht_work_time_report_file,
         _parse_itone_dispatch_timesheet_file,
+        _parse_employment_record_file,
+        _parse_work_result_report_file,
         _parse_sap_timesheet_file,
         _parse_estaffing_timesheet_csv,
         _parse_estaffing_timesheet_text,

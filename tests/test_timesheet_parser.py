@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import pandas as pd
 from openpyxl import Workbook
@@ -22,10 +22,12 @@ def test_parse_itone_dispatch_timesheet_excel_direct(tmp_path):
     ws["B13"] = "2026/4/1"
     ws["X13"] = "09:45"
     ws["AC13"] = "19:33"
+    ws["CO13"] = timedelta(hours=8, minutes=48)
     ws["L13"] = "JANET更改業務：時間外会議"
     ws["B14"] = "2026/4/2"
     ws["X14"] = "09:45"
     ws["AC14"] = "18:21"
+    ws["CO14"] = "8:21"
     wb.save(path)
 
     result = parse_timesheet_smart(str(path))
@@ -38,6 +40,8 @@ def test_parse_itone_dispatch_timesheet_excel_direct(tmp_path):
     assert df.iloc[0]["出勤時刻"] == time(9, 45)
     assert df.iloc[0]["退勤時刻"] == time(19, 33)
     assert df.iloc[0]["コメント"] == "JANET更改業務：時間外会議"
+    assert df.iloc[0]["総労働時間(分)"] == 528
+    assert df.iloc[1]["総労働時間(分)"] == 501
 
 
 def test_parse_nmht_work_time_report_excel_direct(tmp_path):
@@ -67,6 +71,7 @@ def test_parse_nmht_work_time_report_excel_direct(tmp_path):
     ws["G13"] = 0
     ws["H13"] = 19
     ws["I13"] = 45
+    ws["P13"] = 9.75
     ws["T13"] = "テレワーク"
     ws["C14"] = 2
     ws["E14"] = "有休(全休)"
@@ -76,6 +81,7 @@ def test_parse_nmht_work_time_report_excel_direct(tmp_path):
     ws["G15"] = 30
     ws["H15"] = 24
     ws["I15"] = 0
+    ws["P15"] = "16:30"
     wb.save(path)
 
     result = parse_timesheet_smart(str(path))
@@ -91,6 +97,92 @@ def test_parse_nmht_work_time_report_excel_direct(tmp_path):
     assert df.iloc[1]["日付"] == date(2026, 5, 3)
     assert df.iloc[1]["出勤時刻"] == time(6, 30)
     assert df.iloc[1]["退勤時刻"] == time(0, 0)
+    assert df.iloc[0]["総労働時間(分)"] == 585
+    assert df.iloc[1]["総労働時間(分)"] == 990
+
+
+def test_parse_employment_record_excel_direct(tmp_path):
+    path = tmp_path / "就業記録表.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "就業記録表"
+    ws["A1"] = "就 業 記 録 表"
+    ws["M3"] = "西村　大"
+    ws["A12"] = "日付"
+    ws["D12"] = "開始時刻"
+    ws["E12"] = "終了時刻"
+    ws["A13"] = "2026/6/1"
+    ws["D13"] = "08:32"
+    ws["E13"] = "22:00"
+    ws["G13"] = "8:00"
+    ws["H13"] = "4:28"
+    ws["J13"] = "在宅"
+    wb.save(path)
+
+    result = parse_timesheet_smart(str(path))
+    row = result["df"].iloc[0]
+
+    assert result["mode"] == "direct"
+    assert row["氏名"] == "西村　大"
+    assert row["日付"] == date(2026, 6, 1)
+    assert row["出勤時刻"] == time(8, 32)
+    assert row["退勤時刻"] == time(22, 0)
+    assert row["総労働時間(分)"] == 748
+
+
+def test_parse_work_result_report_excel_direct(tmp_path):
+    path = tmp_path / "作業実績報告書.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "作業実績報告書"
+    ws["A1"] = "作業実績報告書"
+    ws["D7"] = "佐藤　可奈子"
+    ws["A14"] = "日付"
+    ws["P15"] = "実労働"
+    ws["A16"] = "2026/6/1"
+    ws["D16"] = "08:45"
+    ws["E16"] = "17:00"
+    ws["M16"] = "出勤"
+    ws["N16"] = "現場"
+    ws["P16"] = timedelta(hours=7, minutes=30)
+    wb.save(path)
+
+    result = parse_timesheet_smart(str(path))
+    row = result["df"].iloc[0]
+
+    assert result["mode"] == "direct"
+    assert row["氏名"] == "佐藤　可奈子"
+    assert row["日付"] == date(2026, 6, 1)
+    assert row["総労働時間(分)"] == 450
+    assert row["コメント"] == "出勤 / 現場"
+
+
+def test_ai_total_work_time_is_normalized_to_minutes():
+    parsed = {
+        "employee_name": "山田太郎",
+        "records": [{
+            "date": "2026-06-01",
+            "start_time": "09:00",
+            "end_time": "18:00",
+            "total_work_time": "7:30",
+            "comment": None,
+        }],
+    }
+
+    df = timesheet_parser._normalize_records(parsed)
+
+    assert df.iloc[0]["総労働時間(分)"] == 450
+
+
+def test_duration_to_minutes_accepts_excel_and_text_formats():
+    assert timesheet_parser._duration_to_minutes(timedelta(hours=8, minutes=41)) == 521
+    assert timesheet_parser._duration_to_minutes(time(7, 30)) == 450
+    assert timesheet_parser._duration_to_minutes("8時間30分") == 510
+    assert timesheet_parser._duration_to_minutes(7.5) == 450
+
+
+def test_nmht_name_can_fall_back_to_filename():
+    assert timesheet_parser._extract_nmht_name_from_filename("勤務表（土屋）202606.xlsx") == "土屋"
 
 
 def test_parse_sap_timesheet_excel_direct(tmp_path):
