@@ -67,6 +67,13 @@ class Config:
     # シフトデータの一時保存ディレクトリ（凡例レビュー → resolve のセッション用）
     SHIFT_SESSION_FOLDER = "uploads/sessions"
 
+    # スケジュールアップロード: シフト表氏名 → 従業員ID の読み替え表（エイリアス）
+    # 同姓が複数いる姓（吉田・佐藤 等）はシフト表が姓だけだと自動確定できないため、
+    # **シフト表の系統ごと**に読み替えを持つ（services/employee_alias.py 参照）。
+    # マッピング表方式＝谷津さんが直したら exe 再ビルドなしで次回実行から効く。
+    SCHEDULE_NAME_ALIAS_DIR = os.environ.get(
+        "SCHEDULE_NAME_ALIAS_DIR", r"Z:\API連携\docs")
+
     # jinjer API（CSV変換モードで従業員ID取得に使用）
     JINJER_API_KEY = os.environ.get("JINJER_API_KEY")
     JINJER_SECRET_KEY = os.environ.get("JINJER_SECRET_KEY")

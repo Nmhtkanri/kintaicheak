@@ -412,6 +412,179 @@ function openLegendModal(sheets) {
         legendSheetsContainer.appendChild(renderLegendSheet(sheet, sheetIdx));
     });
     legendModal.style.display = 'flex';
+    // スケジュールアップロードモードでは、CSV を作る前に氏名→従業員IDを照合しておく。
+    // 同姓（吉田 等）で自動確定できない人はここで気づいて選べる＝やり直しが要らない。
+    checkScheduleNames();
+}
+
+// =============================================================================
+// 氏名 → jinjer 従業員ID の事前照合
+// =============================================================================
+
+// 1行分の照合結果を描画する。ambiguous のときは候補プルダウンを出す。
+function renderNameStatus(rowEl, result) {
+    const td = rowEl.querySelector('.legend-employee-status');
+    if (!td) return;
+    td.innerHTML = '';
+    rowEl.dataset.nameStatus = (result && result.status) || '';
+
+    if (!result) return;
+
+    const badge = document.createElement('span');
+    badge.className = 'name-status name-status-' + result.status;
+
+    if (result.status === 'checking') {
+        badge.textContent = '照合中…';
+        badge.className = 'name-status name-status-checking';
+        td.appendChild(badge);
+        return;
+    }
+    if (result.status === 'ok') {
+        const via = result.via_alias ? '（エイリアス）' : '';
+        badge.textContent = `✅ ${result.official_name || ''}(${result.employee_id})${via}`;
+        badge.title = result.via_alias
+            ? '氏名エイリアス表で従業員IDを確定しました'
+            : 'jinjer の従業員IDが一意に決まりました';
+        td.appendChild(badge);
+        return;
+    }
+    if (result.status === 'error') {
+        badge.textContent = '⚠️ 照合できません';
+        badge.title = result.message || '';
+        td.appendChild(badge);
+        return;
+    }
+    if (result.status === 'ambiguous') {
+        badge.textContent = '⚠️ 同姓が複数';
+        badge.title = '姓だけでは決められません。下の候補から選ぶか、フルネームを入力してください。';
+        td.appendChild(badge);
+
+        const sel = document.createElement('select');
+        sel.className = 'name-candidate-select';
+        const blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = '候補から選ぶ…';
+        sel.appendChild(blank);
+        (result.candidates || []).forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.full_name;
+            opt.textContent = `${c.full_name} (${c.employee_id})`;
+            sel.appendChild(opt);
+        });
+        sel.addEventListener('change', () => {
+            if (!sel.value) return;
+            const inp = rowEl.querySelector('input[data-field="employee_name"]');
+            if (!inp) return;
+            inp.value = sel.value;   // フルネームにすれば既存の解決ロジックで一意に決まる
+            recheckOneName(rowEl);
+        });
+        td.appendChild(sel);
+        return;
+    }
+    // unknown
+    badge.textContent = '❓ jinjerに該当者なし';
+    badge.title = 'jinjer に登録されている氏名（漢字）と一致するように入力してください。';
+    td.appendChild(badge);
+}
+
+function employeeRowsOf(sheetEl) {
+    return Array.from(sheetEl.querySelectorAll('tr.legend-employee-row'));
+}
+
+async function postNameCheck(sheets) {
+    const response = await fetch('/resolve_schedule_names', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: pendingSessionId, sheets: sheets }),
+    });
+    return await response.json();
+}
+
+// モーダル内の全氏名をまとめて照合する
+async function checkScheduleNames() {
+    if (pendingMode !== 'csv_export') return;
+
+    const sheetEls = Array.from(legendSheetsContainer.querySelectorAll('.legend-sheet'));
+    const payloadSheets = [];
+    sheetEls.forEach(sheetEl => {
+        const original = pendingCodeSheets[parseInt(sheetEl.dataset.sheetIdx, 10)];
+        if (!original) return;
+        const rows = employeeRowsOf(sheetEl);
+        rows.forEach(r => renderNameStatus(r, { status: 'checking' }));
+        payloadSheets.push({
+            filename: original.filename,
+            names: rows.map(r => {
+                const inp = r.querySelector('input[data-field="employee_name"]');
+                return inp ? inp.value.trim() : '';
+            }),
+        });
+    });
+    if (payloadSheets.length === 0) return;
+
+    let data;
+    try {
+        data = await postNameCheck(payloadSheets);
+    } catch (e) {
+        sheetEls.forEach(el => employeeRowsOf(el).forEach(
+            r => renderNameStatus(r, { status: 'error', message: String(e) })));
+        return;
+    }
+    if (!data || !data.success) {
+        const message = (data && data.error) || '照合に失敗しました';
+        sheetEls.forEach(el => employeeRowsOf(el).forEach(
+            r => renderNameStatus(r, { status: 'error', message: message })));
+        return;
+    }
+
+    let payloadIdx = 0;
+    sheetEls.forEach(sheetEl => {
+        const original = pendingCodeSheets[parseInt(sheetEl.dataset.sheetIdx, 10)];
+        if (!original) return;
+        const res = data.sheets[payloadIdx++];
+        if (!res) return;
+        const rows = employeeRowsOf(sheetEl);
+        rows.forEach((r, i) => renderNameStatus(r, (res.names || [])[i]));
+    });
+    (data.warnings || []).forEach(w => console.warn('[氏名エイリアス]', w));
+}
+
+// 1行だけ再照合する（氏名を直した／候補を選んだとき）
+async function recheckOneName(rowEl) {
+    if (pendingMode !== 'csv_export') return;
+    const sheetEl = rowEl.closest('.legend-sheet');
+    if (!sheetEl) return;
+    const original = pendingCodeSheets[parseInt(sheetEl.dataset.sheetIdx, 10)];
+    if (!original) return;
+    const inp = rowEl.querySelector('input[data-field="employee_name"]');
+    const name = inp ? inp.value.trim() : '';
+
+    renderNameStatus(rowEl, { status: 'checking' });
+    try {
+        const data = await postNameCheck([{ filename: original.filename, names: [name] }]);
+        if (data && data.success && data.sheets[0]) {
+            renderNameStatus(rowEl, data.sheets[0].names[0]);
+        } else {
+            renderNameStatus(rowEl, {
+                status: 'error', message: (data && data.error) || '照合に失敗しました' });
+        }
+    } catch (e) {
+        renderNameStatus(rowEl, { status: 'error', message: String(e) });
+    }
+}
+
+// 未照合（同姓未選択・該当者なし）の氏名を集める
+function collectUnresolvedNames() {
+    const unresolved = [];
+    legendSheetsContainer.querySelectorAll('.legend-sheet').forEach(sheetEl => {
+        employeeRowsOf(sheetEl).forEach(r => {
+            const status = r.dataset.nameStatus;
+            if (status === 'ambiguous' || status === 'unknown') {
+                const inp = r.querySelector('input[data-field="employee_name"]');
+                unresolved.push((inp ? inp.value.trim() : '') || '(未入力)');
+            }
+        });
+    });
+    return unresolved;
 }
 
 function closeLegendModal() {
@@ -522,8 +695,9 @@ function renderEmployeesEditor(sheet, sheetIdx) {
     tbl.innerHTML = `
         <thead>
             <tr>
-                <th style="width:50%">氏名</th>
-                <th style="width:30%">シフト件数</th>
+                <th style="width:34%">氏名</th>
+                <th style="width:38%">jinjer 照合</th>
+                <th style="width:20%">シフト件数</th>
                 <th></th>
             </tr>
         </thead>
@@ -539,7 +713,7 @@ function renderEmployeesEditor(sheet, sheetIdx) {
     if (employees.length === 0) {
         const tr = document.createElement('tr');
         tr.className = 'legend-employees-empty';
-        tr.innerHTML = `<td colspan="3">⚠️ 画像から従業員を抽出できませんでした。下の「+ 従業員を追加」から手動で追加してください（ただしシフトは画像から取得できないため、スケジュールCSVは作成できません）。</td>`;
+        tr.innerHTML = `<td colspan="4">⚠️ 画像から従業員を抽出できませんでした。下の「+ 従業員を追加」から手動で追加してください（ただしシフトは画像から取得できないため、スケジュールCSVは作成できません）。</td>`;
         tbody.appendChild(tr);
     }
 
@@ -606,13 +780,20 @@ function renderEmployeeRow(emp, empIdx) {
     nameTd.appendChild(nameInp);
     tr.appendChild(nameTd);
 
+    // jinjer 照合結果（従業員ID が引けるか）。CSV を作る前にここで気づけるようにする。
+    const statusTd = document.createElement('td');
+    statusTd.className = 'legend-employee-status';
+    tr.appendChild(statusTd);
+    // 氏名を直したら、その行だけ再照合する
+    nameInp.addEventListener('change', () => recheckOneName(tr));
+
     // 詳細行（日別シフト編集）を先に作る
     const detail = document.createElement('tr');
     detail.className = 'legend-employee-detail';
     detail.dataset.empIdx = empIdx;
     detail.style.display = 'none';
     const detailTd = document.createElement('td');
-    detailTd.colSpan = 3;
+    detailTd.colSpan = 4;
     const editor = buildShiftEditor((emp && emp.shifts) ? emp.shifts : []);
     detailTd.appendChild(editor);
     detail.appendChild(detailTd);
@@ -972,6 +1153,21 @@ legendConfirmBtn.addEventListener('click', async () => {
                 return;
             }
         }
+
+        // jinjer と照合できていない氏名は従業員IDが空欄のまま "未分類" CSV に落ちる。
+        // 実行前にここで止めて、やり直し（アップロードからの全部やり直し）を防ぐ。
+        const unresolved = collectUnresolvedNames();
+        if (unresolved.length > 0) {
+            const ok = confirm(
+                `jinjer の従業員IDが確定していない氏名が ${unresolved.length} 名います:\n\n`
+                + unresolved.join(' / ')
+                + '\n\nこのまま実行すると、この方たちは従業員ID空欄の「未分類」CSVに出力され、'
+                + 'jinjer に取り込めません。\n'
+                + '「キャンセル」で凡例画面に戻り、候補から選ぶかフルネームを入力してください。\n\n'
+                + 'このまま実行しますか？'
+            );
+            if (!ok) return;
+        }
     }
 
     const endpoint = (pendingMode === 'csv_export') ? '/export_jinjer_csv' : '/resolve_and_match';
@@ -1016,7 +1212,8 @@ legendConfirmBtn.addEventListener('click', async () => {
 function showCsvExportResult(data) {
     if (!csvExportArea) return;
 
-    const { csv_files, missing_ids, merges, new_template_filename, new_template_count } = data;
+    const { csv_files, missing_ids, merges, ake_auto, ake_schedule_priority,
+            ake_conflicts, new_template_filename, new_template_count } = data;
 
     const list = document.getElementById('csv-files-list');
     list.innerHTML = '';
@@ -1061,6 +1258,62 @@ function showCsvExportResult(data) {
         warnArea.style.display = 'block';
     } else {
         warnArea.style.display = 'none';
+    }
+
+    // 夜勤明け（退勤30:00以降の翌日）を自動で「休み」にしたトレース表示
+    const akeArea = document.getElementById('ake-area');
+    const akeList = document.getElementById('ake-list');
+    if (akeArea && akeList) {
+        akeList.innerHTML = '';
+        const applied = ake_auto || [];
+        const schedPriority = ake_schedule_priority || [];
+        const conflicts = ake_conflicts || [];
+        if (applied.length > 0 || schedPriority.length > 0 || conflicts.length > 0) {
+            applied.forEach(a => {
+                const row = document.createElement('div');
+                row.className = 'merge-item';
+                const m = a.month || '';
+                row.innerHTML = `
+                    <div class="merge-name">👤 ${escapeHtml(a.name)}</div>
+                    <div class="merge-detail">
+                        ${escapeHtml(String(m))}/${a.night_day} が夜勤（退勤 ${Math.floor(a.end_time_minutes / 60)}:${String(a.end_time_minutes % 60).padStart(2, '0')}）
+                        → ${escapeHtml(String(m))}/${a.ake_day} を
+                        <span class="merge-cell-tag">休み</span>
+                        <span class="ake-before">（元: ${escapeHtml(a.before || '空欄')}）</span>
+                    </div>
+                `;
+                akeList.appendChild(row);
+            });
+            schedPriority.forEach(s => {
+                const row = document.createElement('div');
+                row.className = 'merge-item';
+                const m = s.month || '';
+                row.innerHTML = `
+                    <div class="merge-name">👤 ${escapeHtml(s.name)}</div>
+                    <div class="merge-detail">
+                        ${escapeHtml(String(m))}/${s.night_day} が夜勤だが、
+                        ${escapeHtml(String(m))}/${s.ake_day} にも予定
+                        <span class="merge-cell-tag">${escapeHtml(s.next_value)}</span>
+                        が入っているため <strong>シフト表を優先</strong>（明け休にしない）
+                    </div>
+                `;
+                akeList.appendChild(row);
+            });
+            conflicts.forEach(c => {
+                const row = document.createElement('div');
+                row.className = 'merge-item ake-conflict';
+                row.innerHTML = `
+                    <div class="merge-name">⚠️ ${escapeHtml(c.name)}</div>
+                    <div class="merge-detail">
+                        ${escapeHtml(String(c.month || ''))}/${c.night_day} の夜勤明け — ${escapeHtml(c.reason)}
+                    </div>
+                `;
+                akeList.appendChild(row);
+            });
+            akeArea.style.display = 'block';
+        } else {
+            akeArea.style.display = 'none';
+        }
     }
 
     // 深夜跨ぎ統合のトレース表示

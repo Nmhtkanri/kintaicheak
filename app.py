@@ -35,6 +35,11 @@ from services.jinjer_schedule_csv_exporter import (
     export_jinjer_schedule_csv_split,
     resolve_employee_id,
 )
+from services.employee_alias import (
+    alias_csv_path,
+    apply_aliases,
+    load_aliases_for_source,
+)
 from services.multi_year_shift_parser import parse_structured_files
 
 import threading
@@ -113,6 +118,133 @@ def _load_session(session_id: str) -> dict | None:
 def _drop_session(session_id: str):
     path = os.path.join(Config.SHIFT_SESSION_FOLDER, f"{session_id}.pkl")
     _safe_remove(path)
+
+
+def _sheet_sources_from_session(session) -> dict[str, str]:
+    """セッションの code_sheets から {filename: source} を作る
+
+    source（"kdx" 等）は画面から送り返させず、必ずサーバ側のセッションを正とする。
+    氏名エイリアス表の適用範囲を決める値なので、画面から差し替えられないようにする。
+    """
+    sources: dict[str, str] = {}
+    for sheet in (session or {}).get("code_sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        filename = sheet.get("filename")
+        if filename:
+            sources[str(filename)] = str(sheet.get("source") or "")
+    return sources
+
+
+def _name_map_for_sheet(
+    base_name_to_id: dict, source: str
+) -> tuple[dict, dict, str]:
+    """シフト表の系統に応じた氏名→IDマップを返す
+
+    Returns:
+        (name_to_id, aliases, warning)
+        name_to_id … エイリアスを重ねた辞書（対象外の系統なら base のまま）
+        aliases    … 適用したエイリアス {氏名: 従業員ID}
+        warning    … エイリアス表が読めなかった場合の説明（正常時は空文字）
+    """
+    aliases, warning = load_aliases_for_source(source, Config.SCHEDULE_NAME_ALIAS_DIR)
+    return apply_aliases(base_name_to_id, aliases), aliases, warning
+
+
+def _resolve_name_status(
+    name: str,
+    name_to_id: dict,
+    ambiguous_names: dict,
+    id_to_official_name: dict,
+    aliases: dict,
+) -> dict:
+    """氏名1件の解決状況を返す（凡例レビュー画面の事前チェック用）
+
+    status:
+        ok        … 従業員IDが一意に決まった
+        ambiguous … 同姓が複数いて自動確定できない（候補を返す）
+        unknown   … jinjer に該当者が見つからない
+    """
+    clean = (name or "").strip()
+    if not clean:
+        return {"name": name, "status": "unknown", "employee_id": "",
+                "official_name": "", "candidates": [], "via_alias": False}
+
+    emp_id = resolve_employee_id(clean, name_to_id)
+    if emp_id:
+        return {
+            "name": name,
+            "status": "ok",
+            "employee_id": emp_id,
+            "official_name": id_to_official_name.get(emp_id, ""),
+            "candidates": [],
+            "via_alias": clean in (aliases or {}),
+        }
+
+    # 同姓複数で確定できないケースは候補を返してプルダウンで選ばせる
+    for variant in (clean, re.sub(r"[\s　]+", "", clean)):
+        hits = (ambiguous_names or {}).get(variant)
+        if hits:
+            return {
+                "name": name,
+                "status": "ambiguous",
+                "employee_id": "",
+                "official_name": "",
+                "candidates": [{"employee_id": eid, "full_name": full}
+                               for eid, full in hits],
+                "via_alias": False,
+            }
+
+    return {"name": name, "status": "unknown", "employee_id": "",
+            "official_name": "", "candidates": [], "via_alias": False}
+
+
+@app.route("/resolve_schedule_names", methods=["POST"])
+def resolve_schedule_names():
+    """凡例レビュー画面の「氏名→従業員ID」事前チェック
+
+    CSV を作る**前**に、各氏名が jinjer の誰に当たるかを確認できるようにする。
+    同姓で確定できない氏名（吉田 等）は候補を返し、画面で選ばせる。
+
+    POST body (JSON):
+      {"session_id": "...", "sheets": [{"filename": "...", "names": ["尾川", ...]}]}
+    """
+    payload_in = request.get_json(force=True, silent=True) or {}
+    session_id = payload_in.get("session_id")
+    sheets_in = payload_in.get("sheets") or []
+
+    session = _load_session(session_id) if session_id else None
+    sheet_sources = _sheet_sources_from_session(session)
+
+    try:
+        name_to_id, id_to_official_name, ambiguous_names = fetch_employee_id_map()
+    except JinjerAPIError as e:
+        logger.warning("氏名事前チェック: jinjer API 失敗: %s", e)
+        return jsonify({
+            "success": False,
+            "error": f"jinjer から従業員一覧を取得できませんでした: {e}",
+        })
+
+    results = []
+    warnings: list[str] = []
+    for sheet in sheets_in:
+        filename = str(sheet.get("filename") or "")
+        source = sheet_sources.get(filename, "")
+        sheet_name_to_id, aliases, warning = _name_map_for_sheet(name_to_id, source)
+        if warning and warning not in warnings:
+            warnings.append(warning)
+        results.append({
+            "filename": filename,
+            "source": source,
+            "alias_count": len(aliases),
+            "names": [
+                _resolve_name_status(n, sheet_name_to_id, ambiguous_names,
+                                     id_to_official_name, aliases)
+                for n in (sheet.get("names") or [])
+            ],
+        })
+
+    return jsonify({"success": True, "sheets": results, "warnings": warnings})
 
 
 def _apply_single_supplemental_legend(code_sheets: list[dict]) -> list[dict]:
@@ -302,6 +434,9 @@ def upload():
                             "legend": sheet["legend"],
                             "employees": sheet["employees"],
                             "off_markers": sheet["off_markers"],
+                            # シフト表の系統（KDX等）。氏名エイリアス表の適用範囲の判定に使う。
+                            # 判定はサーバ側のセッションだけで行い、画面からは受け取らない。
+                            "source": sheet.get("source", ""),
                         })
                         sec = sheet.get("section_info") or {}
                         # KDX PDF などセクション概念の無いパーサは section_index=None
@@ -605,8 +740,14 @@ def export_jinjer_csv():
             output_files: list[dict] = []
             all_missing_ids: list[str] = []
             all_merges: list[dict] = []
+            all_ake_auto: list[dict] = []
+            all_ake_schedule_priority: list[dict] = []
+            all_ake_conflicts: list[dict] = []
             new_template_filename = None
             new_template_count = 0
+
+            # シフト表の系統（KDX等）はセッションを正とする（画面からは受け取らない）
+            sheet_sources = _sheet_sources_from_session(session)
 
             for sheet in sheets_in:
                 filename = sheet.get("filename") or "勤務表"
@@ -630,6 +771,19 @@ def export_jinjer_csv():
                     "message": f"CSV生成中: {filename} ({year_i}年{month_i}月)"
                 })
 
+                # シフト表の系統ごとの氏名エイリアス（同姓で確定できない姓の読み替え）。
+                # KDX等の対象系統のみ。全社共通にはしない＝別現場の同姓を巻き込まない。
+                source = sheet_sources.get(filename, "")
+                sheet_name_to_id, aliases, alias_warning = _name_map_for_sheet(
+                    name_to_id, source)
+                if alias_warning:
+                    yield _sse_event("progress", {"message": f"  ⚠️ {alias_warning}"})
+                if aliases:
+                    yield _sse_event("progress", {
+                        "message": (f"  ▸ 氏名エイリアス表を適用 ({source}): "
+                                    + " / ".join(f"{n}→{i}" for n, i in aliases.items()))
+                    })
+
                 # この勤務表に登場する従業員の ID を集める
                 # （厳密マッチ→空白/括弧除去→前方一致(一意時のみ)。exporter と同じ解決規則）
                 emp_ids_for_sheet: list[str] = []
@@ -640,7 +794,7 @@ def export_jinjer_csv():
                     name = (emp.get("name") or "").strip()
                     if not name:
                         continue
-                    eid = resolve_employee_id(name, name_to_id)
+                    eid = resolve_employee_id(name, sheet_name_to_id)
                     if eid and eid not in emp_id_seen:
                         emp_id_seen.add(eid)
                         emp_ids_for_sheet.append(eid)
@@ -670,7 +824,7 @@ def export_jinjer_csv():
                         employees=employees,
                         year=year_i,
                         month=month_i,
-                        name_to_id=name_to_id,
+                        name_to_id=sheet_name_to_id,
                         attendance_group_map=attendance_group_map,
                         output_dir=Config.OUTPUT_FOLDER,
                         template_csv_path=Config.get_jinjer_template_csv_path(),
@@ -714,6 +868,36 @@ def export_jinjer_csv():
                             + (" …" if len(ungrouped) > 10 else "")
                             + " → \"未分類\" CSV にまとめて出力しました。jinjer 画面で個別に登録してください。"
                         )
+                    })
+
+                # 夜勤明け（退勤30:00以降）を自動で「休み」にした日を流す
+                ake_auto = split_result.get("ake_auto", [])
+                for a in ake_auto:
+                    all_ake_auto.append({**a, "source": filename,
+                                         "year": year_i, "month": month_i})
+                if ake_auto:
+                    yield _sse_event("progress", {
+                        "message": f"  ▸ 夜勤明けを自動で「休み」に設定: {len(ake_auto)}日分"
+                    })
+
+                # 連日夜勤など、翌日に予定がある日はシフト表を優先（正常。警告ではない）
+                ake_sched = split_result.get("ake_schedule_priority", [])
+                for s in ake_sched:
+                    all_ake_schedule_priority.append({**s, "source": filename,
+                                                      "year": year_i, "month": month_i})
+                if ake_sched:
+                    yield _sse_event("progress", {
+                        "message": (f"  ▸ 夜勤明けよりシフト表を優先: {len(ake_sched)}日分"
+                                    "（翌日にも予定が入っているため）")
+                    })
+
+                for c in split_result.get("ake_conflicts", []):
+                    all_ake_conflicts.append({**c, "source": filename,
+                                              "year": year_i, "month": month_i})
+                    day_part = f"{month_i}/{c['ake_day']}" if c.get("ake_day") else "翌月"
+                    yield _sse_event("progress", {
+                        "message": (f"  ⚠️ 夜勤明け要確認: {c['name']} "
+                                    f"{month_i}/{c['night_day']}の翌日({day_part}) — {c['reason']}")
                     })
 
                 # 深夜跨ぎ統合のログを SSE に流す
@@ -767,6 +951,9 @@ def export_jinjer_csv():
                 "csv_files": output_files,
                 "missing_ids": unique_missing,
                 "merges": all_merges,
+                "ake_auto": all_ake_auto,
+                "ake_schedule_priority": all_ake_schedule_priority,
+                "ake_conflicts": all_ake_conflicts,
                 "new_template_filename": new_template_filename,
                 "new_template_count": new_template_count,
             })

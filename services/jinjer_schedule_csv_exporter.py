@@ -48,6 +48,15 @@ GENERAL_TEMPLATE_START = "9:00"
 GENERAL_TEMPLATE_END = "17:30"
 AKE_REST_VALUE = "休み"
 
+# 夜勤明けの自動割当しきい値（24時超表記の退勤時刻）。
+# 退勤が 30:00（翌朝6:00）以降のシフトは、翌日を必ず「夜勤明け＝休み」にする。
+# jinjer は「開始日1行・24時超表記」で登録するため（例 16:30～34:00）、明けの日に
+# 別の予定を入れると勤務が二重に立つ。従来はシフト表の「ー」記号頼みだったが、
+# 記号が無い表でも退勤時刻から機械的に決められるようにした（2026-07-31 谷津さん指示）。
+AKE_AUTO_END_MINUTES = 30 * 60  # 30:00
+
+_HHMM_RE = re.compile(r"\s*(\d{1,2}):(\d{2})\s*")
+
 
 def _is_full_day_paid_leave(code: str, label: str = "") -> bool:
     """全日有休（有 / 有休 など）を表す記号か。
@@ -279,6 +288,99 @@ def annotate_unresolved_name(name: str, ambiguous_names: dict) -> str:
             return (f"{name}（同じ氏名の候補が複数いるため自動確定できません: {cands}"
                     f" — CSVの従業員ID列に正しいIDを入力してください）")
     return name
+
+
+def _raw_time_to_minutes(raw) -> int | None:
+    """24時超表記の "HH:MM"（"34:00" 等）を分に変換する。読めなければ None。
+
+    legend_normalized の time 型は %24 で丸められて 34:00 が 10:00 に化けるため、
+    夜勤明け判定には**生文字列**を渡すこと。
+    """
+    if raw is None:
+        return None
+    m = _HHMM_RE.fullmatch(str(raw))
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if minute >= 60:
+        return None
+    return hour * 60 + minute
+
+
+def _apply_auto_ake_rest(
+    cells: list[str],
+    end_minutes: list[int | None],
+    day_objs: list[date],
+    employee_name: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """退勤が AKE_AUTO_END_MINUTES 以上の日の**翌日**を「休み」に上書きする。
+
+    シフト表に「ー（夜勤明け）」の記号が無くても、退勤時刻から機械的に明けを立てる。
+    cells は破壊的に更新する。
+
+    **翌日にシフト表の記号（実勤務）が入っている場合はスケジュールを優先する**
+    （2026-07-31 谷津さん指示）。夜勤が連日続く場合（8/10・8/11 とも 16:45-33:30 等）は
+    シフト表どおりが正しく、明け休を割り当ててはいけない。上書きするのは翌日が
+    休扱い（所/法/空欄）＝予定が入っていない場合だけ。
+
+    Args:
+        cells: 1人分の日別セル値（day_objs と同じ長さ）
+        end_minutes: 各日の退勤時刻（分, 24時超表記）。勤務でない日は None
+        day_objs: 各日の date
+        employee_name: ログ用の氏名
+
+    Returns:
+        (applied, schedule_priority, conflicts)
+        applied           … 自動で「休み」にした日のログ
+        schedule_priority … 翌日に予定があるためシフト表を優先した日のログ（正常）
+        conflicts         … 当月CSVでは表現できず要確認の日（月末夜勤）
+    """
+    applied: list[dict] = []
+    schedule_priority: list[dict] = []
+    conflicts: list[dict] = []
+    off_values = {"所", "法", ""}
+
+    for idx, minutes in enumerate(end_minutes):
+        if minutes is None or minutes < AKE_AUTO_END_MINUTES:
+            continue
+
+        night_day = day_objs[idx].day
+        if idx + 1 >= len(cells):
+            # 月末の夜勤 → 明けは翌月。当月CSVには書けないので記録だけ残す
+            conflicts.append({
+                "name": employee_name, "night_day": night_day, "ake_day": None,
+                "reason": "翌月にまたがる明けのため当月CSVでは設定できません",
+            })
+            continue
+
+        ake_day = day_objs[idx + 1].day
+        current = cells[idx + 1]
+        if current == AKE_REST_VALUE:
+            continue  # すでに明け休（シフト表の「ー」等）＝何もしない
+        if current not in off_values:
+            # 連日夜勤など、翌日に予定が入っている → シフト表が正。触らない
+            schedule_priority.append({
+                "name": employee_name, "night_day": night_day, "ake_day": ake_day,
+                "next_value": current,
+            })
+            logger.info(
+                "夜勤明け: %s %d日の翌日(%d日)は予定[%s]が入っているためスケジュール優先",
+                employee_name, night_day, ake_day, current,
+            )
+            continue
+
+        cells[idx + 1] = AKE_REST_VALUE
+        applied.append({
+            "name": employee_name, "night_day": night_day, "ake_day": ake_day,
+            "before": current, "end_time_minutes": minutes,
+        })
+        logger.info(
+            "夜勤明け自動設定: %s %d日の退勤%02d:%02d → %d日を「%s」(元: %s)",
+            employee_name, night_day, minutes // 60, minutes % 60,
+            ake_day, AKE_REST_VALUE, current or "空欄",
+        )
+
+    return applied, schedule_priority, conflicts
 
 
 def _is_ake_code(code: str, label: str = "") -> bool:
@@ -520,6 +622,9 @@ def export_jinjer_schedule_csv(
     merge_log: list[dict] = []
     merged_unmatched: list[dict] = []
     merged_unmatched_seen: set[tuple] = set()
+    ake_auto: list[dict] = []
+    ake_schedule_priority: list[dict] = []
+    ake_conflicts: list[dict] = []
 
     id_to_official_name = id_to_official_name or {}
 
@@ -545,6 +650,8 @@ def export_jinjer_schedule_csv(
         )
 
         cells: list[str] = []
+        # 各日の退勤時刻（分・24時超表記）。夜勤明けの自動割当に使う。勤務でない日は None
+        end_minutes: list[int | None] = []
         for d in day_objs:
             day_num = d.day
             if day_num in emp_merges:
@@ -552,6 +659,7 @@ def export_jinjer_schedule_csv(
                 m = emp_merges[day_num]
                 value, unmatched_entry = _resolve_merged_cell_value(m, templates)
                 cells.append(value)
+                end_minutes.append(_raw_time_to_minutes(m.get("merged_end")))
                 if unmatched_entry:
                     key = (
                         unmatched_entry["code"],
@@ -582,6 +690,7 @@ def export_jinjer_schedule_csv(
             elif day_num in consumed_days:
                 # day N+1 として吸収された日 → 休扱い（曜日に応じて 所/法）
                 cells.append(_off_value_for_weekday(d.weekday()))
+                end_minutes.append(None)
             else:
                 code_for_day = day_map.get(day_num, "")
                 value = _resolve_cell_value(
@@ -593,6 +702,20 @@ def export_jinjer_schedule_csv(
                     general_template_id,
                 )
                 cells.append(value)
+                # 凡例の生の退勤時刻（24時超表記）。休扱いの日は勤務なし＝None
+                entry = legend_normalized.get(code_for_day) if code_for_day else None
+                if entry and not entry.get("is_off"):
+                    raw_end = (raw_times.get(code_for_day) or (None, None, 0))[1]
+                    end_minutes.append(_raw_time_to_minutes(raw_end))
+                else:
+                    end_minutes.append(None)
+
+        # 夜勤明け（退勤30:00以降）の翌日を「休み」に自動設定する
+        applied, sched_priority, conflicts = _apply_auto_ake_rest(
+            cells, end_minutes, day_objs, name)
+        ake_auto.extend(applied)
+        ake_schedule_priority.extend(sched_priority)
+        ake_conflicts.extend(conflicts)
 
         rows.append([display_name, emp_id] + cells)
 
@@ -606,8 +729,8 @@ def export_jinjer_schedule_csv(
             writer.writerow(r)
 
     logger.info(
-        "jinjer スケジュール CSV 出力: %s (%d 件 / ID欠落 %d 件 / 統合 %d 件)",
-        output_path, len(rows), len(missing_ids), len(merge_log),
+        "jinjer スケジュール CSV 出力: %s (%d 件 / ID欠落 %d 件 / 統合 %d 件 / 明け自動 %d 件)",
+        output_path, len(rows), len(missing_ids), len(merge_log), len(ake_auto),
     )
 
     return {
@@ -618,6 +741,9 @@ def export_jinjer_schedule_csv(
         "month": month,
         "merges": merge_log,
         "merged_unmatched": merged_unmatched,
+        "ake_auto": ake_auto,
+        "ake_schedule_priority": ake_schedule_priority,
+        "ake_conflicts": ake_conflicts,
     }
 
 
@@ -692,6 +818,9 @@ def export_jinjer_schedule_csv_split(
           "missing_ids": list[str],            # 全グループ合算
           "merges": list[dict],                # 全グループ合算
           "merged_unmatched": list[dict],      # 全グループ合算
+          "ake_auto": list[dict],              # 夜勤明けを自動で「休み」にした日
+          "ake_schedule_priority": list[dict], # 翌日に予定がありシフト表を優先した日
+          "ake_conflicts": list[dict],         # 明けを自動設定できなかった日（要確認）
           "ungrouped": list[str],              # 打刻グループが取れなかった従業員氏名
         }
     """
@@ -721,6 +850,9 @@ def export_jinjer_schedule_csv_split(
     all_missing_ids: list[str] = []
     all_merges: list[dict] = []
     all_merged_unmatched: list[dict] = []
+    all_ake_auto: list[dict] = []
+    all_ake_schedule_priority: list[dict] = []
+    all_ake_conflicts: list[dict] = []
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -763,6 +895,9 @@ def export_jinjer_schedule_csv_split(
         all_missing_ids.extend(result.get("missing_ids", []))
         all_merges.extend(result.get("merges", []))
         all_merged_unmatched.extend(result.get("merged_unmatched", []))
+        all_ake_auto.extend(result.get("ake_auto", []))
+        all_ake_schedule_priority.extend(result.get("ake_schedule_priority", []))
+        all_ake_conflicts.extend(result.get("ake_conflicts", []))
 
         logger.info(
             "打刻グループ別CSV出力: gid=%s name=%s rows=%d -> %s",
@@ -774,5 +909,8 @@ def export_jinjer_schedule_csv_split(
         "missing_ids": all_missing_ids,
         "merges": all_merges,
         "merged_unmatched": all_merged_unmatched,
+        "ake_auto": all_ake_auto,
+        "ake_schedule_priority": all_ake_schedule_priority,
+        "ake_conflicts": all_ake_conflicts,
         "ungrouped": ungrouped,
     }

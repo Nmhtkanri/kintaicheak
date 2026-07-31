@@ -827,6 +827,33 @@ body {
     box-shadow: 0 0 0 2px rgba(44, 90, 160, 0.15);
 }
 
+/* 氏名 → jinjer 従業員ID の事前照合結果 */
+.legend-employee-status { font-size: 12px; }
+.name-status {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+.name-status-checking { color: #6b7785; }
+.name-status-ok { color: #1b5e20; background: #e8f5e9; }
+.name-status-ambiguous { color: #8a5300; background: #fff3e0; }
+.name-status-unknown,
+.name-status-error { color: #b71c1c; background: #ffebee; }
+.name-candidate-select {
+    display: block;
+    margin-top: 4px;
+    max-width: 100%;
+    padding: 3px 4px;
+    border: 1px solid #e0a800;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+/* 夜勤明けの自動設定トレース */
+.ake-before { color: #6b7785; font-size: 11px; }
+.ake-conflict { background: #fff8e1; }
+
 /* 日別シフト編集（確認画面・従業員ごと） */
 .legend-shift-toggle { white-space: nowrap; background: #5d6d7e; }
 .legend-employee-detail > td {

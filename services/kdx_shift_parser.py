@@ -27,6 +27,9 @@ from datetime import date
 
 logger = logging.getLogger(__name__)
 
+# シフト表の系統識別子。氏名エイリアス表の適用範囲を KDX に限るために使う。
+KDX_SOURCE = "kdx"
+
 # 勤務時間の固定値（表に記載がないため。変更時はここを直す）
 KDX_DAY_START = "9:00"
 KDX_DAY_END = "17:30"
@@ -310,6 +313,9 @@ def parse_kdx_words(
         "legend": legend,
         "employees": employees,
         "off_markers": [_OFF_CODE, _AKE_CODE],
+        # シフト表の系統。氏名エイリアス表（services/employee_alias.py）を
+        # この系統に限って適用するために使う。
+        "source": KDX_SOURCE,
         "section_info": {
             "section_index": None,
             "weekday_matched": wd_matched,

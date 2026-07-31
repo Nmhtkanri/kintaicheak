@@ -265,6 +265,12 @@
             <p style="margin-top:6px; font-size:12px">CSVの該当行は ID が空欄になっています。jinjer 画面で手動補完してください。</p>
         </div>
 
+        <div id="ake-area" style="display:none; margin-top: 12px;">
+            <div class="section-title" style="font-size:14px">夜勤明けの自動設定</div>
+            <p class="hint" style="margin:4px 0 8px 0">退勤が 30:00（翌朝6:00）以降のシフトは、翌日を自動で「休み」にしました。連日夜勤など<strong>翌日にも予定が入っている日はシフト表を優先</strong>します（明け休にしません）。⚠️ の行だけ確認してください。</p>
+            <div id="ake-list" class="merges-list"></div>
+        </div>
+
         <div id="merges-area" style="display:none; margin-top: 12px;">
             <div class="section-title" style="font-size:14px">深夜跨ぎシフトの自動統合</div>
             <p class="hint" style="margin:4px 0 8px 0">以下の連続日シフトを1本に統合しました。翌日のセルは休扱い（所/法）になっています。</p>
