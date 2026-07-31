@@ -38,7 +38,9 @@ from services.jinjer_schedule_csv_exporter import (
 from services.employee_alias import (
     alias_csv_path,
     apply_aliases,
+    filter_employees_by_roster,
     load_aliases_for_source,
+    load_roster_for_source,
 )
 from services.multi_year_shift_parser import parse_structured_files
 
@@ -141,14 +143,57 @@ def _name_map_for_sheet(
 ) -> tuple[dict, dict, str]:
     """シフト表の系統に応じた氏名→IDマップを返す
 
+    エイリアス表と、対象者リストのID列の両方を重ねる。
+
     Returns:
         (name_to_id, aliases, warning)
         name_to_id … エイリアスを重ねた辞書（対象外の系統なら base のまま）
         aliases    … 適用したエイリアス {氏名: 従業員ID}
-        warning    … エイリアス表が読めなかった場合の説明（正常時は空文字）
+        warning    … 表が読めなかった場合の説明（正常時は空文字）
     """
     aliases, warning = load_aliases_for_source(source, Config.SCHEDULE_NAME_ALIAS_DIR)
-    return apply_aliases(base_name_to_id, aliases), aliases, warning
+    _, roster_ids, roster_warning = load_roster_for_source(
+        source, Config.SCHEDULE_NAME_ALIAS_DIR)
+    merged = dict(aliases)
+    merged.update(roster_ids)   # 対象者リストのID列を後勝ちにする
+    warning = warning or roster_warning
+    return apply_aliases(base_name_to_id, merged), merged, warning
+
+
+def _apply_roster_to_sheets(code_sheets: list[dict]) -> list[str]:
+    """他社の方が混ざる系統のシートを、対象者リストの人だけに絞り込む
+
+    UAL勤務管理表（KDDI小山）は他社の方も同じ表に載っており、姓だけの氏名が
+    当社社員に名前一致してしまう（他社の「小島」→ 当社 小島さん 2024044）。
+    リストに載っていない行はここで落とす。code_sheets は破壊的に更新する。
+
+    Returns:
+        画面に出すメッセージのリスト
+    """
+    messages: list[str] = []
+    for sheet in code_sheets or []:
+        if not isinstance(sheet, dict):
+            continue
+        source = str(sheet.get("source") or "")
+        roster_names, _ids, warning = load_roster_for_source(
+            source, Config.SCHEDULE_NAME_ALIAS_DIR)
+        if warning:
+            messages.append(f"⚠️ {sheet.get('filename', '')}: {warning}")
+        if roster_names is None:
+            continue
+        kept, excluded = filter_employees_by_roster(sheet.get("employees") or [],
+                                                    roster_names)
+        sheet["employees"] = kept
+        if excluded:
+            messages.append(
+                f"{sheet.get('filename', '')}: 対象者リストに無い {len(excluded)}名を除外しました"
+                f"（{'、'.join(excluded)}）→ 当社社員 {len(kept)}名を取り込みます"
+            )
+        logger.info("対象者リスト適用: %s 取込%d名 / 除外%d名",
+                    sheet.get("filename"), len(kept), len(excluded))
+    return messages
+
+
 
 
 def _resolve_name_status(
@@ -522,6 +567,10 @@ def upload():
                 return
 
             code_sheets = _apply_single_supplemental_legend(code_sheets)
+
+            # 他社の方が混ざる勤務表は、対象者リストで当社社員だけに絞る
+            for msg in _apply_roster_to_sheets(code_sheets):
+                yield _sse_event("progress", {"message": msg})
 
             # CSV変換モードでは記号式（code）のみが対象
             if mode == "csv_export" and not code_sheets:

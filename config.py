@@ -53,6 +53,13 @@ class Config:
     # 全員分のシフト表(例: 21名×30日)を1回で返すと 4096 では出力が途中で切れて壊れる。
     # 余裕を持たせる。.env の ANTHROPIC_MAX_TOKENS で上書き可能。
     ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "16000"))
+    # AI 読み取り1回あたりの上限時間（秒）。**必ず設定すること**。
+    # 未設定だと、応答が返らないときに画面が「処理中...」のまま無限に固まる
+    # （2026-07-31 実例: 複数シートのブックで25分以上ハング）。
+    ANTHROPIC_TIMEOUT_SECONDS = float(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "300"))
+    # AI に送るテキストの上限文字数。これを超えるファイルは送信前にエラーで止める
+    # （送っても max_tokens に収まる回答が返らず、時間だけ溶けるため）。
+    AI_MAX_INPUT_CHARS = int(os.environ.get("AI_MAX_INPUT_CHARS", "400000"))
 
     # シフト記号モード（jinjer 雛形マッチング用 CSV のパス）
     # 設定されている場合のみ、未マッチ記号から「新規雛形 CSV」を自動生成する

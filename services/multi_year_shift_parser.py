@@ -43,6 +43,7 @@ from services.higashi_shift_parser import (
     parse_higashi_shift_xlsx,
 )
 from services.kdx_shift_parser import is_kdx_shift_pdf, parse_kdx_shift_pdf
+from services.ual_shift_parser import is_ual_shift_xlsx, parse_ual_shift_xlsx
 
 logger = logging.getLogger(__name__)
 
@@ -832,6 +833,7 @@ def parse_structured_files(
     monthly_shift_paths: list[str] = []
     higashi_shift_paths: list[str] = []
     kdx_pdf_paths: list[str] = []
+    ual_shift_paths: list[str] = []
     for p in paths:
         low = p.lower()
         if low.endswith(".pdf"):
@@ -848,6 +850,9 @@ def parse_structured_files(
                 if is_higashi_shift_xlsx(p):
                     higashi_shift_paths.append(p)
                     continue
+                if is_ual_shift_xlsx(p):
+                    ual_shift_paths.append(p)
+                    continue
             if is_multi_year_shift_xlsx(p):
                 shift_paths.append(p)
             elif is_monthly_shift_xlsx(p):
@@ -858,7 +863,8 @@ def parse_structured_files(
             logger.warning("xlsx sniff 失敗 %s: %s", p, e)
 
     if (not shift_paths and not monthly_shift_paths
-            and not higashi_shift_paths and not kdx_pdf_paths):
+            and not higashi_shift_paths and not kdx_pdf_paths
+            and not ual_shift_paths):
         return None
 
     # 凡例をマージ（複数渡された場合は重複コードを除外しつつ全件統合）
@@ -895,9 +901,38 @@ def parse_structured_files(
             "off_markers": result["off_markers"],
             "year": result["year"],
             "month": result["month"],
+            "source": result.get("source", ""),
             "section_info": result.get("section_info"),
         })
         consumed.append(kp)
+
+    for up in ual_shift_paths:
+        try:
+            result = parse_ual_shift_xlsx(up, target_year, target_month)
+        except Exception as e:
+            logger.warning("UAL勤務管理表 %s の構造化解析に失敗: %s", up, e)
+            warnings.append(
+                f"UAL勤務管理表の構造化解析に失敗しました: {os.path.basename(up)} — {e}")
+            # AI 読み取りへは流さない。このブックは全シート（過去月）を渡すことになり
+            # 応答が返らず時間切れになるため（2026-07-31 実例）。
+            consumed.append(up)
+            continue
+        sheets.append({
+            "mode": "code",
+            "filename": result["filename"],
+            "legend": result["legend"],
+            "employees": result["employees"],
+            "off_markers": result["off_markers"],
+            "year": result["year"],
+            "month": result["month"],
+            "source": result.get("source", ""),
+            "section_info": result.get("section_info"),
+        })
+        if result.get("unknown_codes"):
+            warnings.append(
+                f"{result['filename']}: 凡例に無い記号がありました "
+                f"({' / '.join(result['unknown_codes'])})。凡例確認画面で内容を指定してください。")
+        consumed.append(up)
 
     for hp in higashi_shift_paths:
         try:

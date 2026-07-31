@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 # source（シフト表の系統）→ CSV ファイル名
 ALIAS_CSV_BY_SOURCE = {
     "kdx": "スケジュール氏名エイリアス_KDX.csv",
+    "kddi_oyama": "スケジュール氏名エイリアス_KDDI小山.csv",
+}
+
+# 対象者リスト。**他社の方が同じ表に載っている系統**だけに置く。
+# ファイルがある系統では、ここに載っている人だけを取り込む（載っていない行は捨てる）。
+# UAL勤務管理表（KDDI小山）は他社の「小島」が当社の小島さん(2024044)に名前一致して
+# しまうため、このリストが無いと他人のスケジュールを投入する事故になる。
+ROSTER_CSV_BY_SOURCE = {
+    "kddi_oyama": "スケジュール対象者_KDDI小山.csv",
 }
 
 _NAME_COLUMNS = ("シフト表氏名", "氏名", "名前")
@@ -98,6 +107,107 @@ def load_employee_aliases(csv_path: str) -> dict[str, str]:
             )
         aliases[name] = emp_id
     return aliases
+
+
+def normalize_name_key(name) -> str:
+    """氏名の突合キー（前後と内部の空白を除去）"""
+    return re.sub(r"[\s　]+", "", str(name or "").strip())
+
+
+def load_roster(csv_path: str) -> tuple[set[str], dict[str, str]]:
+    """対象者リストCSV → (氏名キーの集合, {氏名: 従業員ID})
+
+    従業員ID 列は**任意**。空欄なら氏名だけ登録し、IDは通常の照合に任せる
+    （同姓が複数いる場合は画面の候補プルダウンで選ばせる）。
+
+    Raises:
+        ValueError: ファイルはあるが文字コード・列構成が読めない
+    """
+    names: set[str] = set()
+    ids: dict[str, str] = {}
+    if not csv_path or not os.path.exists(csv_path):
+        return names, ids
+
+    for i, row in enumerate(_read_rows(csv_path), start=2):
+        if not isinstance(row, dict):
+            continue
+        name = _pick(row, _NAME_COLUMNS)
+        if not name:
+            continue
+        names.add(normalize_name_key(name))
+        emp_id = _pick(row, _ID_COLUMNS)
+        if not emp_id:
+            continue  # ID未確定でも対象者としては有効
+        if not _VALID_EMPLOYEE_ID_RE.fullmatch(emp_id):
+            logger.warning(
+                "%s の %d 行目: 従業員ID %r は自社社員の形式(20YYNNN)ではないため無視",
+                csv_path, i, emp_id,
+            )
+            continue
+        ids[name] = emp_id
+    return names, ids
+
+
+def roster_csv_path(source: str, alias_dir: str) -> str:
+    """source に対応する対象者リストCSVのパス（対象外の source なら空文字）"""
+    filename = ROSTER_CSV_BY_SOURCE.get(str(source or "").strip().lower())
+    if not filename or not alias_dir:
+        return ""
+    return os.path.join(alias_dir, filename)
+
+
+def load_roster_for_source(
+    source: str, alias_dir: str
+) -> tuple[set[str] | None, dict[str, str], str]:
+    """source に対応する対象者リストを読む
+
+    Returns:
+        (names, ids, warning)
+        names   … 対象者の氏名キー集合。**リストを持たない系統では None**（＝絞り込まない）
+        ids     … 氏名→従業員ID（リストのID列にあるぶんだけ）
+        warning … 読み込みに失敗した場合の説明文（正常時は空文字）
+    """
+    path = roster_csv_path(source, alias_dir)
+    if not path:
+        return None, {}, ""
+    if not os.path.exists(path):
+        # リストを持つべき系統なのにファイルが無い＝他社の人を取り込む危険がある
+        return None, {}, (
+            f"対象者リストが見つかりません（{os.path.basename(path)}）。"
+            "この勤務表には他社の方も含まれるため、当社社員だけに絞り込めていません。"
+        )
+    try:
+        names, ids = load_roster(path)
+    except (OSError, ValueError) as e:
+        logger.warning("対象者リストの読み込みに失敗 %s: %s", path, e)
+        return None, {}, f"対象者リストを読めませんでした（{os.path.basename(path)}）: {e}"
+    if not names:
+        return None, {}, f"対象者リストが空です（{os.path.basename(path)}）。絞り込みをしていません。"
+    logger.info("対象者リストを適用: source=%s %d名 (%s)", source, len(names), path)
+    return names, ids, ""
+
+
+def filter_employees_by_roster(
+    employees: list[dict], roster_names: "set[str] | None"
+) -> tuple[list[dict], list[str]]:
+    """対象者リストに載っている従業員だけを残す
+
+    Returns:
+        (kept, excluded_names)  roster_names が None のときは絞り込まない
+    """
+    if roster_names is None:
+        return list(employees or []), []
+    kept: list[dict] = []
+    excluded: list[str] = []
+    for emp in employees or []:
+        if not isinstance(emp, dict):
+            continue
+        name = emp.get("name") or ""
+        if normalize_name_key(name) in roster_names:
+            kept.append(emp)
+        else:
+            excluded.append(name or "(名無し)")
+    return kept, excluded
 
 
 def alias_csv_path(source: str, alias_dir: str) -> str:

@@ -161,6 +161,26 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def _guard_input_size(file_content, file_type: str) -> None:
+    """AI に送る前に入力量を確認する。大きすぎる場合は送らずに止める。
+
+    送っても max_tokens に収まる回答が返らず、時間切れになるだけなので、
+    「待たされた末に失敗」ではなく「すぐ理由つきで失敗」させる。
+
+    Raises:
+        RuntimeError: 上限文字数を超えている場合
+    """
+    if file_type != "text" or not isinstance(file_content, str):
+        return
+    limit = Config.AI_MAX_INPUT_CHARS
+    if limit > 0 and len(file_content) > limit:
+        raise RuntimeError(
+            f"ファイルの情報量が多すぎるためAI読み取りを中止しました"
+            f"（{len(file_content):,}文字 / 上限 {limit:,}文字）。"
+            "不要なシートを削除するか、対象月のシートだけのファイルにしてください。"
+        )
+
+
 def parse_with_legend_extraction(
     file_content,
     file_type: str,
@@ -177,7 +197,15 @@ def parse_with_legend_extraction(
     Returns:
         {"mode": "code"|"direct", ...}  失敗時は RuntimeError
     """
-    client = anthropic.Anthropic()
+    _guard_input_size(file_content, file_type)
+
+    # timeout を必ず入れる。既定(未指定)のままだと応答が返らないときに画面が
+    # 「処理中...」で無限に固まる。SDK 側の自動リトライは 0 にして、この関数の
+    # リトライループと掛け算にならないようにする（3×3×タイムアウト を防ぐ）。
+    client = anthropic.Anthropic(
+        timeout=Config.ANTHROPIC_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
     messages = _build_messages(file_content, file_type, media_type)
 
     last_error = None
@@ -212,6 +240,13 @@ def parse_with_legend_extraction(
 
             return data
 
+        except anthropic.APITimeoutError as e:
+            # リトライしても同じだけ待たされるので即中止する（無限待ちの再発防止）
+            raise RuntimeError(
+                f"AI読み取りが {Config.ANTHROPIC_TIMEOUT_SECONDS:.0f} 秒以内に終わりませんでした。"
+                "シートが多いブックや情報量の多いファイルは、AIが返しきれず時間切れになります。"
+                "対象月のシートだけを残したファイルにするか、構造化パーサ対応の様式をご利用ください。"
+            ) from e
         except anthropic.RateLimitError:
             logger.warning("レート制限 (試行 %d/%d)", attempt + 1, max_retries)
             _time.sleep(3)

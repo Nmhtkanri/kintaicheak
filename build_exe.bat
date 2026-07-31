@@ -38,6 +38,8 @@ python -m PyInstaller ^
   --hidden-import services.mail_ledger_sync ^
   --hidden-import services.higashi_shift_parser ^
   --hidden-import services.kdx_shift_parser ^
+  --hidden-import services.ual_shift_parser ^
+  --hidden-import services.employee_alias ^
   launcher.py
 
 if errorlevel 1 goto :build_failed
