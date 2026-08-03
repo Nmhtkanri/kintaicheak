@@ -481,8 +481,18 @@ def build_commute_station_sets(commute_rows: list[dict]) -> dict:
     return commute
 
 
-def evaluate_route_check(integrated_rows: list[list[str]], commute_rows: list[dict]) -> list[dict]:
-    """統合一覧表の交通費行を通勤経路と突合し、判定付きの行リストを返す。"""
+def evaluate_route_check(
+    integrated_rows: list[list[str]],
+    commute_rows: list[dict],
+    travel_members: "dict[str, str] | None" = None,
+) -> list[dict]:
+    """統合一覧表の交通費行を通勤経路と突合し、判定付きの行リストを返す。
+
+    travel_members（移動交通費（立替精算）対象者 {社員番号: 氏名}）を渡すと、
+    該当者は経路の有無によらず「移動交通費＝立替精算が正」として判定する。
+    通勤系の交通機関を選んでいた場合だけ △ で知らせる（2026-08-03 谷津さん指定）。
+    """
+    travel_members = travel_members or {}
     commute = build_commute_station_sets(commute_rows)
     results: list[dict] = []
     for r in integrated_rows:
@@ -505,7 +515,12 @@ def evaluate_route_check(integrated_rows: list[list[str]], commute_rows: list[di
         else:
             match = "一致なし"
 
-        if match == "経路内":
+        if emp in travel_members:
+            if kikan in COMMUTE_TYPES:
+                verdict = "△逆要確認（移動交通費（立替精算）対象者が通勤系を選択）"
+            else:
+                verdict = "OK（移動交通費対象者＝立替精算）"
+        elif match == "経路内":
             verdict = "OK（通勤系を選択）" if kikan in COMMUTE_TYPES else "★要確認（経路内なのに通勤系以外を選択）"
         elif match in ("一致なし", "通勤経路登録なし") and kikan in COMMUTE_TYPES:
             verdict = "△逆要確認（通勤系なのに登録経路と不一致）"
@@ -804,20 +819,27 @@ def run_keihi_integration(
         sap_dedup_removed_fieldnames = dedup.removed_fieldnames
 
     # --- ロスター（氏名→社員番号）を jinjer API から構築（e-staffing/SAP/freee 用） ---
+    # 経費は前月分を当月の給与計算で精算するため、前月1日以降の退職者も含める
+    # （例: 8月給与計算＝7月経費の処理時は 7/31 退職者まで。2026-08-03 谷津さん依頼）
     roster: dict = {}
     roster_id_to_name: dict = {}
     commute_rows: list[dict] = []
     if route_check or estaffing_csv or sap_csv or freee_csv:
         try:
+            from datetime import date, timedelta
             from services.expense_check import fetch_active_employees, fetch_commute_rows_via_api
             from services.jinjer_api_client import JinjerClient
             if client is None:
                 client = JinjerClient()
                 client.authenticate()
-            employees = fetch_active_employees(client)
+            prev_month_start = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
+            employees = fetch_active_employees(client, include_retired_since=prev_month_start)
             roster = build_roster_from_api(employees)
             roster_id_to_name = {str(e["id"]): e["name"] for e in employees}
-            log_func(f"[info] jinjer 在籍者ロスター: {len(employees)} 名")
+            log_func(
+                f"[info] jinjer ロスター: {len(employees)} 名"
+                f"（在籍＋{prev_month_start:%Y-%m} 以降の退職者）"
+            )
             if route_check:
                 commute_rows = fetch_commute_rows_via_api(client, roster_id_to_name)
                 log_func(f"[info] 通勤経路(API): {len(commute_rows)} 経路")
@@ -849,7 +871,23 @@ def run_keihi_integration(
         add_sap_dedup_sheet(wb, sap_dedup_removed_fieldnames, sap_dedup_removed_rows)
     if route_check:
         try:
-            route_results = evaluate_route_check(rows, commute_rows)
+            # 移動交通費（立替精算）対象者リスト（共有フォルダ）。読めなくても続行する
+            travel_members: dict = {}
+            try:
+                from services.expense_check import load_travel_expense_members
+                travel_members = load_travel_expense_members()
+                if travel_members:
+                    log_func(f"[info] 移動交通費（立替精算）対象者: {len(travel_members)} 名")
+                else:
+                    from config import Config
+                    log_func(
+                        f"[warn] 移動交通費対象者リストが見つかりません"
+                        f"（{Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV}）→ 対象者判定なしで続行"
+                    )
+            except Exception as e:  # noqa: BLE001
+                log_func(f"[warn] 移動交通費対象者リストの読込に失敗（対象者判定なしで続行）: {e}")
+
+            route_results = evaluate_route_check(rows, commute_rows, travel_members)
             result.route_summary = add_route_check_sheets(wb, route_results)
             log_func(
                 f"[info] 経路突合: ★要確認 {result.route_summary['flagged_rows']}行/"

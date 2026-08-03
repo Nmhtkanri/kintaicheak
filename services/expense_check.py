@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
+import re
 import time as _time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import requests
@@ -35,9 +36,30 @@ FONT = "Meiryo UI"
 # jinjer 取得
 # ----------------------------------------------------------------------
 
-def fetch_active_employees(client: JinjerClient) -> list[dict]:
-    """在籍中の従業員を [{id, name}] で返す（社員番号順）"""
-    employees = client.get_employees(only_active=True)
+def _norm_date_str(v) -> str:
+    """'2026/7/31' → '2026-07-31'。日付と解釈できなければ空文字。"""
+    m = re.match(r"^\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})", str(v or ""))
+    if not m:
+        return ""
+    return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+
+def fetch_active_employees(
+    client: JinjerClient, include_retired_since: "date | None" = None
+) -> list[dict]:
+    """在籍中の従業員を [{id, name}] で返す（社員番号順）。
+
+    include_retired_since を指定すると、その日以降に退職した従業員も含める。
+    経費・給与は前月分を翌月に精算するため、対象月の1日を渡すと
+    「対象月の月末までに退職した人」まで拾える
+    （例: 8月給与計算＝対象月7月 → 2026-07-01 を渡すと 7/15・7/31 退職者を含む）。
+
+    在籍区分は 0=在籍 / 1=退職 / 2=休職（2026-08-03 実測）。
+    休職者・退職日が読めない退職者は従来どおり含めない。
+    """
+    include_retirees = include_retired_since is not None
+    employees = client.get_employees(only_active=not include_retirees)
+    cutoff = include_retired_since.isoformat() if include_retirees else ""
     result = []
     for emp in employees:
         if not isinstance(emp, dict):
@@ -45,6 +67,14 @@ def fetch_active_employees(client: JinjerClient) -> list[dict]:
         emp_id = emp.get("id") or emp.get("employee_id")
         if emp_id is None:
             continue
+        if include_retirees:
+            company = emp.get("company") or {}
+            cls_id = str((company.get("enrollment_classification") or {}).get("id"))
+            if cls_id == "1":
+                if _norm_date_str(company.get("retirement_date")) < cutoff:
+                    continue  # 基準日より前に退職 → 対象外
+            elif cls_id != "0":
+                continue  # 休職など在籍・退職以外は従来どおり対象外
         last = str(_safe_get(emp, "company", "last_name") or "").strip()
         first = str(_safe_get(emp, "company", "first_name") or "").strip()
         name = f"{last} {first}".strip()
@@ -387,6 +417,121 @@ NO_COMMUTE_HEADERS = ["社員番号", "氏名", "通勤費", "区分", "利用�
 # それ以外（3ヶ月・6ヶ月等）は空欄にして目視判断に委ねる。
 _INTERVAL_TO_KUBUN = {"毎月": "通勤定期代", "毎日": "通勤費"}
 
+# 移動交通費（立替精算）対象者の区分表示
+TRAVEL_EXPENSE_KUBUN = "移動交通費"
+
+
+def load_travel_expense_members(path: "str | Path | None" = None) -> dict[str, str]:
+    """「移動交通費（立替精算）対象者」リスト CSV を読み {社員番号: 氏名} を返す。
+
+    現場直行などで通勤経路の登録が無くて正しい人たち。この人たちの交通費は
+    通勤費ではなく移動交通費＝立替精算として計上する（2026-08-03 谷津さん指定）。
+    リストは谷津さんが直すファイルなので exe に同梱せず共有フォルダを読む
+    （既定: Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV。再ビルド不要で反映）。
+
+    列: A=社員番号, B=氏名（3列目以降は無視）。ヘッダー行・空行・重複はスキップ。
+    ファイルが存在しない場合は空 dict を返す（呼び出し側で警告ログを出す）。
+    """
+    from config import Config
+    p = Path(path or Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV)
+    if not p.exists():
+        return {}
+    import csv as _csv
+    raw: list[list[str]] | None = None
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            with open(p, encoding=enc, newline="") as f:
+                raw = list(_csv.reader(f))
+            break
+        except UnicodeDecodeError:
+            continue
+    if raw is None:
+        raise ValueError(f"移動交通費対象者リストの文字コードを判別できませんでした: {p}")
+    members: dict[str, str] = {}
+    for r in raw:
+        emp = _norm_emp_id(r[0] if r else None)
+        if not emp or not emp[0].isdigit():
+            continue  # 空行・「社員番号」等のヘッダー行
+        name = str(r[1]).strip() if len(r) > 1 and r[1] is not None else ""
+        members.setdefault(emp, name)
+    return members
+
+
+def validate_travel_expense_rows(rows) -> tuple[list[dict], list[str], list[str]]:
+    """UI編集の対象者行を検証・正規化する。(正規化済み行, エラー, 注意) を返す。
+
+    - 社員番号: 必須・数字のみ。前後空白・Excel数値化（2026013.0）は吸収する。
+    - 氏名: 任意。前後空白は除去。
+    - 空行（番号・氏名とも空）は黙ってスキップ。重複番号はエラー。
+    - 7桁でない・20始まりでない番号は保存は通すが「注意」で返す
+      （派遣・テスト番号（5/6/9始まり）の混入や桁落ちの検知用）。
+    """
+    normalized: list[dict] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for i, r in enumerate(rows or [], start=1):
+        emp = _norm_emp_id((r or {}).get("id"))
+        name = str((r or {}).get("name") or "").strip()
+        if not emp and not name:
+            continue
+        if not emp:
+            errors.append(f"{i}行目: 社員番号が空です（氏名: {name}）")
+            continue
+        if not emp.isdigit():
+            errors.append(f"{i}行目: 社員番号が数字ではありません: {emp}")
+            continue
+        if emp in seen:
+            errors.append(f"{i}行目: 社員番号が重複しています: {emp}")
+            continue
+        seen.add(emp)
+        if len(emp) != 7 or not emp.startswith("20"):
+            warnings.append(f"社員番号 {emp} は自社形式（20YY＋3桁）ではありません")
+        normalized.append({"id": emp, "name": name})
+    return normalized, errors, warnings
+
+
+def save_travel_expense_members(
+    rows: list[dict], path: "str | Path | None" = None
+) -> dict:
+    """移動交通費（立替精算）対象者リストを CSV（UTF-8 BOM）へ保存する。
+
+    既存ファイルは `_backup` フォルダへ日時付きでコピーしてから、
+    一時ファイル → os.replace で置き換える（途中で失敗しても元ファイルは無傷）。
+    Excel 等で開かれていて置き換えられない場合は PermissionError になる。
+
+    Returns:
+        {"path": 保存先, "backup": バックアップ先（新規作成なら空文字）, "count": 行数}
+    """
+    import csv as _csv
+    import os as _os
+    import shutil as _shutil
+    from config import Config
+    p = Path(path or Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    backup = ""
+    if p.exists():
+        backup_dir = p.parent / "_backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"{p.stem}_{stamp}{p.suffix}"
+        _shutil.copy2(p, backup_path)
+        backup = str(backup_path)
+
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["社員番号", "氏名"])
+        for r in rows:
+            w.writerow([r["id"], r.get("name", "")])
+    try:
+        _os.replace(tmp, p)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    return {"path": str(p), "backup": backup, "count": len(rows)}
+
 
 def _norm_emp_id(v) -> str:
     """社員番号を文字列に正規化する（Excelの数値セル 2026013.0 → '2026013'）。"""
@@ -427,6 +572,7 @@ def build_no_commute_rows(
     entries: list[dict],
     summary_rows: list[dict],
     commute_rows: list[dict],
+    travel_members: "dict[str, str] | None" = None,
 ) -> tuple[list[dict], list[dict]]:
     """「通勤費申請なし」リストを自動整備する（経費チェックモードの改修案 STEP2/3）。
 
@@ -436,14 +582,25 @@ def build_no_commute_rows(
            先頭経路（経路No最小）の支給間隔を 毎月→通勤定期代／毎日→通勤費 に
            マッピングする。通勤費未登録は金額0・区分空欄、金額0登録ありは区分のみ入る。
 
+    travel_members（移動交通費（立替精算）対象者 {社員番号: 氏名}）を渡すと、
+    該当者の区分を「移動交通費」に固定し、備考に「立替精算対象」を付ける。
+    手動リストに載っていない対象者は末尾に自動追加する（載せ忘れ対策）。
+
     Returns:
         (整備済み行, 除外した行)。行キー: id / name / amount / kubun / kikan / remark
     """
+    travel_members = travel_members or {}
     att = {str(r["id"]).strip(): (r["work_days"], len(r["telework_days"])) for r in summary_rows}
     names = {str(r["id"]).strip(): r["name"] for r in summary_rows}
     routes_by_emp: dict[str, list[dict]] = {}
     for c in commute_rows:
         routes_by_emp.setdefault(_norm_emp_id(c.get("社員番号")), []).append(c)
+
+    listed = {e["id"] for e in entries}
+    entries = list(entries) + [
+        {"id": emp, "name": nm} for emp, nm in sorted(travel_members.items())
+        if emp not in listed
+    ]
 
     kept: list[dict] = []
     removed: list[dict] = []
@@ -467,11 +624,15 @@ def build_no_commute_rows(
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 amount += int(v)
         interval = str(routes[0].get("支給間隔") or "").strip() if routes else ""
+        kubun = _INTERVAL_TO_KUBUN.get(interval, "")
+        if emp in travel_members:
+            kubun = TRAVEL_EXPENSE_KUBUN
+            remark = "・".join(x for x in (remark, "立替精算対象") if x)
         kept.append({
             "id": emp,
             "name": name,
             "amount": amount,
-            "kubun": _INTERVAL_TO_KUBUN.get(interval, ""),
+            "kubun": kubun,
             "kikan": str(routes[0].get("利用交通機関") or "") if routes else "",
             "remark": remark,
         })
@@ -497,7 +658,7 @@ def add_no_commute_sheet(wb: Workbook, rows: list[dict]) -> None:
         c.font = Font(name=FONT, bold=True)
         c.alignment = right
 
-    for col, width in zip("ABCDEF", [12, 18, 12, 14, 16, 16]):
+    for col, width in zip("ABCDEF", [12, 18, 12, 14, 16, 26]):
         ws.column_dimensions[col].width = width
     for cell in ws[1]:
         cell.font = header_font
@@ -754,6 +915,9 @@ def run_telework_export(
     no_commute_xlsx: 手動整備の「通勤費申請なし」リスト Excel のパス（任意）。
                  指定すると完全在宅者を除外し通勤費・区分を転記した
                  「通勤費申請なし」シートを同じブックに追加する。
+
+    対象者は在籍者＋対象月1日以降の退職者（例: 対象月7月なら 7/31 退職者まで含む
+    ＝8月給与計算の対象と一致。2026-08-03 谷津さん依頼）。
     """
     result = TeleworkResult(ok=False, output_path=output_path, month=month)
 
@@ -765,8 +929,15 @@ def run_telework_export(
         log_func(f"[error] {result.error}")
         return result
 
+    # 対象月の1日以降に退職した人まで含める（前月分精算＝翌月給与計算の対象者と一致させる）
     try:
-        employees = fetch_active_employees(client)
+        y, m = month.split("-")
+        month_start = date(int(y), int(m), 1)
+    except ValueError:
+        month_start = None
+
+    try:
+        employees = fetch_active_employees(client, include_retired_since=month_start)
     except JinjerAPIError as e:
         result.error = f"従業員一覧の取得に失敗しました: {e}"
         log_func(f"[error] {result.error}")
@@ -775,7 +946,10 @@ def run_telework_export(
     if limit:
         employees = employees[:limit]
     total = len(employees)
-    log_func(f"[start] 対象月 {month} / 在籍 {total} 名（1名ずつ取得するため数分かかります）")
+    log_func(
+        f"[start] 対象月 {month} / 対象 {total} 名"
+        f"（在籍＋{month} 月以降の退職者。1名ずつ取得するため数分かかります）"
+    )
 
     rows: list[dict] = []
     skipped = 0
@@ -819,8 +993,23 @@ def run_telework_export(
     # 通勤費申請なしリスト（手動Excel）を読み込み、整備済みシートを追加
     if no_commute_xlsx:
         try:
+            # 移動交通費（立替精算）対象者リスト（共有フォルダ）。読めなくても続行する
+            travel_members: dict[str, str] = {}
+            try:
+                travel_members = load_travel_expense_members()
+                if travel_members:
+                    log_func(f"[info] 移動交通費（立替精算）対象者: {len(travel_members)} 名（区分を自動設定）")
+                else:
+                    from config import Config
+                    log_func(
+                        f"[warn] 移動交通費対象者リストが見つかりません"
+                        f"（{Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV}）→ 区分の自動設定なしで続行"
+                    )
+            except Exception as e:  # noqa: BLE001
+                log_func(f"[warn] 移動交通費対象者リストの読込に失敗（自動設定なしで続行）: {e}")
+
             entries = read_no_commute_list(no_commute_xlsx)
-            kept, removed = build_no_commute_rows(entries, rows, commute_rows)
+            kept, removed = build_no_commute_rows(entries, rows, commute_rows, travel_members)
             add_no_commute_sheet(wb, kept)
             result.no_commute_kept = len(kept)
             result.no_commute_removed = len(removed)

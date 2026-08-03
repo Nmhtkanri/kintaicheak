@@ -109,6 +109,46 @@ def test_step3_amount_skips_blank_values():
     assert kept[0]["kubun"] == "通勤定期代"
 
 
+def test_travel_members_get_kubun_and_auto_added():
+    """移動交通費（立替精算）対象者は区分を固定し、リスト漏れは自動追加する。"""
+    entries = [{"id": "2018017", "name": "中村 淳一"}, {"id": "30", "name": "普通の人"}]
+    summary = [_summary("2018017", "中村 淳一", 20, 0),
+               _summary("30", "普通の人", 20, 5),
+               _summary("2026001", "佐久間歩", 15, 0)]
+    # 中村さんに通勤費登録があっても（毎月＝通勤定期代のはず）移動交通費が優先される
+    commute = [{"社員番号": "2018017", "経路No": 1, "支給間隔": "毎月",
+                "支給金額": 5000, "利用交通機関": "電車"}]
+    travel = {"2018017": "中村 淳一", "2026001": "佐久間歩"}
+    kept, removed = build_no_commute_rows(entries, summary, commute, travel)
+    by = {r["id"]: r for r in kept}
+    assert by["2018017"]["kubun"] == "移動交通費"
+    assert by["2018017"]["amount"] == 5000            # 金額は事実として転記
+    assert by["2018017"]["remark"] == "立替精算対象"
+    assert by["30"]["kubun"] == ""                    # 対象外の人は従来どおり
+    # 手動リストに無い対象者 2026001 は自動追加され、氏名はサマリから補完
+    assert "2026001" in by
+    assert by["2026001"]["kubun"] == "移動交通費"
+    assert by["2026001"]["name"] == "佐久間歩"
+    assert removed == []
+
+
+def test_travel_member_full_remote_still_removed():
+    """移動交通費対象者でも完全在宅（STEP2）はこれまでどおり除外される。"""
+    entries = [{"id": "2020008", "name": "佐藤 清"}]
+    summary = [_summary("2020008", "佐藤 清", 20, 20)]
+    kept, removed = build_no_commute_rows(entries, summary, [], {"2020008": "佐藤 清"})
+    assert kept == []
+    assert [r["id"] for r in removed] == ["2020008"]
+
+
+def test_travel_member_remark_joins_attendance_note():
+    """勤怠なしの対象者は備考が「勤怠データなし・立替精算対象」になる。"""
+    kept, _ = build_no_commute_rows([], [], [], {"2020021": "二神 啓城"})
+    assert kept[0]["id"] == "2020021"
+    assert kept[0]["remark"] == "勤怠データなし・立替精算対象"
+    assert kept[0]["kubun"] == "移動交通費"
+
+
 def test_add_no_commute_sheet(tmp_path):
     wb = Workbook()
     add_no_commute_sheet(wb, [

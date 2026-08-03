@@ -8,6 +8,8 @@ from services.expense_check import (
     summarize, build_telework_workbook, _md,
     read_commute_csv, add_commute_sheet, add_selected_employee_views,
     COMMUTE_OUTPUT_COLUMNS, _build_telework_sheets, EMP_PICK_NAME,
+    fetch_active_employees, load_travel_expense_members, _norm_date_str,
+    validate_travel_expense_rows, save_travel_expense_members,
 )
 
 
@@ -48,6 +50,153 @@ def test_summarize_empty():
 def test_md_formats():
     assert _md("2026-05-01") == "5/1"
     assert _md("2026/5/9") == "5/9"
+
+
+def test_norm_date_str():
+    assert _norm_date_str("2026-07-31") == "2026-07-31"
+    assert _norm_date_str("2026/7/1") == "2026-07-01"
+    assert _norm_date_str("") == ""
+    assert _norm_date_str(None) == ""
+    assert _norm_date_str("退職") == ""
+
+
+# ----------------------------------------------------------------------
+# 従業員取得（前月退職者を含める。2026-08-03 谷津さん依頼）
+# ----------------------------------------------------------------------
+
+def _emp(emp_id, last, first, cls_id, retired_on=""):
+    return {"id": emp_id, "company": {
+        "last_name": last, "first_name": first,
+        "enrollment_classification": {"id": cls_id, "name": {0: "在籍", 1: "退職", 2: "休職"}[cls_id]},
+        "retirement_date": retired_on,
+    }}
+
+
+class _FakeEmployeeClient:
+    """get_employees の only_active を実APIと同じ意味で再現するダミー。"""
+    def __init__(self, employees):
+        self._employees = employees
+        self.calls = []
+
+    def get_employees(self, only_active=True):
+        self.calls.append(only_active)
+        if only_active:
+            return [e for e in self._employees
+                    if (e["company"]["enrollment_classification"]["id"] == 0)]
+        return list(self._employees)
+
+
+_EMPLOYEES = [
+    _emp("2020001", "田中", "一郎", 0),                       # 在籍
+    _emp("2025001", "森田", "恭介", 0, "2026-08-31"),          # 退職日登録済みだがまだ在籍
+    _emp("2023019", "小池", "裕也", 1, "2026-07-31"),          # 対象月末の退職者
+    _emp("2025022", "池村", "重里", 1, "2026-07-15"),          # 対象月中の退職者
+    _emp("2016012", "守屋", "圭祐", 1, "2026-06-30"),          # 前月より前の退職者
+    _emp("2020021", "二神", "啓城", 2),                        # 休職 → 従来どおり対象外
+    _emp("2010001", "昔の", "退職者", 1, ""),                   # 退職日なし → 対象外
+]
+
+
+def test_fetch_active_employees_default_only_active():
+    client = _FakeEmployeeClient(_EMPLOYEES)
+    got = fetch_active_employees(client)
+    assert [e["id"] for e in got] == ["2020001", "2025001"]
+    assert client.calls == [True]      # 従来どおり在籍者のみの取得
+
+
+def test_fetch_active_employees_includes_recent_retirees():
+    from datetime import date
+    client = _FakeEmployeeClient(_EMPLOYEES)
+    got = fetch_active_employees(client, include_retired_since=date(2026, 7, 1))
+    ids = [e["id"] for e in got]
+    assert ids == ["2020001", "2023019", "2025001", "2025022"]
+    assert "2016012" not in ids        # 6/30 退職 → 対象外
+    assert "2020021" not in ids        # 休職は含めない
+    by = {e["id"]: e["name"] for e in got}
+    assert by["2023019"] == "小池 裕也"
+
+
+# ----------------------------------------------------------------------
+# 移動交通費（立替精算）対象者リスト
+# ----------------------------------------------------------------------
+
+def test_load_travel_expense_members_utf8_bom(tmp_path):
+    p = tmp_path / "travel.csv"
+    p.write_text("社員番号,氏名\n2018017,中村 淳一\n2026001,佐久間歩\n2018017,重複\n\n",
+                 encoding="utf-8-sig")
+    got = load_travel_expense_members(p)
+    assert got == {"2018017": "中村 淳一", "2026001": "佐久間歩"}
+
+
+def test_load_travel_expense_members_cp932(tmp_path):
+    import csv
+    p = tmp_path / "travel_sjis.csv"
+    with open(p, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["社員番号", "氏名"])
+        w.writerow(["2020008", "佐藤 清"])
+    assert load_travel_expense_members(p) == {"2020008": "佐藤 清"}
+
+
+def test_load_travel_expense_members_missing_file(tmp_path):
+    assert load_travel_expense_members(tmp_path / "nai.csv") == {}
+
+
+def test_validate_travel_expense_rows():
+    rows = [
+        {"id": " 2018017 ", "name": " 中村 淳一 "},   # 前後空白は吸収
+        {"id": 2026013.0, "name": "川口"},            # Excel数値化
+        {"id": "", "name": ""},                       # 空行はスキップ
+        {"id": "5000001", "name": "派遣さん"},        # 形式外 → 注意
+        {"id": "", "name": "番号なし"},               # エラー
+        {"id": "20x8017", "name": "非数字"},          # エラー
+        {"id": "2018017", "name": "重複"},            # エラー
+    ]
+    normalized, errors, warnings = validate_travel_expense_rows(rows)
+    assert [r["id"] for r in normalized] == ["2018017", "2026013", "5000001"]
+    assert normalized[0]["name"] == "中村 淳一"
+    assert len(errors) == 3
+    assert any("番号なし" in e for e in errors)
+    assert any("非数字" in e or "20x8017" in e for e in errors)
+    assert any("重複" in e for e in errors)
+    assert warnings == ["社員番号 5000001 は自社形式（20YY＋3桁）ではありません"]
+
+
+def test_save_travel_expense_members_roundtrip_and_backup(tmp_path):
+    p = tmp_path / "travel.csv"
+    r1 = save_travel_expense_members([{"id": "2018017", "name": "中村 淳一"}], p)
+    assert r1["backup"] == ""                       # 新規作成はバックアップなし
+    assert load_travel_expense_members(p) == {"2018017": "中村 淳一"}
+
+    r2 = save_travel_expense_members(
+        [{"id": "2018017", "name": "中村 淳一"}, {"id": "2026001", "name": "佐久間歩"}], p)
+    assert r2["count"] == 2
+    assert r2["backup"]                             # 2回目は上書き前バックアップあり
+    backup_path = tmp_path / "_backup"
+    backups = list(backup_path.glob("travel_*.csv"))
+    assert len(backups) == 1
+    assert load_travel_expense_members(backups[0]) == {"2018017": "中村 淳一"}   # 旧内容
+    assert load_travel_expense_members(p) == {"2018017": "中村 淳一", "2026001": "佐久間歩"}
+    # UTF-8 BOM で保存されている（谷津さんの Excel でそのまま開ける）
+    assert p.read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_save_travel_expense_members_replace_failure_keeps_original(tmp_path, monkeypatch):
+    """置き換えに失敗（Excelで開いている等）しても元ファイルと一時ファイルを汚さない。"""
+    import os
+    p = tmp_path / "travel.csv"
+    save_travel_expense_members([{"id": "2018017", "name": "中村 淳一"}], p)
+
+    def _fail(src, dst):
+        raise PermissionError("locked")
+    monkeypatch.setattr(os, "replace", _fail)
+    try:
+        save_travel_expense_members([{"id": "2026001", "name": "佐久間歩"}], p)
+        assert False, "PermissionError になるはず"
+    except PermissionError:
+        pass
+    assert load_travel_expense_members(p) == {"2018017": "中村 淳一"}   # 元のまま
+    assert not (tmp_path / "travel.csv.tmp").exists()                   # 一時ファイル掃除済み
 
 
 def test_build_telework_workbook(tmp_path):

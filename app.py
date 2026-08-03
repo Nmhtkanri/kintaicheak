@@ -1649,6 +1649,64 @@ def route_expense_telework():
     return jsonify(payload)
 
 
+@app.route("/travel_expense_members", methods=["GET"])
+def route_travel_expense_members():
+    """経費チェック: 移動交通費（立替精算）対象者リストの取得（UI表示・編集用）。
+
+    リストの実体は共有フォルダの CSV（Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV）。
+    exe に同梱しないので、保存すれば再ビルドなしで次回実行から反映される。
+    """
+    from services.expense_check import load_travel_expense_members
+    path = Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV
+    try:
+        members = load_travel_expense_members()
+        return jsonify({
+            "success": True,
+            "path": path,
+            "exists": _Path(path).exists(),
+            "members": [{"id": k, "name": v} for k, v in members.items()],
+        })
+    except Exception as e:
+        logger.exception("travel_expense_members get failed")
+        return jsonify({"success": False, "errors": [str(e)], "path": path}), 500
+
+
+@app.route("/travel_expense_members", methods=["POST"])
+def route_travel_expense_members_save():
+    """経費チェック: 移動交通費（立替精算）対象者リストの保存。
+
+    JSON {members: [{id, name}]} を検証し、既存CSVを `_backup` へ日時付きで
+    コピーしてから置き換える。検証エラー時は保存しない。
+    全員削除（0名）の保存は誤操作防止のため受け付けない（CSV直接編集で対応）。
+    """
+    from services.expense_check import validate_travel_expense_rows, save_travel_expense_members
+    data = request.get_json(silent=True) or {}
+    rows = data.get("members")
+    if not isinstance(rows, list):
+        return jsonify({"success": False, "errors": ["リストの形式が不正です（members の配列が必要）"]}), 400
+    normalized, errors, warnings = validate_travel_expense_rows(rows)
+    if errors:
+        return jsonify({"success": False, "errors": errors, "warnings": warnings}), 400
+    if not normalized:
+        return jsonify({"success": False, "errors": [
+            "対象者が0名の保存は受け付けません（誤操作防止）。全員削除したい場合はCSVを直接編集してください。"]}), 400
+    try:
+        result = save_travel_expense_members(normalized)
+    except PermissionError:
+        return jsonify({"success": False, "errors": [
+            "リストCSVを置き換えられませんでした。Excel等で開いている場合は閉じてから再実行してください。"]}), 500
+    except Exception as e:
+        logger.exception("travel_expense_members save failed")
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+    return jsonify({
+        "success": True,
+        "count": result["count"],
+        "path": result["path"],
+        "backup": result["backup"],
+        "warnings": warnings,
+    })
+
+
 @app.route("/expense_integration", methods=["POST"])
 def route_expense_integration():
     """経費統合一覧表の生成（経費マクロ移植 P1a）。

@@ -613,7 +613,7 @@
                 <div class="step-number" style="background:#548235">💴</div>
                 <div class="step-copy">
                     <div class="section-title">経費チェック：テレワーク日数・出社日数（jinjer勤怠から自動集計）</div>
-                    <p class="hint">対象月を入れると、在籍者全員のテレワーク日数・出社日数・テレワーク実施日を社員番号/氏名ごとにExcelでまとめます。全員分を1名ずつ取得するため数分かかります。</p>
+                    <p class="hint">対象月を入れると、在籍者と対象月以降の退職者（例: 対象月7月なら7/31退職者まで＝8月給与計算の対象）のテレワーク日数・出社日数・テレワーク実施日を社員番号/氏名ごとにExcelでまとめます。全員分を1名ずつ取得するため数分かかります。</p>
                 </div>
             </div>
         </div>
@@ -628,10 +628,30 @@
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
             <label>
-                通勤費申請なしリスト(Excel・任意): 手動整備したブックのパスを指定すると、完全在宅者を除外し通勤費・区分を転記した「通勤費申請なし」シートを追加します（A列=社員番号、B列=氏名）
+                通勤費申請なしリスト(Excel・任意): 手動整備したブックのパスを指定すると、完全在宅者を除外し通勤費・区分を転記した「通勤費申請なし」シートを追加します（A列=社員番号、B列=氏名）。移動交通費（立替精算）対象者は下のリストを読んで区分を「移動交通費」に自動設定します（リスト漏れも自動追加）
                 <input type="text" id="ex-no-commute" placeholder="例: Z:\経費\通勤費申請なしリスト.xlsx"
                        style="width:100%; padding:6px 10px; margin-top:4px">
             </label>
+            <div style="border:1px dashed #c55a11; border-radius:6px; padding:8px 10px; background:#fffaf5">
+                <button type="button" class="btn" id="ex-travel-toggle" style="background:#c55a11; color:#fff">🚗 移動交通費（立替精算）対象者リストを表示・編集</button>
+                <span class="hint" style="margin-left:8px">通勤経路が無くて正しい人たち（現場直行など）。保存すると次回実行から反映されます</span>
+                <div id="ex-travel-editor" style="display:none; margin-top:8px">
+                    <div class="hint" id="ex-travel-path"></div>
+                    <table style="border-collapse:collapse; margin-top:6px">
+                        <thead><tr>
+                            <th style="text-align:left; padding:2px 8px">社員番号</th>
+                            <th style="text-align:left; padding:2px 8px">氏名</th>
+                            <th></th>
+                        </tr></thead>
+                        <tbody id="ex-travel-tbody"></tbody>
+                    </table>
+                    <div style="margin-top:6px">
+                        <button type="button" class="btn" id="ex-travel-add">＋ 行を追加</button>
+                        <button type="button" class="btn btn-primary" id="ex-travel-save" style="background:#c55a11">💾 保存（バックアップを作ってから上書き）</button>
+                        <span id="ex-travel-msg" style="margin-left:10px; color:#666"></span>
+                    </div>
+                </div>
+            </div>
             <div style="margin-top:6px">
                 <button type="button" class="btn btn-primary" id="ex-run-btn" style="background:#548235">💴 経費集計を実行</button>
                 <span id="ex-status" style="margin-left:12px; color:#666"></span>
@@ -702,7 +722,7 @@
             </label>
             <label style="display:inline-flex; align-items:center; gap:6px">
                 <input type="checkbox" id="ki-route-check" checked>
-                経路突合チェックシートを付ける（通勤経路は jinjer API から取得。要ネット接続）
+                経路突合チェックシートを付ける（通勤経路は jinjer API から取得。要ネット接続。移動交通費（立替精算）対象者は docs のリストを読んで専用判定）
             </label>
             <label style="display:inline-flex; align-items:center; gap:6px">
                 <input type="checkbox" id="ki-classify" checked>
@@ -1092,6 +1112,106 @@
                 document.getElementById('ex-status').textContent = '';
             } finally {
                 exRunBtn.disabled = false;
+            }
+        });
+    }
+
+    // ----- 移動交通費（立替精算）対象者リストの表示・編集 -----
+    // リストの実体は共有フォルダのCSV（保存すれば exe 再ビルドなしで次回実行から反映）。
+    // 保存はサーバー側で検証＋バックアップ作成後に置き換える。0名保存は誤操作防止で拒否。
+    const exTravelToggle = document.getElementById('ex-travel-toggle');
+    if (exTravelToggle) {
+        const editor = document.getElementById('ex-travel-editor');
+        const tbody = document.getElementById('ex-travel-tbody');
+        const msgEl = document.getElementById('ex-travel-msg');
+        let travelLoaded = false;
+
+        function travelAddRow(id, name) {
+            const tr = document.createElement('tr');
+            const tdId = document.createElement('td');
+            const inId = document.createElement('input');
+            inId.type = 'text'; inId.value = id || ''; inId.placeholder = '例: 2018017';
+            inId.style.cssText = 'width:110px; padding:3px 6px';
+            tdId.appendChild(inId);
+            const tdName = document.createElement('td');
+            const inName = document.createElement('input');
+            inName.type = 'text'; inName.value = name || ''; inName.placeholder = '氏名';
+            inName.style.cssText = 'width:170px; padding:3px 6px';
+            tdName.appendChild(inName);
+            const tdDel = document.createElement('td');
+            const del = document.createElement('button');
+            del.type = 'button'; del.textContent = '✕'; del.title = 'この行を削除';
+            del.style.cssText = 'border:none; background:none; color:#c00; cursor:pointer; font-size:14px';
+            del.addEventListener('click', () => tr.remove());
+            tdDel.appendChild(del);
+            tr.appendChild(tdId); tr.appendChild(tdName); tr.appendChild(tdDel);
+            tbody.appendChild(tr);
+            return tr;
+        }
+
+        async function travelLoad() {
+            msgEl.textContent = '読み込み中...';
+            try {
+                const res = await fetch('/travel_expense_members');
+                const data = await res.json();
+                if (!data.success) {
+                    msgEl.textContent = 'エラー: ' + (data.errors || ['読込に失敗しました']).join(' / ');
+                    return false;
+                }
+                tbody.innerHTML = '';
+                (data.members || []).forEach(m => travelAddRow(m.id, m.name));
+                document.getElementById('ex-travel-path').textContent =
+                    '保存先: ' + data.path + (data.exists ? '' : '（まだファイルがありません。保存すると作成されます）');
+                msgEl.textContent = (data.members || []).length + ' 名';
+                travelLoaded = true;
+                return true;
+            } catch (e) {
+                msgEl.textContent = '通信エラー: ' + e.message;
+                return false;
+            }
+        }
+
+        exTravelToggle.addEventListener('click', async () => {
+            const show = editor.style.display === 'none';
+            editor.style.display = show ? 'block' : 'none';
+            if (show && !travelLoaded) await travelLoad();
+        });
+
+        document.getElementById('ex-travel-add').addEventListener('click', () => {
+            const tr = travelAddRow('', '');
+            tr.querySelector('input').focus();
+        });
+
+        const travelSaveBtn = document.getElementById('ex-travel-save');
+        travelSaveBtn.addEventListener('click', async () => {
+            const members = [];
+            tbody.querySelectorAll('tr').forEach(tr => {
+                const ins = tr.querySelectorAll('input');
+                members.push({id: ins[0].value, name: ins[1].value});
+            });
+            msgEl.textContent = '保存中...';
+            travelSaveBtn.disabled = true;
+            try {
+                const res = await fetch('/travel_expense_members', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({members: members}),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    msgEl.textContent = 'エラー: ' + (data.errors || ['保存に失敗しました']).join(' / ');
+                    return;
+                }
+                await travelLoad();   // 正規化後の内容を再表示
+                let m = '保存しました（' + data.count + ' 名';
+                if (data.backup) m += '・バックアップ作成済み';
+                m += '）。次回実行から反映されます';
+                if (data.warnings && data.warnings.length) m += ' ⚠ ' + data.warnings.join(' / ');
+                msgEl.textContent = m;
+            } catch (e) {
+                msgEl.textContent = '通信エラー: ' + e.message;
+            } finally {
+                travelSaveBtn.disabled = false;
             }
         });
     }
