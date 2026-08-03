@@ -62,7 +62,8 @@ from services.kintai_import_runner import (
 # 汎用データインポート（種別5）の194列ヘッダー。
 # 出所: 汎用データテンプレート\汎用データ(まるめ適用後)ダウンロード_9637_20260522150030.csv
 # 実行時のファイル依存を無くすため定数化（テストで同梱CSVとの一致をドリフト検知する）。
-# ※「スケジュール雛形ID」列（5列目）は種別5での動作が未実証のため使わず、
+# ※「スケジュール雛形ID」列（5列目）は**値 0（＝休日パターン「休み」）だけ**使う
+#   （2026-08-03 実測で投入・画面表示まで確認）。勤務シフトの指定には使わず、
 #   実証済みの出勤予定/退勤予定/休憩予定の時刻直書きに統一する。
 GENERIC_IMPORT_HEADER: tuple[str, ...] = (
     '名前', '*従業員ID', '*年月日', '*打刻グループID', '所属グループ名', 'スケジュール雛形ID',
@@ -104,11 +105,30 @@ GENERIC_IMPORT_HEADER: tuple[str, ...] = (
 # "0" は手作りグリッドの明け休表記（夜勤N20の翌日セル等。KDX 140-160の2026-07実データで確認。
 # 雛形IDに "0" は存在しないため休み扱いで安全）
 REST_MARKERS = {"", "所", "法", "休み", "休", "0"}
+
+# グリッドの休みセル → 汎用データ「休日」列のコード（0:法定休日 / 1:所定休日）
+# 就業先常駐者はカレンダーどおりに休まないため、シフト表から割り振った所休・法休を
+# jinjer 側にも登録する（2026-08-03 谷津さん指示）。
+# 「休み」(夜勤明け)・空欄は休日区分を持たないので**書かない**。
+HOLIDAY_CODE_BY_CELL = {"法": "0", "所": "1"}
+HOLIDAY_LABEL = {"0": "法定休日", "1": "所定休日"}
+# 194列ヘッダーの「休日（0:法定休日1:所定休日…）」列名（長いので前方一致で引く）
+HOLIDAY_COLUMN = next(c for c in GENERIC_IMPORT_HEADER if c.startswith("休日（"))
+
+# 夜勤明け等の「休み」は **スケジュール雛形ID に 0** を書く。
+# jinjer の休日パターンは 所休 / 法休 / 休み の3つで、データ上は
+#   所休 → 休日列=1 ／ 法休 → 休日列=0 ／ 休み → スケジュール雛形ID=0
+# にそれぞれ対応する（2026-08-03 実測。谷津さんが画面で「休み」を設定した
+# 大堀さんの明け休だけが 雛形ID=0 になっていたことから特定し、山口さんの
+# 明け休9日にAPIで投入して画面表示まで確認済み）。
+REST_TEMPLATE_CELLS = {"休み", "休", "0"}
+REST_TEMPLATE_ID = "0"
 WEEKDAY_KANJI = ["月", "火", "水", "木", "金", "土", "日"]
 BREAK_PAIRS = [(f"休憩予定時刻{i}", f"復帰予定時刻{i}") for i in range(1, 6)]
 
 # 要手動確認の区分
 KUBUN_DELETE_NEEDED = "休日に予定残存"          # APIでは削除不可 → 画面から手動削除
+KUBUN_HOLIDAY_DAYOFF = "休日区分×休暇登録"      # 休暇が登録された日の休日区分は触らない
 KUBUN_DAYOFF_REST = "休暇登録日（削除しないで確認）"  # 半休の可能性 → 誤削除防止
 KUBUN_DAYOFF_SKIP = "休暇登録日スキップ"        # jinjerが書込を無視するため投入対象外
 KUBUN_NO_GROUP = "打刻グループ不明"
@@ -337,6 +357,55 @@ def build_diff_plan(
                             "区分": KUBUN_DELETE_NEEDED,
                             "備考": f"グリッド={cell or '(空欄)'} 現予定={cur_txt} "
                                     "→ APIではスケジュール削除不可・jinjer画面から手動削除"})
+                    continue
+
+                # 明け休「休み」は スケジュール雛形ID=0 として登録する
+                if cell in REST_TEMPLATE_CELLS:
+                    if off:
+                        result.manual.append({
+                            "従業員番号": emp, "氏名": info["name"], "日付": d_iso,
+                            "区分": KUBUN_HOLIDAY_DAYOFF,
+                            "備考": f"グリッド={cell}(休み) 休暇登録={off} "
+                                    "→ 休みは投入せず、jinjer画面で確認"})
+                        continue
+                    result.plan.append({
+                        "emp": emp, "name": info["name"],
+                        "date_iso": d_iso, "day": day,
+                        "youbi": WEEKDAY_KANJI[date(year, month, day).weekday()],
+                        "cell": cell, "tpl_name": "休み",
+                        "start": "", "end": "", "breaks": [],
+                        "holiday": "", "template_id": REST_TEMPLATE_ID,
+                        "cur": "(休日パターンは取得不可)",
+                        "kind": "休み",
+                        "store_id": gid, "store_name": gname,
+                    })
+                    continue
+
+                # 所/法 は休日区分として登録する（空欄は対象外）
+                holiday = HOLIDAY_CODE_BY_CELL.get(cell)
+                if holiday is None:
+                    continue
+                if off:
+                    # 休暇が登録されている日に休日区分を上書きすると整合が崩れうる
+                    result.manual.append({
+                        "従業員番号": emp, "氏名": info["name"], "日付": d_iso,
+                        "区分": KUBUN_HOLIDAY_DAYOFF,
+                        "備考": f"グリッド={cell}({HOLIDAY_LABEL[holiday]}) 休暇登録={off} "
+                                "→ 休日区分は投入せず、jinjer画面で確認"})
+                    continue
+                # work-schedules API は休日区分を返さないため差分判定ができない。
+                # 毎回送る（同じ値の再送は無害）。詳細は _write_schedule_report の注記参照。
+                result.plan.append({
+                    "emp": emp, "name": info["name"],
+                    "date_iso": d_iso, "day": day,
+                    "youbi": WEEKDAY_KANJI[date(year, month, day).weekday()],
+                    "cell": cell, "tpl_name": HOLIDAY_LABEL[holiday],
+                    "start": "", "end": "", "breaks": [],
+                    "holiday": holiday, "template_id": "",
+                    "cur": "(休日区分は取得不可)",
+                    "kind": "休日",
+                    "store_id": gid, "store_name": gname,
+                })
                 continue
             tpl = tpl_index.get(cell)
             if tpl is None:
@@ -365,6 +434,7 @@ def build_diff_plan(
                 "youbi": WEEKDAY_KANJI[date(year, month, day).weekday()],
                 "cell": cell, "tpl_name": tpl["name"],
                 "start": tpl["start"], "end": tpl["end"], "breaks": list(tpl["breaks"]),
+                "holiday": "", "template_id": "",
                 "cur": cur_txt,
                 "kind": "修正" if cur_has else "新規",
                 "store_id": gid, "store_name": gname,
@@ -377,6 +447,7 @@ def plan_fingerprint(plan: list[dict]) -> str:
     lines = sorted(
         f"{p['emp']}|{p['date_iso']}|{p['start']}|{p['end']}|"
         f"{','.join(f'{s}-{e}' for s, e in p['breaks'])}|{p['store_id']}"
+        f"|{p.get('holiday', '')}|{p.get('template_id', '')}"
         for p in plan or []
     )
     return hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()
@@ -388,13 +459,19 @@ def build_import_rows(
 ) -> list[list[str]]:
     """プラン行 → 汎用データインポート形式の行リスト。
 
-    値を入れるのは 名前/*従業員ID/*年月日/*打刻グループID/出勤予定時刻/退勤予定時刻/
-    休憩予定時刻1〜5/復帰予定時刻1〜5 のみ。他列は空欄＝jinjer仕様「無処理」
+    行の種類ごとに埋める列を変える。他列は空欄＝jinjer仕様「無処理」
     （打刻・休暇には一切触れない）。日付は jinjer形式 YYYY/M/D（ゼロ埋めなし）。
+
+    - 勤務（kind=新規/修正）… 出勤予定時刻・退勤予定時刻・休憩予定/復帰予定
+    - 休日（kind=休日）    … 「休日」列に 0(法定休日)/1(所定休日)
+    - 休み（kind=休み）    … 「スケジュール雛形ID」列に 0
+
+    勤務行では「休日」列と「雛形ID」列を空欄にする（既存の休日区分を消さないため）。
     """
     ci = {c: header.index(c) for c in
-          ["名前", "*従業員ID", "*年月日", "*打刻グループID",
-           "出勤予定時刻", "退勤予定時刻"] + [c for p in BREAK_PAIRS for c in p]}
+          ["名前", "*従業員ID", "*年月日", "*打刻グループID", "スケジュール雛形ID",
+           "出勤予定時刻", "退勤予定時刻", HOLIDAY_COLUMN]
+          + [c for p in BREAK_PAIRS for c in p]}
     rows: list[list[str]] = []
     for p in sorted(plan, key=lambda x: (x["emp"], x["date_iso"])):
         y, m, d = (int(x) for x in p["date_iso"].split("-"))
@@ -405,6 +482,8 @@ def build_import_rows(
         row[ci["*打刻グループID"]] = p["store_id"]
         row[ci["出勤予定時刻"]] = p["start"]
         row[ci["退勤予定時刻"]] = p["end"]
+        row[ci[HOLIDAY_COLUMN]] = p.get("holiday", "")
+        row[ci["スケジュール雛形ID"]] = p.get("template_id", "")
         for (bs_col, be_col), (bs, be) in zip(BREAK_PAIRS, p["breaks"]):
             row[ci[bs_col]] = bs
             row[ci[be_col]] = be
@@ -431,6 +510,11 @@ def verify_plan_rows(
     **期待休憩が空なら現物も空であること** まで厳密に比較する
     （kintai_import_runner.compare_row の「空欄=無検証」とは意図的に異なる）。
 
+    **休日区分の行（kind="休日"）は自動検証できない**。work-schedules API が
+    休日区分を返さないため（2026-08-03 実測: store/date/work_schedule/break_schedules
+    /overtime_break_schedule/created_at/updated_at のみ）。判定「未検証」として返し、
+    jinjer 画面での目視確認に回す。
+
     Returns:
         (検証結果全行 [{従業員番号,氏名,日付,判定,詳細}],
          NG行の要手動リスト [{従業員番号,氏名,日付,区分,備考}])
@@ -438,6 +522,13 @@ def verify_plan_rows(
     verify_rows: list[dict] = []
     ng_manual: list[dict] = []
     for p in sorted(plan, key=lambda x: (x["emp"], x["date_iso"])):
+        if p.get("kind") in ("休日", "休み"):
+            verify_rows.append({
+                "従業員番号": p["emp"], "氏名": p["name"], "日付": p["date_iso"],
+                "判定": "未検証",
+                "詳細": f"{p['tpl_name']}を投入。work-schedules APIは休日区分・休日パターンを"
+                        "返さないため自動検証できません（jinjer画面で確認してください）"})
+            continue
         got = (after.get(p["emp"]) or {}).get(p["date_iso"])
         want_brs = _breaks_minutes(p["breaks"])
         good = bool(
@@ -682,6 +773,8 @@ def run_schedule_api_import(
             "グループ": f"{groups.get(emp, ('', ''))[0]}({groups.get(emp, ('', ''))[1]})",
             "新規": sum(1 for p in rows_ if p["kind"] == "新規"),
             "修正": sum(1 for p in rows_ if p["kind"] == "修正"),
+            "休日": sum(1 for p in rows_ if p["kind"] == "休日"),
+            "休み": sum(1 for p in rows_ if p["kind"] == "休み"),
             "一致": built.matched.get(emp, 0),
             "要手動確認": sum(1 for m in built.manual if m["従業員番号"] == emp),
             "休暇登録": len(dayoffs.get(emp, {})),
@@ -690,9 +783,10 @@ def run_schedule_api_import(
     log(f"\n=== 差分プラン: 書込 {result.plan_rows}行 / "
         f"{len({p['emp'] for p in built.plan})}名 （一致 {result.matched_rows}日は書かない） ===")
     for s in summary_rows:
-        if s["新規"] or s["修正"] or s["要手動確認"]:
+        if s["新規"] or s["修正"] or s["休日"] or s["休み"] or s["要手動確認"]:
             log(f"  {s['従業員番号']} {s['氏名']}: 新規{s['新規']} 修正{s['修正']} "
-                f"一致{s['一致']} 要手動{s['要手動確認']} グループ{s['グループ']}")
+                f"休日{s['休日']} 休み{s['休み']} 一致{s['一致']} 要手動{s['要手動確認']} "
+                f"グループ{s['グループ']}")
     if result.manual:
         log(f"要手動確認: {len(result.manual)}件（レポートの「要手動確認」シート参照）")
     log(f"プランfingerprint: {result.fingerprint}")
@@ -815,7 +909,12 @@ def _write_schedule_report(
         ["従業員番号", "氏名", "日付", "曜", "区分", "グリッド値", "雛形名",
          "新予定", "新休憩", "現状", "グループID", "グループ名"],
         [[p["emp"], p["name"], p["date_iso"], p["youbi"], p["kind"], p["cell"],
-          p["tpl_name"], f"{p['start']}-{p['end']}", fmt_breaks(p["breaks"]),
+          p["tpl_name"],
+          (f"休日={p['holiday']}({HOLIDAY_LABEL.get(p['holiday'], '')})"
+           if p.get("kind") == "休日"
+           else "休み(雛形ID=0)" if p.get("kind") == "休み"
+           else f"{p['start']}-{p['end']}"),
+          fmt_breaks(p["breaks"]),
           p["cur"], p["store_id"], p["store_name"]]
          for p in sorted(result.plan, key=lambda x: (x["emp"], x["date_iso"]))],
         [12, 12, 12, 4, 6, 10, 16, 14, 18, 34, 10, 14],
@@ -837,11 +936,12 @@ def _write_schedule_report(
     _sheet(
         ws3,
         ["従業員番号", "氏名", "グリッドファイル", "グループ",
-         "新規", "修正", "一致", "要手動確認", "休暇登録"],
+         "新規", "修正", "休日", "休み", "一致", "要手動確認", "休暇登録"],
         [[s["従業員番号"], s["氏名"], s["グリッドファイル"], s["グループ"],
-          s["新規"], s["修正"], s["一致"], s["要手動確認"], s["休暇登録"]]
+          s["新規"], s["修正"], s.get("休日", 0), s.get("休み", 0),
+          s["一致"], s["要手動確認"], s["休暇登録"]]
          for s in summary_rows],
-        [12, 12, 48, 20, 6, 6, 6, 10, 8],
+        [12, 12, 48, 20, 6, 6, 6, 6, 6, 10, 8],
     )
 
     if verify_rows:

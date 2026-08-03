@@ -36,18 +36,37 @@ def _strip_seconds(v) -> str:
     return f"{int(m.group(1))}:{m.group(2)}"
 
 
+def _schedule_stamp(w: dict) -> str:
+    """レコードの新しさを表す文字列（updated_at → created_at の順で採用）"""
+    for key in ("updated_at", "created_at"):
+        v = str((w or {}).get(key) or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def parse_work_schedules_data(data: dict) -> dict[str, dict]:
     """work-schedules レスポンスの data 部を日別 dict に変換する（純粋関数）。
 
-    jinjer は同一日のスケジュールを新旧2バージョンで二重返却することがある
-    （実測: 先頭が新しい方＝画面表示と一致）。**先頭レコードを採用**し、
-    2件目以降の同一日は捨てる。
+    jinjer は同一日のスケジュールを新旧2バージョンで二重返却することがある。
+    **created_at / updated_at が最新のレコードを採用する**。
+
+    ⚠️ 以前は「先頭が新しい方」という前提で先頭を採用していたが、
+    2026-08-03 に**古い方が先頭で返る**ケースを実測した（石下 8/5・木村 8/4 など計12日）。
+    そのとき汎用データのエクスポート（jinjerの正）は新しい方と一致していたため、
+    「最新を採る」が正しい。先頭採用のままだと差分判定と反映検証がともに誤る
+    （実際に投入成功した11件が検証NGと誤判定された）。
+    同着（タイムスタンプが同じ・無い）の場合は先に出てきた方を残す。
     """
     result: dict[str, dict] = {}
+    stamps: dict[str, str] = {}
     for w in (data or {}).get("work_schedules", []) or []:
         d = str(w.get("date") or "").strip()
-        if not d or d in result:
-            continue  # 同一日の2件目以降は旧バージョン → 先頭採用
+        if not d:
+            continue
+        stamp = _schedule_stamp(w)
+        if d in result and stamp <= stamps.get(d, ""):
+            continue  # 既に採用済みのレコードの方が新しい（or 同着）
         sched = w.get("work_schedule") or {}
         breaks = []
         for b in w.get("break_schedules", []) or []:
@@ -61,6 +80,7 @@ def parse_work_schedules_data(data: dict) -> dict[str, dict]:
             "breaks": breaks,
             "store": str((w.get("store") or {}).get("name") or ""),
         }
+        stamps[d] = stamp
     return result
 
 

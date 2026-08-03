@@ -6,9 +6,11 @@ import pytest
 
 from services.schedule_import_runner import (
     GENERIC_IMPORT_HEADER,
+    HOLIDAY_COLUMN,
     KUBUN_DAYOFF_REST,
     KUBUN_DAYOFF_SKIP,
     KUBUN_DELETE_NEEDED,
+    KUBUN_HOLIDAY_DAYOFF,
     KUBUN_NO_GROUP,
     build_diff_plan,
     build_import_rows,
@@ -389,3 +391,144 @@ class TestGenericHeaderConstant:
         with open(path, encoding="cp932", newline="") as f:
             header = next(csv.reader(f))
         assert tuple(header) == GENERIC_IMPORT_HEADER
+
+
+# ===========================================================================
+# 休日区分（所休・法休）の登録（2026-08-03 追加）
+# ===========================================================================
+
+class TestHolidayKubun:
+    """就業先常駐者はカレンダーどおりに休まないため、シフト表から割り振った
+    所休・法休を jinjer にも登録する。
+
+    ⚠️ work-schedules API は休日区分を返さないため差分判定・自動検証ができない。
+    毎回送る／検証は「未検証」で返す、という前提のテスト。
+    """
+
+    def _run(self, days, current=None, dayoffs=None):
+        employees = {"E1": {"name": "尾川", "file": "grid.csv", "days": days}}
+        return build_diff_plan(
+            employees, _tpl_index(), {"E1": current or {}}, {"E1": dayoffs or {}},
+            {"E1": ("40", "140-180時間制")}, year=2026, month=7,
+        )
+
+    def test_shokyu_and_hokyu_become_plan_rows(self):
+        """所→1(所定休日) / 法→0(法定休日) の行が作られる"""
+        r = self._run({1: "所", 2: "法"})
+        by_date = {p["date_iso"]: p for p in r.plan}
+
+        assert by_date["2026-07-01"]["kind"] == "休日"
+        assert by_date["2026-07-01"]["holiday"] == "1"
+        assert by_date["2026-07-01"]["tpl_name"] == "所定休日"
+        assert by_date["2026-07-02"]["holiday"] == "0"
+        assert by_date["2026-07-02"]["tpl_name"] == "法定休日"
+        # 勤務時刻は空欄のまま（打刻・予定に触れない）
+        assert by_date["2026-07-01"]["start"] == ""
+        assert by_date["2026-07-01"]["end"] == ""
+        assert by_date["2026-07-01"]["breaks"] == []
+
+    def test_ake_rest_becomes_template_zero(self):
+        """明け休「休み」「休」「0」は スケジュール雛形ID=0（休日パターン「休み」）で書く
+
+        2026-08-03 実測。jinjer の休日パターンは 所休/法休/休み の3つで、
+        「休み」だけは休日列ではなく雛形ID列に 0 を入れる。
+        """
+        r = self._run({1: "休み", 2: "休", 3: "0"})
+        assert len(r.plan) == 3
+        for p in r.plan:
+            assert p["kind"] == "休み"
+            assert p["template_id"] == "0"
+            assert p["holiday"] == ""          # 休日区分は付けない
+            assert p["start"] == "" and p["end"] == "" and p["breaks"] == []
+        assert r.manual == []
+
+    def test_blank_cell_is_not_written(self):
+        """空欄は所/法/休みのどれとも決められないので書かない"""
+        r = self._run({1: ""})
+        assert r.plan == [] and r.manual == []
+
+    def test_rest_import_row_fills_only_template_column(self):
+        """休みの行は雛形ID列だけ埋め、休日列・出退勤は空欄にする"""
+        r = self._run({1: "休み"})
+        row = build_import_rows(r.plan)[0]
+        h = GENERIC_IMPORT_HEADER
+        assert row[h.index("スケジュール雛形ID")] == "0"
+        assert row[h.index(HOLIDAY_COLUMN)] == ""
+        assert row[h.index("出勤予定時刻")] == ""
+        assert row[h.index("退勤予定時刻")] == ""
+        assert row[h.index("出勤1")] == ""          # 打刻には触れない
+
+    def test_work_row_leaves_template_column_empty(self):
+        """勤務の行は雛形ID列を空欄にする（休みに化けさせない）"""
+        r = self._run({1: "BBS3"})
+        row = build_import_rows(r.plan)[0]
+        assert row[GENERIC_IMPORT_HEADER.index("スケジュール雛形ID")] == ""
+
+    def test_rest_on_dayoff_registered_day_is_skipped(self):
+        """休暇が登録された日の「休み」は触らず要手動確認へ"""
+        r = self._run({1: "休み"}, dayoffs={"2026-07-01": "年次有休/status=1"})
+        assert r.plan == []
+        assert [m["区分"] for m in r.manual] == [KUBUN_HOLIDAY_DAYOFF]
+
+    def test_verify_marks_rest_rows_as_unverified(self):
+        """休みの行も自動検証できない（雛形IDはAPIから読めない）"""
+        r = self._run({1: "休み"})
+        verify_rows, ng = verify_plan_rows(r.plan, {"E1": {}})
+        assert verify_rows[0]["判定"] == "未検証"
+        assert ng == []
+
+    def test_existing_schedule_takes_manual_route(self):
+        """予定が残っている休日は従来どおり手動削除リストへ（休日区分は書かない）"""
+        r = self._run({1: "所"},
+                      {"2026-07-01": {"start": "9:00", "end": "18:00", "breaks": []}})
+        assert r.plan == []
+        assert [m["区分"] for m in r.manual] == [KUBUN_DELETE_NEEDED]
+
+    def test_dayoff_registered_day_is_not_overwritten(self):
+        """休暇が登録された日の休日区分は触らず、要手動確認に載せる"""
+        r = self._run({1: "法"}, dayoffs={"2026-07-01": "年次有休/status=1"})
+        assert r.plan == []
+        assert [m["区分"] for m in r.manual] == [KUBUN_HOLIDAY_DAYOFF]
+
+    def test_import_row_fills_only_holiday_column(self):
+        """休日行は「休日」列だけ埋め、出勤・退勤・休憩は空欄にする"""
+        r = self._run({1: "所"})
+        row = build_import_rows(r.plan)[0]
+        h = GENERIC_IMPORT_HEADER
+
+        assert row[h.index(HOLIDAY_COLUMN)] == "1"
+        assert row[h.index("出勤予定時刻")] == ""
+        assert row[h.index("退勤予定時刻")] == ""
+        assert row[h.index("休憩予定時刻1")] == ""
+        assert row[h.index("*従業員ID")] == "E1"
+        assert row[h.index("*年月日")] == "2026/7/1"
+        assert row[h.index("*打刻グループID")] == "40"
+        # 打刻・休暇には触れない
+        assert row[h.index("出勤1")] == ""
+        assert row[h.index("休日休暇名1")] == ""
+
+    def test_work_row_leaves_holiday_column_empty(self):
+        """勤務の行は逆に休日列を空欄にする（休日区分を消さない）"""
+        r = self._run({1: "BBS3"})
+        row = build_import_rows(r.plan)[0]
+        h = GENERIC_IMPORT_HEADER
+        assert row[h.index(HOLIDAY_COLUMN)] == ""
+        assert row[h.index("出勤予定時刻")] == "9:00"
+
+    def test_fingerprint_changes_with_holiday(self):
+        """休日区分が変われば fingerprint も変わる（承認後の変化を検知できる）"""
+        a = self._run({1: "所"}).plan
+        b = self._run({1: "法"}).plan
+        assert plan_fingerprint(a) != plan_fingerprint(b)
+
+    def test_verify_marks_holiday_rows_as_unverified(self):
+        """work-schedules APIが休日区分を返さないため自動検証はできない"""
+        r = self._run({1: "所", 2: "BBS3"})
+        verify_rows, ng = verify_plan_rows(r.plan, {"E1": {}})
+
+        by_date = {v["日付"]: v for v in verify_rows}
+        assert by_date["2026-07-01"]["判定"] == "未検証"
+        assert "画面で確認" in by_date["2026-07-01"]["詳細"]
+        assert by_date["2026-07-02"]["判定"] == "NG"      # 勤務行は従来どおり検証する
+        # 未検証は要手動リストに載せない（NGだけ載せる）
+        assert [n["日付"] for n in ng] == ["2026-07-02"]

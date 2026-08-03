@@ -90,3 +90,44 @@ class TestParseRequestedDayOffsData:
     def test_empty(self):
         assert parse_requested_day_offs_data({}) == {}
         assert parse_requested_day_offs_data({"requested_day_offs": None}) == {}
+
+
+class TestWorkSchedulesNewestWins:
+    """同一日に新旧2レコードが返るとき、**作成日時が最新**のものを採る
+
+    2026-08-03 実測: 古い方が先頭で返るケースがあり（石下 8/5・木村 8/4 など12日）、
+    そのとき汎用データのエクスポート（jinjerの正）は新しい方と一致していた。
+    先頭採用のままだと差分判定と反映検証がともに誤る。
+    """
+
+    def _rec(self, date, start, end, stamp):
+        return {"date": date, "work_schedule": {"start": start, "end": end},
+                "break_schedules": [], "store": {"name": "g"},
+                "created_at": stamp, "updated_at": stamp}
+
+    def test_newest_wins_when_old_comes_first(self):
+        from services.jinjer_api_client import parse_work_schedules_data
+        data = {"work_schedules": [
+            self._rec("2026-08-05", "09:00:00", "17:30:00", "2026-05-22 05:54:39"),
+            self._rec("2026-08-05", "16:45:00", "33:30:00", "2026-08-03 10:40:44"),
+        ]}
+        got = parse_work_schedules_data(data)["2026-08-05"]
+        assert (got["start"], got["end"]) == ("16:45", "33:30")
+
+    def test_newest_wins_when_new_comes_first(self):
+        from services.jinjer_api_client import parse_work_schedules_data
+        data = {"work_schedules": [
+            self._rec("2026-08-05", "16:45:00", "33:30:00", "2026-08-03 10:40:44"),
+            self._rec("2026-08-05", "09:00:00", "17:30:00", "2026-05-22 05:54:39"),
+        ]}
+        got = parse_work_schedules_data(data)["2026-08-05"]
+        assert (got["start"], got["end"]) == ("16:45", "33:30")
+
+    def test_missing_timestamps_keeps_first(self):
+        from services.jinjer_api_client import parse_work_schedules_data
+        a = self._rec("2026-08-05", "09:00:00", "17:30:00", "")
+        b = self._rec("2026-08-05", "16:45:00", "33:30:00", "")
+        for r in (a, b):
+            r.pop("created_at"); r.pop("updated_at")
+        got = parse_work_schedules_data({"work_schedules": [a, b]})["2026-08-05"]
+        assert (got["start"], got["end"]) == ("9:00", "17:30")

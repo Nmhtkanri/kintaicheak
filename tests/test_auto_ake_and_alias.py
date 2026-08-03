@@ -205,7 +205,7 @@ def test_auto_ake_applies_to_merged_overnight_shift(tmp_path):
     assert len(result["merges"]) == 1                 # 統合は従来通り成立
     assert data_row[3] == AKE_REST_VALUE              # 8/2（吸収日）が「休み」
     assert len(result["ake_auto"]) == 1
-    assert result["ake_auto"][0]["before"] in ("所", "法")
+    assert result["ake_auto"][0]["before"] == "休扱い"
 
 
 def test_export_applies_auto_ake_end_to_end(tmp_path):
@@ -330,3 +330,84 @@ def test_export_with_alias_resolves_surname_only(tmp_path):
         output_path=out_with)
     with open(out_with, encoding="cp932") as f:
         assert list(csv.reader(f))[2][1] == "2025007"
+
+
+# =============================================================================
+# 所定休日・法定休日の交互割り振り（2026-08-03 谷津さん指示）
+# =============================================================================
+
+def test_alternating_starts_with_shotei():
+    """休みの並び順で 所→法→所→法… と割り振る"""
+    from services.jinjer_schedule_csv_exporter import (
+        OFF_PENDING, assign_off_values_alternating)
+    cells = [OFF_PENDING] * 5
+    assign_off_values_alternating(cells)
+    assert cells == ["所", "法", "所", "法", "所"]
+
+
+def test_alternating_skips_work_and_ake_and_leave():
+    """有休（一般雛形）と明け休（休み）と勤務日は順番を消費しない"""
+    from services.jinjer_schedule_csv_exporter import (
+        OFF_PENDING, assign_off_values_alternating)
+    # 休 / 勤務 / 明け休 / 有休 / 休 / 休
+    cells = [OFF_PENDING, "K1", "休み", "1", OFF_PENDING, OFF_PENDING]
+    assign_off_values_alternating(cells)
+    assert cells == ["所", "K1", "休み", "1", "法", "所"]
+
+
+def test_alternating_export_end_to_end(tmp_path):
+    """CSV出力まで通して、曜日ではなく休みの並び順で 所/法 が交互になる"""
+    legend = [
+        {"code": "A", "label": "日勤", "start_time": "9:00", "end_time": "17:30",
+         "break_minutes": 60, "is_off": False},
+        {"code": "×", "label": "公休", "start_time": None, "end_time": None,
+         "break_minutes": 0, "is_off": True},
+    ]
+    # 8/1休 8/2勤 8/3休 8/4休 8/5勤 8/6休
+    codes = {1: "×", 2: "A", 3: "×", 4: "×", 5: "A", 6: "×"}
+    employees = [{
+        "name": "テスト太郎",
+        "shifts": [{"date": f"2026-08-{d:02d}", "code": codes.get(d, "A")}
+                   for d in range(1, 32)],
+    }]
+    out = str(tmp_path / "alt.csv")
+    export_jinjer_schedule_csv(
+        legend=legend, employees=employees, year=2026, month=8,
+        name_to_id={"テスト太郎": "2020001"}, output_path=out)
+
+    with open(out, encoding="cp932") as f:
+        row = list(csv.reader(f))[2]
+    got = [row[1 + d] for d in range(1, 7)]
+    # 8/1(土)=所, 8/3(月)=法, 8/4(火)=所, 8/6(木)=法 ← 曜日と無関係に交互
+    assert got[0] == "所"
+    assert got[2] == "法"
+    assert got[3] == "所"
+    assert got[5] == "法"
+
+
+def test_alternating_after_ake_does_not_consume_slot(tmp_path):
+    """夜勤明けで「休み」になった日は交互の順番を消費しない"""
+    legend = [
+        {"code": "C1", "label": "夜勤", "start_time": "16:30", "end_time": "34:00",
+         "break_minutes": 120, "is_off": False},
+        {"code": "×", "label": "公休", "start_time": None, "end_time": None,
+         "break_minutes": 0, "is_off": True},
+    ]
+    # 8/1休 8/2夜勤 8/3(空欄→明け休) 8/4休 8/5休
+    codes = {1: "×", 2: "C1", 3: "", 4: "×", 5: "×"}
+    employees = [{
+        "name": "テスト太郎",
+        "shifts": [{"date": f"2026-08-{d:02d}", "code": codes.get(d, "×")}
+                   for d in range(1, 6)],
+    }]
+    out = str(tmp_path / "ake_alt.csv")
+    export_jinjer_schedule_csv(
+        legend=legend, employees=employees, year=2026, month=8,
+        name_to_id={"テスト太郎": "2020001"}, output_path=out)
+
+    with open(out, encoding="cp932") as f:
+        row = list(csv.reader(f))[2]
+    assert row[2] == "所"              # 8/1 = 1つ目の休み
+    assert row[4] == AKE_REST_VALUE    # 8/3 = 明け休（順番を消費しない）
+    assert row[5] == "法"              # 8/4 = 2つ目の休み
+    assert row[6] == "所"              # 8/5 = 3つ目の休み

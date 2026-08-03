@@ -338,7 +338,9 @@ def _apply_auto_ake_rest(
     applied: list[dict] = []
     schedule_priority: list[dict] = []
     conflicts: list[dict] = []
-    off_values = {"所", "法", ""}
+    # この時点の休扱いは OFF_PENDING（所/法 の割り振りはこの後）。
+    # 既に 所/法 が入っている呼び出し（テスト等）も受けられるよう両方許容する。
+    off_values = {OFF_PENDING, OFF_SHOTEI, OFF_HOTEI, ""}
 
     for idx, minutes in enumerate(end_minutes):
         if minutes is None or minutes < AKE_AUTO_END_MINUTES:
@@ -369,15 +371,16 @@ def _apply_auto_ake_rest(
             )
             continue
 
+        before_label = "休扱い" if current == OFF_PENDING else (current or "空欄")
         cells[idx + 1] = AKE_REST_VALUE
         applied.append({
             "name": employee_name, "night_day": night_day, "ake_day": ake_day,
-            "before": current, "end_time_minutes": minutes,
+            "before": before_label, "end_time_minutes": minutes,
         })
         logger.info(
             "夜勤明け自動設定: %s %d日の退勤%02d:%02d → %d日を「%s」(元: %s)",
             employee_name, night_day, minutes // 60, minutes % 60,
-            ake_day, AKE_REST_VALUE, current or "空欄",
+            ake_day, AKE_REST_VALUE, before_label,
         )
 
     return applied, schedule_priority, conflicts
@@ -396,10 +399,46 @@ def _is_ake_code(code: str, label: str = "") -> bool:
 
 
 def _off_value_for_weekday(weekday: int) -> str:
-    """A案: 土曜=所、日曜=法、それ以外=所"""
+    """旧A案: 土曜=所、日曜=法、それ以外=所
+
+    ⚠️ 2026-08-03 で運用から外した。就業先常駐者はカレンダーどおりに休まないため、
+    曜日ではなく**休みの並び順**で所定休日・法定休日を交互に割り振る
+    （`assign_off_values_alternating`）。互換確認用に関数だけ残す。
+    """
     if weekday == 6:  # 日
         return "法"
     return "所"  # それ以外（土含む）→所
+
+
+# 休扱いの日の仮置き値。従業員ごとに後段で 所/法 を交互に割り振る。
+OFF_PENDING = "\x00OFF"
+OFF_SHOTEI = "所"   # 所定休日
+OFF_HOTEI = "法"    # 法定休日
+
+
+def assign_off_values_alternating(cells: list[str]) -> list[str]:
+    """休みの日に 所定休日・法定休日 を **並び順で交互に** 割り振る（破壊的更新）。
+
+    就業先常駐者はカレンダーどおりに休まないので、曜日ではなくシフト表の休みの
+    並びで割り振る（2026-08-03 谷津さん指示）。1人・1か月ごとに 所→法→所→法… と
+    振り、月が変われば先頭（所）から始める。
+
+    **有休と明け休は対象外**。有休は「一般」雛形、明け休は「休み」として既に
+    値が入っており、`OFF_PENDING` ではないため順番を消費しない。
+
+    Args:
+        cells: 1人分の日別セル値。`OFF_PENDING` の要素だけが対象
+
+    Returns:
+        cells（同じリスト。呼び出し側の利便のため返す）
+    """
+    next_is_hotei = False
+    for i, v in enumerate(cells):
+        if v != OFF_PENDING:
+            continue
+        cells[i] = OFF_HOTEI if next_is_hotei else OFF_SHOTEI
+        next_is_hotei = not next_is_hotei
+    return cells
 
 
 def build_legend_to_template_name(
@@ -526,9 +565,12 @@ def _resolve_cell_value(
     off_markers: set[str],
     general_template_id: str = "",
 ) -> str:
-    """1セルの最終的な書き込み値を決定する"""
-    weekday = day_obj.weekday()  # Mon=0 ... Sun=6
-    off_default = _off_value_for_weekday(weekday)
+    """1セルの書き込み値を決定する
+
+    休扱いの日は `OFF_PENDING` を返す。所定休日・法定休日の振り分けは1日ずつでは
+    決められず、従業員ごとに休みの並び順で交互に決める（`assign_off_values_alternating`）。
+    """
+    off_default = OFF_PENDING
 
     code = (code or "").strip()
     label = ""
@@ -688,8 +730,8 @@ def export_jinjer_schedule_csv(
                     m["merged_start"], m["merged_end"], value,
                 )
             elif day_num in consumed_days:
-                # day N+1 として吸収された日 → 休扱い（曜日に応じて 所/法）
-                cells.append(_off_value_for_weekday(d.weekday()))
+                # day N+1 として吸収された日 → 休扱い（所/法 は後段で交互に割り振る）
+                cells.append(OFF_PENDING)
                 end_minutes.append(None)
             else:
                 code_for_day = day_map.get(day_num, "")
@@ -710,12 +752,16 @@ def export_jinjer_schedule_csv(
                 else:
                     end_minutes.append(None)
 
-        # 夜勤明け（退勤30:00以降）の翌日を「休み」に自動設定する
+        # 夜勤明け（退勤30:00以降）の翌日を「休み」に自動設定する。
+        # **所/法 の割り振りより先に行う**（明け休は交互の順番を消費しないため）。
         applied, sched_priority, conflicts = _apply_auto_ake_rest(
             cells, end_minutes, day_objs, name)
         ake_auto.extend(applied)
         ake_schedule_priority.extend(sched_priority)
         ake_conflicts.extend(conflicts)
+
+        # 休みの日に 所定休日・法定休日 を並び順で交互に割り振る（有休・明け休は対象外）
+        assign_off_values_alternating(cells)
 
         rows.append([display_name, emp_id] + cells)
 

@@ -12,6 +12,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.jinjer_schedule_csv_exporter import (
+    OFF_PENDING,
+    assign_off_values_alternating,
     _build_employee_day_map,
     _is_ake_code,
     _is_full_day_paid_leave,
@@ -48,6 +50,7 @@ def test_ake_code_detection():
 
 
 def test_off_value_for_weekday_a_pattern():
+    """旧A案（2026-08-03 に運用から外した。互換確認用に関数だけ残している）"""
     # Mon=0 ... Sun=6
     assert _off_value_for_weekday(0) == "所"  # 月
     assert _off_value_for_weekday(1) == "所"  # 火
@@ -84,34 +87,18 @@ def test_resolve_cell_ake_returns_rest_value():
     assert val_words == "休み"
 
 
-def test_resolve_cell_off_on_sunday():
+def test_resolve_cell_off_returns_placeholder():
+    """休扱いは曜日で決めず OFF_PENDING を返す（所/法 は後段で交互に割り振る）"""
     legend = normalize_legend(_legend_for_test())
     code_to_name = {"B": "B勤"}
-    # 2026-04-05 は日曜
-    val = _resolve_cell_value(
-        "公", date(2026, 4, 5), legend, code_to_name, set()
-    )
-    assert val == "法"
+    for d in (date(2026, 4, 5), date(2026, 4, 4), date(2026, 4, 1)):  # 日/土/水
+        assert _resolve_cell_value("公", d, legend, code_to_name, set()) == OFF_PENDING
 
 
-def test_resolve_cell_off_on_saturday():
+def test_resolve_cell_blank_returns_placeholder():
     legend = normalize_legend(_legend_for_test())
-    code_to_name = {"B": "B勤"}
-    # 2026-04-04 は土曜
-    val = _resolve_cell_value(
-        "公", date(2026, 4, 4), legend, code_to_name, set()
-    )
-    assert val == "所"
-
-
-def test_resolve_cell_blank_on_weekday():
-    legend = normalize_legend(_legend_for_test())
-    code_to_name = {"B": "B勤"}
-    # 2026-04-01 は水曜
-    val = _resolve_cell_value(
-        "", date(2026, 4, 1), legend, code_to_name, set()
-    )
-    assert val == "所"
+    val = _resolve_cell_value("", date(2026, 4, 1), legend, {"B": "B勤"}, set())
+    assert val == OFF_PENDING
 
 
 def test_resolve_cell_template_name():
@@ -640,10 +627,10 @@ def test_resolve_cell_value_full_day_paid_leave():
     # general_template_id があれば 有 は一般雛形IDに化ける（休扱いより優先）
     val = _resolve_cell_value("有", date(2026, 6, 15), legend, {}, set(["休"]), "1")
     assert val == "1"
-    # general_template_id が無ければ従来通り休扱い（月曜=所）
+    # general_template_id が無ければ従来通り休扱い（所/法 は後段で割り振る）
     val_off = _resolve_cell_value("有", date(2026, 6, 15), legend, {}, set(["休"]), "")
-    assert val_off == "所"
-    # 半休は一般にしない（凡例 is_off → 所）
+    assert val_off == OFF_PENDING
+    # 半休は一般にしない（凡例 is_off → 休扱い）
     legend2 = normalize_legend([{"code": "AM有", "label": "AM有休", "is_off": True}])
     val_half = _resolve_cell_value("AM有", date(2026, 6, 15), legend2, {}, set(), "1")
-    assert val_half == "所"
+    assert val_half == OFF_PENDING
