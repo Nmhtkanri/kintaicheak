@@ -10,7 +10,8 @@
 流れ:
     1. 生成済みグリッドCSV群（氏名/従業員ID + 日別セル: 雛形ID or 所/法/休み）を読込
     2. スケジュール雛形一覧CSVで 雛形ID → 出勤/退勤/休憩予定1〜5 を解決
-    3. jinjer現状取得（work-schedules・先頭採用 / requested-day-offs / affiliations）
+    3. jinjer現状取得（affiliations で現グループ確定 → そのグループの work-schedules /
+       requested-day-offs。打刻グループごとに別スケジュールがあるためグループ必須）
     4. 差分プラン構築: 食い違う日だけ書く。休みセルに予定が残る日は削除不可→要手動一覧
     5. dry-run: 承認用Excel + fingerprint → [ユーザー承認]
     6. execute: プラン再計算＋fingerprint一致ガード → 194列CSV生成(4900行分割) →
@@ -710,31 +711,12 @@ def run_schedule_api_import(
     # ---- 3. jinjer 現状取得 ----
     cli = client or JinjerClient()
     emps = sorted(employees)
-    current: dict[str, dict[str, dict]] = {}
-    dayoffs: dict[str, dict[str, str]] = {}
-    log(f"jinjer現状取得中（work-schedules / requested-day-offs × {len(emps)}名）…")
-    for i, emp in enumerate(emps, 1):
-        try:
-            current[emp] = _with_retry(
-                lambda e=emp: cli.get_work_schedules(e, month),
-                f"work-schedules取得(emp={emp})", log)
-        except JinjerAPIError as e:
-            # 現状が取れないまま差分を作ると全日「新規」と誤判定するため中止する
-            return abort([f"スケジュール現状の取得に失敗（emp={emp}）: {e}"])
-        time.sleep(0.15)
-        dayoffs[emp] = cli.get_requested_day_offs(emp, month)  # 失敗は空dict（検証NGで顕在化）
-        time.sleep(0.15)
-        if i % 10 == 0 or i == len(emps):
-            log(f"  … {i}/{len(emps)} 名")
-    n_off = sum(len(v) for v in dayoffs.values())
-    if n_off:
-        log(f"休暇登録: {n_off}件")
-        for emp in emps:
-            for d_iso, info in sorted(dayoffs.get(emp, {}).items()):
-                log(f"    {emp} {employees[emp]['name']} {d_iso} {info}")
 
-    # 打刻グループ: 既存スケジュール行のstoreは誤レイヤーを含むことがあるため
-    # 所属履歴（affiliations）の現行グループを正とする（能美・及川 2026-07 実測）
+    # 打刻グループを先に確定させる。既存スケジュール行のstoreは誤レイヤーを含むことが
+    # あるため、所属履歴（affiliations）の現行グループを正とする（能美・及川 2026-07 実測）。
+    # **スケジュール取得より前に必要**: jinjer は打刻グループごとに別のスケジュールを持ち、
+    # グループを移動した従業員は旧グループの予定が残る。グループで絞らずに読むと
+    # 「休日に予定残存」と誤判定して本来書ける予定を落とす（2026-08-03 実測）。
     try:
         affs_map = _with_retry(lambda: cli.get_affiliations(emps), "所属履歴取得", log)
     except JinjerAPIError as e:
@@ -750,6 +732,30 @@ def run_schedule_api_import(
             if f"{year:04d}-{mon:02d}-01" < di <= f"{year:04d}-{mon:02d}-{last_day:02d}":
                 log(f"  [注意] {emp} {employees[emp]['name']}: 月中 {di} に所属変更あり"
                     f"（投入グループは月末時点 {groups[emp][0]} を使用）")
+
+    current: dict[str, dict[str, dict]] = {}
+    dayoffs: dict[str, dict[str, str]] = {}
+    log(f"jinjer現状取得中（work-schedules / requested-day-offs × {len(emps)}名）…")
+    for i, emp in enumerate(emps, 1):
+        gid = groups.get(emp, ("", ""))[0]
+        try:
+            current[emp] = _with_retry(
+                lambda e=emp, g=gid: cli.get_work_schedules(e, month, store_id=g),
+                f"work-schedules取得(emp={emp})", log)
+        except JinjerAPIError as e:
+            # 現状が取れないまま差分を作ると全日「新規」と誤判定するため中止する
+            return abort([f"スケジュール現状の取得に失敗（emp={emp}）: {e}"])
+        time.sleep(0.15)
+        dayoffs[emp] = cli.get_requested_day_offs(emp, month)  # 失敗は空dict（検証NGで顕在化）
+        time.sleep(0.15)
+        if i % 10 == 0 or i == len(emps):
+            log(f"  … {i}/{len(emps)} 名")
+    n_off = sum(len(v) for v in dayoffs.values())
+    if n_off:
+        log(f"休暇登録: {n_off}件")
+        for emp in emps:
+            for d_iso, info in sorted(dayoffs.get(emp, {}).items()):
+                log(f"    {emp} {employees[emp]['name']} {d_iso} {info}")
 
     # ---- 4. 差分プラン ----
     built = build_diff_plan(employees, tpl_index, current, dayoffs, groups,
@@ -848,7 +854,8 @@ def run_schedule_api_import(
     for i, emp in enumerate(verify_emps, 1):
         try:
             after[emp] = _with_retry(
-                lambda e=emp: cli.get_work_schedules(e, month),
+                lambda e=emp: cli.get_work_schedules(
+                    e, month, store_id=groups.get(e, ("", ""))[0]),
                 f"検証取得(emp={emp})", log)
         except JinjerAPIError as e:
             log(f"[WARN] 検証取得失敗 emp={emp}: {e}")

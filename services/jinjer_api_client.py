@@ -45,25 +45,33 @@ def _schedule_stamp(w: dict) -> str:
     return ""
 
 
-def parse_work_schedules_data(data: dict) -> dict[str, dict]:
+def parse_work_schedules_data(data: dict, store_id: str = "") -> dict[str, dict]:
     """work-schedules レスポンスの data 部を日別 dict に変換する（純粋関数）。
 
-    jinjer は同一日のスケジュールを新旧2バージョンで二重返却することがある。
-    **created_at / updated_at が最新のレコードを採用する**。
+    Args:
+        data: レスポンスの data 部
+        store_id: 打刻グループID。指定すると**そのグループのレコードだけ**を見る
 
-    ⚠️ 以前は「先頭が新しい方」という前提で先頭を採用していたが、
-    2026-08-03 に**古い方が先頭で返る**ケースを実測した（石下 8/5・木村 8/4 など計12日）。
-    そのとき汎用データのエクスポート（jinjerの正）は新しい方と一致していたため、
-    「最新を採る」が正しい。先頭採用のままだと差分判定と反映検証がともに誤る
-    （実際に投入成功した11件が検証NGと誤判定された）。
-    同着（タイムスタンプが同じ・無い）の場合は先に出てきた方を残す。
+    ⚠️ **jinjer は打刻グループごとに別々のスケジュールを持つ**（2026-08-03 実測）。
+    打刻グループを移動した従業員は、旧グループで作られた予定がそのまま残り、
+    同じ日について複数レコードが返る。旧グループの残骸を「現在の予定」と読むと
+    「休日に予定残存 → 削除できないのでスキップ」と誤判定し、**本来書けるはずの
+    予定が投入されない**（石下さん14日・木村さん15日で実害。8/1にグループ40→43へ移動）。
+    そのため呼び出し側は所属履歴から求めた**現グループの store_id を必ず渡す**こと。
+
+    同一グループ内で同じ日が複数返る場合は created_at / updated_at が最新を採用する
+    （同着・タイムスタンプ無しなら先に出てきた方を残す）。
     """
+    want = str(store_id or "").strip()
     result: dict[str, dict] = {}
     stamps: dict[str, str] = {}
     for w in (data or {}).get("work_schedules", []) or []:
         d = str(w.get("date") or "").strip()
         if not d:
             continue
+        store = w.get("store") or {}
+        if want and str(store.get("id") or "").strip() != want:
+            continue  # 別の打刻グループの残骸 → 現在の予定ではない
         stamp = _schedule_stamp(w)
         if d in result and stamp <= stamps.get(d, ""):
             continue  # 既に採用済みのレコードの方が新しい（or 同着）
@@ -78,7 +86,8 @@ def parse_work_schedules_data(data: dict) -> dict[str, dict]:
             "start": _strip_seconds(sched.get("start")),
             "end": _strip_seconds(sched.get("end")),
             "breaks": breaks,
-            "store": str((w.get("store") or {}).get("name") or ""),
+            "store": str(store.get("name") or ""),
+            "store_id": str(store.get("id") or ""),
         }
         stamps[d] = stamp
     return result
@@ -521,14 +530,21 @@ class JinjerClient:
             _time.sleep(0.1)
         return None
 
-    def get_work_schedules(self, employee_id: str, month: str) -> dict[str, dict]:
+    def get_work_schedules(self, employee_id: str, month: str,
+                           store_id: str = "") -> dict[str, dict]:
         """`/v1/employees/work-schedules` から日別スケジュールを取得する。
+
+        Args:
+            employee_id: 従業員ID
+            month: "YYYY-MM"
+            store_id: 打刻グループID。**打刻グループを移動した従業員では必ず指定する**
+                （指定しないと旧グループの残骸を現在の予定と誤認する。
+                 詳細は parse_work_schedules_data の注記）
 
         Returns:
             ``{date_iso: {"start": "9:00", "end": "17:30", "breaks": [("12:00","13:00"), ...],
-                          "store": 打刻グループ名}}``
+                          "store": 打刻グループ名, "store_id": 打刻グループID}}``
             夜勤は 24時超表記（例 "33:30"）のまま返る。スケジュールがない日はキーごと無い。
-            同一日の新旧二重返却は先頭（新しい方）を採用する。
         """
         headers = self._auth_headers()
         try:
@@ -543,7 +559,7 @@ class JinjerClient:
         if r.status_code != 200:
             logger.warning("work-schedules 取得失敗 emp=%s status=%s", employee_id, r.status_code)
             return {}
-        return parse_work_schedules_data(r.json().get("data") or {})
+        return parse_work_schedules_data(r.json().get("data") or {}, store_id)
 
     def get_requested_day_offs(self, employee_id: str, month: str) -> dict[str, str]:
         """`/v1/employees/requested-day-offs` から休暇登録日を取得する。
