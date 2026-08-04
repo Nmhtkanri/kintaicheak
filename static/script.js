@@ -94,6 +94,20 @@ function getCurrentMode() {
     return checked ? checked.value : 'match';
 }
 
+// 固定タブバー右側に出す、現在モードの一言説明
+const MODE_HINTS = {
+    match:      '請求勤怠と jinjer の差異を洗い出す',
+    csv_export: 'シフト表を読み取って jinjer へ登録する',
+    keiri:      'freee 取引インポート用の4CSVを作る',
+    expense:    'テレワーク・出社日数と経費を集計する',
+    mail:       '下書きのみ作成・送信はしません',
+};
+
+// 進捗バー／エラー表示がどのモードのものかを覚えておく。
+// タブでモードを切り替えても消さず、そのモードに戻ったときに再表示するため。
+let runningMode = null;
+let errorMode = null;
+
 function applyModeUI(mode) {
     const jinjerSection = document.getElementById('jinjer-section');
     const timesheetSection = document.getElementById('timesheet-section');
@@ -114,6 +128,7 @@ function applyModeUI(mode) {
     const monthlyExportCard = document.getElementById('monthly-export-card');
     const batchCompareCard = document.getElementById('batch-compare-card');
     const expenseCard = document.getElementById('expense-card');
+    const kiCard = document.getElementById('ki-card');
     const keiriCard = document.getElementById('keiri-card');
     const mailCard = document.getElementById('mail-card');
 
@@ -150,8 +165,9 @@ function applyModeUI(mode) {
     if (monthlyCompareCard) monthlyCompareCard.style.display = isMatch ? '' : 'none';
     if (monthlyExportCard) monthlyExportCard.style.display = isMatch ? '' : 'none';
 
-    // 経費チェックモード: 経費カードのみ表示
+    // 経費チェックモード: 承認前作業＋経費集計の2カードを表示
     if (expenseCard) expenseCard.style.display = isExpense ? '' : 'none';
+    if (kiCard) kiCard.style.display = isExpense ? '' : 'none';
     // 経理モード: 仕訳CSV生成カードのみ表示
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
     // メール下書きモード: メールカードのみ表示（初回表示時にテンプレ一覧を読み込む）
@@ -159,10 +175,33 @@ function applyModeUI(mode) {
         mailCard.style.display = isMail ? '' : 'none';
         if (isMail) loadMailTemplates();
     }
+
+    // アップロードフォーム（＝スケジュールモードの入力カード）はスケジュールモードのみ表示
+    if (form) form.style.display = isSchedule ? '' : 'none';
+
+    // タブバー右側の一言説明
+    const modeBarHint = document.getElementById('mode-bar-hint');
+    if (modeBarHint) modeBarHint.textContent = MODE_HINTS[mode] || '';
+
+    // 出力エリアの片付け。
+    // data-mode を持つ出力エリアは「そのモードのときだけ、実行済みなら表示」する。
+    // 中身は消さないので、モードを戻せば結果がそのまま再表示される（再実行は不要）。
+    // 進捗・エラーも同じ扱い：所属モードに戻ったときだけ出す（実行中の切替で見失わない）。
+    // カードの内側にある結果（keiri/expense/mail/bc/qe）はカードごと隠れるのでここでは触らない。
+    if (progressArea) progressArea.style.display = (runningMode === mode) ? 'block' : 'none';
+    if (errorArea) errorArea.style.display = (errorMode === mode) ? 'block' : 'none';
+    document.querySelectorAll('[data-mode]').forEach(el => {
+        const show = (el.dataset.mode === mode) && (el.dataset.hasResult === '1');
+        el.style.display = show ? 'block' : 'none';
+    });
 }
 
 document.querySelectorAll('input[name="mode"]').forEach(radio => {
-    radio.addEventListener('change', () => applyModeUI(getCurrentMode()));
+    radio.addEventListener('change', () => {
+        applyModeUI(getCurrentMode());
+        // タブで切り替えたら、そのモードの先頭（入力カード）が見える位置へ戻す
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
 });
 applyModeUI(getCurrentMode());
 
@@ -269,17 +308,24 @@ function processSSEPart(part) {
 // =============================================================================
 function startProcessing() {
     progressStep = 5;
+    runningMode = getCurrentMode();
+    errorMode = null;
     progressBar.style.width = progressStep + '%';
     progressMessage.textContent = '処理を開始しています...';
     progressArea.style.display = 'block';
     errorArea.style.display = 'none';
     resultArea.style.display = 'none';
-    if (csvExportArea) csvExportArea.style.display = 'none';
+    resultArea.dataset.hasResult = '0';
+    if (csvExportArea) {
+        csvExportArea.style.display = 'none';
+        csvExportArea.dataset.hasResult = '0';
+    }
     runBtn.disabled = true;
     runBtn.textContent = '処理中...';
 }
 
 function stopProcessing(hideProgress = true) {
+    runningMode = null;
     runBtn.disabled = false;
     // モードに応じたボタンラベルに戻す
     runBtn.textContent = (getCurrentMode() === 'csv_export') ? 'スケジュールCSVを作成' : 'チェック実行';
@@ -287,9 +333,11 @@ function stopProcessing(hideProgress = true) {
 }
 
 function showError(msg) {
+    errorMode = getCurrentMode();
     errorArea.innerHTML = msg;
     errorArea.style.display = 'block';
     resultArea.style.display = 'none';
+    resultArea.dataset.hasResult = '0';
 }
 
 function showResult(data) {
@@ -361,8 +409,12 @@ function showResult(data) {
         newTplMsg.style.display = 'none';
     }
 
-    resultArea.style.display = 'block';
-    resultArea.scrollIntoView({ behavior: 'smooth' });
+    // 実行中に別モードへ切り替えられていても結果は保持し、そのモードに戻ったときに出す
+    resultArea.dataset.hasResult = '1';
+    if (getCurrentMode() === 'match') {
+        resultArea.style.display = 'block';
+        resultArea.scrollIntoView({ behavior: 'smooth' });
+    }
 }
 
 function renderTable(rows) {
@@ -1360,8 +1412,12 @@ function showCsvExportResult(data) {
     // API直接投入ブロック（既定ルート）を対象月ごとに生成
     renderScheduleApiBlocks(csv_files || []);
 
-    csvExportArea.style.display = 'block';
-    csvExportArea.scrollIntoView({ behavior: 'smooth' });
+    // 実行中に別モードへ切り替えられていても結果は保持し、そのモードに戻ったときに出す
+    csvExportArea.dataset.hasResult = '1';
+    if (getCurrentMode() === 'csv_export') {
+        csvExportArea.style.display = 'block';
+        csvExportArea.scrollIntoView({ behavior: 'smooth' });
+    }
 }
 
 function escapeHtml(s) {

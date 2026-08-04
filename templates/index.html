@@ -3,6 +3,32 @@
 {% block content %}
 <div class="container">
 
+    <!-- モード切替タブ（画面上部に固定。スクロール中もここでいつでも切り替えられる） -->
+    <div class="mode-tabs">
+        <span class="mode-tabs-caption">モード</span>
+        <label class="mode-tab" title="請求勤怠と jinjer の差異を洗い出す">
+            <input type="radio" name="mode" value="match" checked>
+            <span class="mode-tab-face">勤怠チェック</span>
+        </label>
+        <label class="mode-tab" title="シフト表を読み取って jinjer へ登録する">
+            <input type="radio" name="mode" value="csv_export">
+            <span class="mode-tab-face">スケジュールアップロード</span>
+        </label>
+        <label class="mode-tab" title="給与明細から freee 取引インポート用の4CSVを作る">
+            <input type="radio" name="mode" value="keiri">
+            <span class="mode-tab-face">経理</span>
+        </label>
+        <label class="mode-tab" title="テレワーク・出社日数と経費を集計する">
+            <input type="radio" name="mode" value="expense">
+            <span class="mode-tab-face">経費チェック</span>
+        </label>
+        <label class="mode-tab" title="一覧表から Outlook 下書きを一括作成する（送信はしません）">
+            <input type="radio" name="mode" value="mail">
+            <span class="mode-tab-face">メール下書き</span>
+        </label>
+        <span class="mode-tabs-hint" id="mode-bar-hint"></span>
+    </div>
+
     {% if not api_key_set %}
     <div class="alert alert-warning">
         <strong>APIキー未設定:</strong> <code>.env</code> ファイルに
@@ -10,54 +36,9 @@
     </div>
     {% endif %}
 
-    <div class="workflow-heading">
-        <div>
-            <div class="workflow-kicker">処理モード</div>
-            <h2>やりたい作業を選んでください</h2>
-        </div>
-        <div class="workflow-note">勤怠チェック / スケジュールアップロード / 経理 / 経費チェック / メール下書き</div>
-    </div>
-
-    <form id="upload-form" class="workflow-card workflow-card-primary" enctype="multipart/form-data">
-        <!-- モード選択 -->
-        <div class="mode-selector">
-            <label class="mode-option">
-                <input type="radio" name="mode" value="match" checked>
-                <span class="mode-card">
-                    <span class="mode-title">勤怠チェックモード</span>
-                    <span class="mode-desc">jinjer 勤怠CSVと請求勤怠を突き合わせます</span>
-                </span>
-            </label>
-            <label class="mode-option">
-                <input type="radio" name="mode" value="csv_export">
-                <span class="mode-card">
-                    <span class="mode-title">スケジュールアップロードモード</span>
-                    <span class="mode-desc">画像・Excelなどからスケジュールを読み取り、jinjer用CSVを作ります</span>
-                </span>
-            </label>
-            <label class="mode-option">
-                <input type="radio" name="mode" value="keiri">
-                <span class="mode-card">
-                    <span class="mode-title">経理モード</span>
-                    <span class="mode-desc">jinjer給与明細から freee 取引インポート用の4CSVを作ります</span>
-                </span>
-            </label>
-            <label class="mode-option">
-                <input type="radio" name="mode" value="expense">
-                <span class="mode-card">
-                    <span class="mode-title">経費チェックモード</span>
-                    <span class="mode-desc">jinjer勤怠からテレワーク日数・出社日数を集計します</span>
-                </span>
-            </label>
-            <label class="mode-option">
-                <input type="radio" name="mode" value="mail">
-                <span class="mode-card">
-                    <span class="mode-title">メール下書きモード</span>
-                    <span class="mode-desc">一覧表とテンプレートから Outlook の下書きを一括作成します（送信はしません）</span>
-                </span>
-            </label>
-        </div>
-
+    <!-- スケジュールアップロードモードの入力カード（他モードでは applyModeUI がフォームごと隠す） -->
+    <form id="upload-form" class="workflow-card workflow-card-primary mode-accent acc-schedule"
+          enctype="multipart/form-data" style="display:none">
         <div class="step-header" id="match-step-header">
             <div>
                 <div class="step-number">1</div>
@@ -68,13 +49,11 @@
             </div>
         </div>
 
-        <div class="step-header" id="schedule-step-header" style="display:none">
+        <div class="card-head" id="schedule-step-header" style="display:none">
+            <span class="card-icon icon-schedule">📅</span>
             <div>
-                <div class="step-number">1</div>
-                <div class="step-copy">
-                    <div class="section-title">スケジュールアップロード</div>
-                    <p class="hint">シフト表や凡例画像を読み取り、jinjerに取り込めるスケジュールCSVを作成します。</p>
-                </div>
+                <div class="card-title">シフト表を読み取って jinjer へ登録する</div>
+                <p class="card-lead">読み取り結果を確認画面で直してから、API で投入します。</p>
             </div>
         </div>
 
@@ -117,40 +96,39 @@
             </div>
         </div>
 
-        <!-- 対象年月（スケジュールアップロードモード用）-->
-        <div class="upload-section" id="target-ym-section" style="display:none">
-            <div class="section-title">対象年月</div>
-            <div style="padding: 8px 14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                <input type="number" name="target_year" id="target-year"
-                       placeholder="2026" min="2000" max="2099"
-                       style="width:90px; padding:4px 8px;">
-                <span>年</span>
-                <input type="number" name="target_month" id="target-month"
-                       placeholder="5" min="1" max="12"
-                       style="width:60px; padding:4px 8px;">
-                <span>月</span>
-                <span class="hint" style="margin-left: 8px;">
-                    Excelから年月が読み取れない場合だけ入力してください
-                </span>
-            </div>
-        </div>
-
         <!-- シフト表・凡例ファイル（スケジュールアップロードモード用） -->
         <div class="upload-section" id="shift-files-section" style="display:none">
-            <div class="section-title">スケジュール画像・Excel</div>
+            <div class="section-title">
+                スケジュール画像・Excel <span class="tag tag-req">必須</span>
+            </div>
             <div class="drop-zone" id="shift-files-drop-zone" data-input="timesheet_files">
                 <div class="drop-zone-inner">
                     <div class="drop-icon">📅</div>
-                    <p>シフト表・凡例画像をまとめてドラッグ&ドロップ、または</p>
+                    <p>シフト表をドラッグ&ドロップ、または</p>
                     <label class="btn btn-secondary">
                         ファイルを選択
                         <input type="file" name="timesheet_files" id="shift-files-input"
                                accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
                     </label>
-                    <p class="hint">対応形式: .xlsx .xls .xlsb .pdf .png .jpg .jpeg</p>
-                    <p class="hint">凡例が別画像の場合は、シフト表と一緒に追加してください</p>
+                    <p class="hint">.xlsx .xls .xlsb .pdf .png .jpg .jpeg ／ 凡例が別画像なら一緒に追加</p>
                 </div>
                 <div class="selected-files" id="shift-files-selected"></div>
+            </div>
+        </div>
+
+        <!-- 対象年月（スケジュールアップロードモード用）-->
+        <div class="upload-section" id="target-ym-section" style="display:none">
+            <div class="section-title">
+                対象年月 <span class="tag tag-opt">任意</span>
+            </div>
+            <div class="field field-inline">
+                <input type="number" name="target_year" id="target-year"
+                       placeholder="2026" min="2000" max="2099" style="width:90px">
+                <span>年</span>
+                <input type="number" name="target_month" id="target-month"
+                       placeholder="5" min="1" max="12" style="width:64px">
+                <span>月</span>
+                <span class="field-sub">Excel から年月が読み取れないときだけ入力</span>
             </div>
         </div>
 
@@ -177,11 +155,14 @@
     <!-- エラー表示 -->
     <div id="error-area" class="alert alert-error" style="display:none"></div>
 
-    <!-- 結果エリア -->
-    <div id="result-area" style="display:none">
+    <!-- 結果エリア（data-mode = この結果を持つモード。切替時に applyModeUI が畳む） -->
+    <div id="result-area" data-mode="match" style="display:none">
         <hr class="divider">
 
-        <div class="section-title">📊 結果サマリー</div>
+        <div class="result-head">
+            <span class="section-title">📊 結果サマリー</span>
+            <span class="tag tag-mode">勤怠チェックモードの結果</span>
+        </div>
         <div class="summary-cards">
             <div class="summary-card card-ok">
                 <div class="card-label">✅ OK</div>
@@ -253,9 +234,12 @@
     </div>
 
     <!-- スケジュールアップロードモード結果エリア -->
-    <div id="csv-export-area" style="display:none">
+    <div id="csv-export-area" data-mode="csv_export" style="display:none">
         <hr class="divider">
-        <div class="section-title">スケジュールCSV出力結果</div>
+        <div class="result-head">
+            <span class="section-title">スケジュールCSV出力結果</span>
+            <span class="tag tag-mode">スケジュールアップロードモードの結果</span>
+        </div>
         <div id="csv-split-note" class="csv-split-note" style="display:none"></div>
         <div id="csv-files-list" class="csv-files-list"></div>
 
@@ -281,63 +265,76 @@
 
         <!-- API直接投入（既定ルート）。グリッドCSVは控え・監査用として上に残す -->
         <div id="sched-api-area" style="display:none; margin-top:16px; padding:12px 14px;
-             border:2px solid #2E75B6; border-radius:8px; background:#f6faff">
-            <div style="font-weight:bold; font-size:15px">🚀 APIでjinjerへ直接投入（推奨）</div>
-            <p class="hint" style="margin:6px 0 10px 0">
-                jinjer画面からのCSVインポートは一部従業員にサイレントに反映されない事象があるため、
-                API投入を標準ルートにしています（上のCSVは控え・監査用）。<br>
-                ① 差分プレビューで「誰の何日をどう変えるか」を確認 →
-                ② 投入（jinjerの現状と食い違う日だけ書き込み、反映を自動検証します）。
+             border:1px solid #b8d7ee; border-radius:8px; background:#f6faff">
+            <div class="sub-head">🚀 API で jinjer へ投入する</div>
+            <p class="card-lead" style="margin:0">
+                ① 差分プレビューで「誰の何日をどう変えるか」を確認 → ② 投入。
             </p>
-            <div id="sched-api-blocks"></div>
+            <details class="more">
+                <summary>なぜ CSV ではなく API なのか</summary>
+                <div class="more-body">
+                    <p>jinjer 画面からの CSV インポートは、一部の従業員にサイレントに反映されない事象があるため、
+                       API 投入を標準ルートにしています（上の CSV は控え・監査用）。</p>
+                    <p>投入では jinjer の現状と食い違う日だけを書き込み、反映されたかを自動検証します。</p>
+                </div>
+            </details>
+            <div id="sched-api-blocks" style="margin-top:10px"></div>
         </div>
     </div>
 
     <!-- ============================================================ -->
     <!-- 一括モード — batch_compare（差異一覧を一発生成）                 -->
     <!-- ============================================================ -->
-    <div class="workflow-card" id="batch-compare-card" style="border:2px solid #2E75B6">
-        <div class="step-header">
+    <div class="workflow-card mode-accent acc-match" id="batch-compare-card">
+        <div class="card-head">
+            <span class="card-icon icon-match">⚡</span>
             <div>
-                <div class="step-number" style="background:#2E75B6">⚡</div>
-                <div class="step-copy">
-                    <div class="section-title">おすすめ：請求勤怠フォルダから差異一覧を一発生成</div>
-                    <p class="hint">グループの請求勤怠フォルダ・jinjer汎用データ・申請データ・対象月を指定すると、突合から差異一覧＋トリアージまでまとめて実行します。ファイルを1枚ずつアップロードする必要はありません。グループ単位で実行してください（グループはまたがない）。</p>
-                </div>
+                <div class="card-title">差異一覧をまとめて作る <span class="tag tag-mode">おすすめ</span></div>
+                <p class="card-lead">フォルダと対象月を指定すれば、突合から差異一覧・トリアージまで一度に実行します。ファイルを1枚ずつ上げる必要はありません。</p>
             </div>
         </div>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label>
-                請求勤怠フォルダ（または単一ファイル）:
-                <input type="text" id="bc-timesheet-dir" placeholder="例: Y:\給与明細\R8年\6月\請求勤怠データ\SAP_Fieldglass"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">フォルダ内（サブフォルダ含む）の請求勤怠を自動で形式判定して解析します（PDF等はAIで読むため少し時間がかかります）。</div>
+
+        <div class="warn-inline" style="margin-bottom:14px">
+            グループ単位で実行してください（グループはまたげません）。
+        </div>
+
+        <div class="fields">
+            <label class="field">
+                <span class="field-label">請求勤怠フォルダ <span class="tag tag-req">必須</span></span>
+                <input type="text" id="bc-timesheet-dir" placeholder="例: Y:\給与明細\R8年\6月\請求勤怠データ\SAP_Fieldglass">
+                <span class="field-sub">サブフォルダも含めて形式を自動判定します。単一ファイルの指定も可。</span>
             </label>
-            <label>
-                jinjer 汎用データCSV（ファイルまたは保存フォルダ）:
-                <input type="text" id="bc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\6月\jinjer勤怠データ\…汎用データ.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">突合の打刻照合にも、差異一覧の集計列にも、この1本を使います（別CSVは不要）。</div>
+            <label class="field">
+                <span class="field-label">jinjer 汎用データCSV <span class="tag tag-req">必須</span></span>
+                <input type="text" id="bc-jinjer-dir" placeholder="例: Y:\給与明細\R8年\6月\jinjer勤怠データ\…汎用データ.csv">
+                <span class="field-sub">打刻照合にも差異一覧の集計列にも、この1本を使います。</span>
             </label>
-            <label>
-                jinjer 申請データ（打刻修正申請）CSV<span style="color:#c00; font-weight:bold">（必須）</span>:
-                <input type="text" id="bc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">指定すると「打刻修正時コメント」列に申請理由を併記します。空欄でもOK。</div>
+            <label class="field">
+                <span class="field-label">jinjer 申請データ（打刻修正申請）CSV <span class="tag tag-req">必須</span></span>
+                <input type="text" id="bc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv">
+                <span class="field-sub">「打刻修正時コメント」列に申請理由を載せるために使います。</span>
             </label>
-            <label style="display:inline-flex; align-items:center; gap:6px">
-                対象月:
-                <input type="text" id="bc-month" placeholder="例: 2026-05" style="width:160px; padding:6px 10px">
+            <label class="field field-inline">
+                <span class="field-label">対象月 <span class="tag tag-req">必須</span></span>
+                <input type="text" id="bc-month" placeholder="2026-05" style="width:150px">
             </label>
-            <label>
-                出力ファイル名(任意・.xlsxは自動で付きます):
-                <input type="text" id="bc-output-filename" placeholder="差異一覧_2026-05.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">出力ファイル名 <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="bc-output-filename" placeholder="差異一覧_2026-05.xlsx">
+                <span class="field-sub">.xlsx は自動で付きます。</span>
             </label>
-            <div style="margin-top:6px">
-                <button type="button" class="btn btn-primary" id="bc-run-btn">⚡ 一発で差異一覧を生成</button>
-                <span id="bc-status" style="margin-left:12px; color:#666"></span>
+        </div>
+
+        <details class="more" style="margin-top:12px">
+            <summary>処理にかかる時間について</summary>
+            <div class="more-body">
+                請求勤怠が PDF や画像の場合は AI で読み取るため、フォルダ内の件数によっては数分かかります。
             </div>
+        </details>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="bc-run-btn">⚡ 差異一覧を生成</button>
+            <span id="bc-status" class="status-text"></span>
         </div>
         <div id="bc-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
@@ -357,46 +354,48 @@
     <!-- 月次集約モード — quick_compare / quick_export                  -->
     <!-- ============================================================ -->
 
-    <div class="workflow-card" id="monthly-export-card">
-        <div class="step-header">
+    <div class="workflow-card mode-accent acc-match" id="monthly-export-card">
+        <div class="card-head">
+            <span class="card-icon icon-match">2</span>
             <div>
-                <div class="step-number">2</div>
-                <div class="step-copy">
-                    <div class="section-title">アップロード用CSVを作る → APIでjinjerへ投入</div>
-                    <p class="hint">差異一覧で承認・却下・保留を入力した後、jinjerに戻すCSVを生成し、そのままAPIで投入まで行えます。</p>
-                </div>
+                <div class="card-title">判断を反映して jinjer へ投入する</div>
+                <p class="card-lead">差異一覧に「人間判断」を入れたら、jinjer に戻す CSV を作り、そのまま API で投入します。</p>
             </div>
         </div>
-        <p class="hint" style="padding:0 14px">
-            一発生成で出力した差異一覧xlsx を Excel で開いて「人間判断」プルダウン（承認 / 却下 / 保留）を埋めてから、ここで処理します。休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値だけ汎用データへ反映します。<br>
-            <b>流れ: ① 本実行（CSV出力） → ② 下の「🚀 APIでjinjerへ投入する」でそのまま投入・反映検証。</b>
-            jinjer画面での手動アップロードは不要です（CSVは控え・監査用にダウンロードも可能）。
-        </p>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label>
-                人間判断を埋めた差異一覧xlsx（一発生成の出力）:
-                <input type="file" id="qe-diff-file" accept=".xlsx" style="margin-top:4px">
+
+        <div class="warn-inline" style="margin-bottom:14px">
+            先に差異一覧xlsx を Excel で開き、「人間判断」（承認 / 却下 / 保留）を埋めてください。
+        </div>
+
+        <div class="fields">
+            <label class="field">
+                <span class="field-label">人間判断を埋めた差異一覧xlsx <span class="tag tag-req">必須</span></span>
+                <input type="file" id="qe-diff-file" accept=".xlsx">
             </label>
-            <label>
-                jinjer 汎用データCSV（ファイルまたは保存フォルダ・一発生成と同じもの）:
-                <input type="text" id="qe-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ\汎用データ.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <div class="hint" style="margin-top:4px">CSVファイルを直接指定してOKです。複数CSVをまとめる場合だけフォルダを指定します。</div>
+            <label class="field">
+                <span class="field-label">jinjer 汎用データCSV <span class="tag tag-req">必須</span></span>
+                <input type="text" id="qe-jinjer-dir" placeholder="例: Y:\給与明細\R8年\5月\jinjer勤怠データ\汎用データ.csv">
+                <span class="field-sub">差異一覧を作ったときと同じものを指定します。まとめる場合だけフォルダ指定。</span>
             </label>
-            <label>
-                出力ファイル名(任意・.csvは自動で付きます):
-                <input type="text" id="qe-output-filename" placeholder="jinjer_upload_2026-05.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">出力ファイル名 <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="qe-output-filename" placeholder="jinjer_upload_2026-05.csv">
+                <span class="field-sub">.csv は自動で付きます。</span>
             </label>
-            <div style="margin-top:6px; display:flex; gap:8px; align-items:center">
-                <button type="button" class="btn btn-secondary" id="qe-dryrun-btn">
-                    🔍 dry-run（内訳確認のみ）
-                </button>
-                <button type="button" class="btn btn-primary" id="qe-execute-btn">
-                    📤 本実行（CSV出力）
-                </button>
-                <span id="qe-status" style="margin-left:12px; color:#666"></span>
+        </div>
+
+        <details class="more" style="margin-top:12px">
+            <summary>休憩を直すとき／CSV の扱い</summary>
+            <div class="more-body">
+                <p>休憩を直す場合は「手入力休憩1」「手入力復帰1」「手入力休憩時間」に入れた値<b>だけ</b>を汎用データへ反映します。</p>
+                <p>jinjer 画面での手動アップロードは不要です。CSV は控え・監査用にダウンロードできます。</p>
             </div>
+        </details>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="qe-execute-btn">📤 本実行（CSV出力）</button>
+            <button type="button" class="btn btn-secondary" id="qe-dryrun-btn">🔍 dry-run（内訳の確認だけ）</button>
+            <span id="qe-status" class="status-text"></span>
         </div>
         <div id="qe-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div id="qe-mode-label" style="font-weight:bold; margin-bottom:8px"></div>
@@ -418,16 +417,23 @@
                 <ul id="qe-warnings-list" style="margin:0; padding-left:20px; font-size:12px; max-height:160px; overflow:auto"></ul>
             </div>
         </div>
-        <div id="qe-api-area" style="margin:8px 14px 12px; padding:12px; border:1px solid #cfe2ff; border-radius:6px; background:#f6faff">
-            <div style="font-weight:bold">🚀 jinjerへAPI直接投入（画面アップロードの代わり）</div>
-            <p class="hint" style="margin:4px 0 8px">
-                本実行で生成したCSVを API（kintai-imports）で投入し、反映を1行ずつ自動検証します。
-                休暇登録がある日の行は自動で除外して「手動対応リスト」（Excel）に載せます。
-                完了通知メールの宛先は .env の JINJER_IMPORT_EXECUTOR_ID（勤怠管理者ロール必須・未設定ならマスタ扱い）。
+        <div id="qe-api-area" style="margin-top:16px; padding:12px 14px; border:1px solid #b8d7ee; border-radius:6px; background:#f6faff">
+            <div class="sub-head">🚀 API で jinjer へ投入する</div>
+            <p class="card-lead" style="margin:0">
+                生成した CSV を投入し、反映されたかを1行ずつ自動検証します（画面アップロードの代わり）。
             </p>
-            <button type="button" class="btn btn-primary" id="qe-api-btn" disabled>🚀 APIでjinjerへ投入する</button>
-            <span id="qe-api-hint" style="margin-left:10px; color:#888; font-size:12px">← 先に「📤 本実行（CSV出力）」を行うと押せるようになります</span>
-            <span id="qe-api-status" style="margin-left:12px; color:#666"></span>
+            <details class="more">
+                <summary>自動で除外される行／完了通知メールの宛先</summary>
+                <div class="more-body">
+                    <p>休暇登録がある日の行は自動で除外し、「手動対応リスト」（Excel）に載せます。</p>
+                    <p>完了通知メールの宛先は <code>.env</code> の <code>JINJER_IMPORT_EXECUTOR_ID</code>（勤怠管理者ロール必須・未設定ならマスタ扱い）。</p>
+                </div>
+            </details>
+            <div class="actions" style="margin-top:12px">
+            <button type="button" class="btn btn-primary" id="qe-api-btn" disabled>🚀 API で投入する</button>
+            <span id="qe-api-hint" class="status-text">先に「📤 本実行（CSV出力）」を行うと押せます</span>
+            <span id="qe-api-status" class="status-text"></span>
+            </div>
             <pre id="qe-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; border:1px solid #ddd; padding:8px; font-size:12px; margin-top:8px; white-space:pre-wrap"></pre>
             <div id="qe-api-result" style="display:none; margin-top:8px; font-size:13px"></div>
         </div>
@@ -438,54 +444,73 @@
     <!-- 経費チェックモード — テレワーク日数・出社日数                  -->
     <!-- ============================================================ -->
     <!-- ==== 経理モード: freee 取引インポート4CSVの生成 ==== -->
-    <div class="workflow-card" id="keiri-card" style="border:2px solid #7030a0; display:none">
-        <div class="step-header">
+    <div class="workflow-card mode-accent acc-keiri" id="keiri-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keiri">🧾</span>
             <div>
-                <div class="step-number" style="background:#7030a0">🧾</div>
-                <div class="step-copy">
-                    <div class="section-title">経理モード：freee 取引インポート用4CSVの生成</div>
-                    <p class="hint">支給月を入れて実行すると、jinjer の給与明細から
-                        <b>給与 / 住民税 / 健康保険 / 厚生年金</b> の4CSV（freee 取引インポート17列・cp932）を作ります。
-                        あわせて <b>検算</b> と <b>要確認リスト</b> を出し、経理担当の最終CSVがある月は差分も突き合わせます。
-                        初回は給与明細の取得に数分かかります（2回目以降はキャッシュを使うので速い）。</p>
+                <div class="card-title">freee 取引インポート用の4CSVを作る</div>
+                <p class="card-lead">支給月を入れると、給与明細から <b>給与 / 住民税 / 健康保険 / 厚生年金</b> の4CSVを生成します。</p>
+            </div>
+        </div>
+
+        <div class="fields">
+            <label class="field field-inline">
+                <span class="field-label">支給月 <span class="tag tag-req">必須</span></span>
+                <input type="text" id="keiri-month" placeholder="2026-08" style="width:150px">
+                <span class="field-sub">前月の明細も使うため、前月分も自動で取得します</span>
+            </label>
+            <div class="field">
+                <span class="field-label">あわせて行うこと</span>
+                <div class="check-row">
+                    <label><input type="checkbox" id="keiri-run-diff" checked> 経理担当の最終CSVと突合する</label>
+                    <label><input type="checkbox" id="keiri-refresh-statements"> 給与明細をAPIから取り直す</label>
+                    <label><input type="checkbox" id="keiri-refresh-custom"> 部門・人件費区分を取り直す</label>
                 </div>
             </div>
         </div>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label style="display:inline-flex; align-items:center; gap:6px">
-                支給月:
-                <input type="text" id="keiri-month" placeholder="例: 2026-08" style="width:160px; padding:6px 10px">
-                <span class="hint" style="margin:0">前月の明細も使うので、前月分も自動で取得します</span>
-            </label>
-            <label style="display:inline-flex; align-items:center; gap:14px; flex-wrap:wrap">
-                <span><input type="checkbox" id="keiri-run-diff" checked> 経理担当の最終CSVと突合する</span>
-                <span><input type="checkbox" id="keiri-refresh-statements"> 給与明細をAPIから取り直す</span>
-                <span><input type="checkbox" id="keiri-refresh-custom"> 部門・人件費区分を取り直す</span>
-            </label>
-            <details style="font-size:12px">
-                <summary style="cursor:pointer; color:#7030a0">詳細設定（ふだんは触らなくて大丈夫です）</summary>
-                <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px">
-                    <label>品目マッピングマスタ（空欄なら共有フォルダの既定）
-                        <input type="text" id="keiri-master-csv" placeholder="Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv"
-                               style="width:100%; padding:6px 10px; margin-top:4px"></label>
-                    <label>経費転記マッピング（空欄なら共有フォルダの既定）
-                        <input type="text" id="keiri-keihi-mapping" placeholder="Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv"
-                               style="width:100%; padding:6px 10px; margin-top:4px"></label>
-                    <label>経費利用履歴 RevN.xlsm（空欄なら支給月フォルダから自動検出）
-                        <input type="text" id="keiri-keihi-book" placeholder="Y:\給与明細\R8年\8月\経費利用履歴 Rev5.xlsm"
-                               style="width:100%; padding:6px 10px; margin-top:4px"></label>
-                    <label style="display:inline-flex; align-items:center; gap:6px">マスタの採用範囲:
-                        <select id="keiri-min-status" style="padding:6px 10px">
+
+        <details class="more" style="margin-top:12px">
+            <summary>出力されるもの／かかる時間</summary>
+            <div class="more-body">
+                <p>4CSV は freee 取引インポート17列・cp932 です。あわせて<b>検算</b>と<b>要確認リスト</b>を出し、経理担当の最終CSVがある月は差分も突き合わせます。</p>
+                <p>初回は給与明細の取得に数分かかります（2回目以降はキャッシュを使うので速くなります）。</p>
+            </div>
+        </details>
+
+        <details class="more">
+            <summary>詳細設定（ふだんは触らなくて大丈夫です）</summary>
+            <div class="more-body">
+                <div class="fields">
+                    <label class="field">
+                        <span class="field-label">品目マッピングマスタ <span class="tag tag-opt">任意</span></span>
+                        <input type="text" id="keiri-master-csv" placeholder="Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv">
+                        <span class="field-sub">空欄なら共有フォルダの既定を使います。</span>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">経費転記マッピング <span class="tag tag-opt">任意</span></span>
+                        <input type="text" id="keiri-keihi-mapping" placeholder="Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv">
+                        <span class="field-sub">空欄なら共有フォルダの既定を使います。</span>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">経費利用履歴 RevN.xlsm <span class="tag tag-opt">任意</span></span>
+                        <input type="text" id="keiri-keihi-book" placeholder="Y:\給与明細\R8年\8月\経費利用履歴 Rev5.xlsm">
+                        <span class="field-sub">空欄なら支給月フォルダから自動検出します。</span>
+                    </label>
+                    <label class="field field-inline">
+                        <span class="field-label">マスタの採用範囲</span>
+                        <select id="keiri-min-status">
                             <option value="確定" selected>確定のみ（本番）</option>
                             <option value="推定">推定まで</option>
                             <option value="要確認">要確認まで（開発用・全行）</option>
-                        </select></label>
+                        </select>
+                    </label>
                 </div>
-            </details>
-            <div style="margin-top:6px">
-                <button type="button" class="btn btn-primary" id="keiri-run-btn" style="background:#7030a0">🧾 仕訳CSVを作成</button>
-                <span id="keiri-status" style="margin-left:12px; color:#666"></span>
             </div>
+        </details>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="keiri-run-btn">🧾 仕訳CSVを作成</button>
+            <span id="keiri-status" class="status-text"></span>
         </div>
         <div id="keiri-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
@@ -513,81 +538,122 @@
 
     {% raw %}
     <!-- ==== メール下書きモード: 一覧表×テンプレート → Outlook下書き（送信機能なし）==== -->
-    <div class="workflow-card" id="mail-card" style="border:2px solid #0070c0; display:none">
-        <div class="step-header">
+    <div class="workflow-card mode-accent acc-mail" id="mail-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-mail">✉️</span>
             <div>
-                <div class="step-number" style="background:#0070c0">✉️</div>
-                <div class="step-copy">
-                    <div class="section-title">メール下書き：一覧表とテンプレートから個別メールを一括作成</div>
-                    <p class="hint">社員番号入りの一覧表（Excel/CSV）を読み込み、メール台帳と突合して
-                        <b>1人1通の Outlook 下書き</b>を作ります。件名・本文には <code>{{列名}}</code> で一覧表の値を差し込めます。
-                        台帳に無い人・氏名相違・差し込みできない人は「要確認」として自動で対象外になります。
-                        <b>このモードが作るのは下書きまでです。送信は Outlook で内容を確認してから自分で行ってください。</b></p>
+                <div class="card-title">
+                    一覧表から Outlook 下書きを一括作成する
+                    <span class="tag tag-safe">下書きのみ・送信しません</span>
                 </div>
+                <p class="card-lead">社員番号入りの一覧表とテンプレートを突き合わせ、1人1通の下書きを作ります。</p>
             </div>
         </div>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label>対象者の一覧表（Excel/CSV・「社員番号」列が必要。他の列は差し込みに使えます）:
-                <input type="text" id="mail-table-path" placeholder="例: Z:\API連携\outputs\jinjer_paid_leave\有休取得4日以下_20260401-20260727.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px"></label>
-            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
-                <label style="font-size:12px">テンプレート<br>
-                    <select id="mail-template-select" style="padding:6px 10px; min-width:240px; margin-top:3px">
+
+        <div class="fields">
+            <label class="field">
+                <span class="field-label">対象者の一覧表（Excel/CSV） <span class="tag tag-req">必須</span></span>
+                <input type="text" id="mail-table-path" placeholder="例: Z:\API連携\outputs\jinjer_paid_leave\有休取得4日以下_20260401-20260727.xlsx">
+                <span class="field-sub">「社員番号」列が必要です。他の列は本文への差し込みに使えます。</span>
+            </label>
+
+            <div class="field">
+                <span class="field-label">テンプレート</span>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+                    <select id="mail-template-select" style="padding:6px 10px; min-width:240px">
                         <option value="">（選択すると下の欄に読み込みます）</option>
-                    </select></label>
-                <button type="button" class="btn" id="mail-template-save-btn">💾 現在の内容を保存</button>
-                <button type="button" class="btn" id="mail-template-delete-btn">🗑 選択中を削除</button>
+                    </select>
+                    <button type="button" class="btn btn-secondary" id="mail-template-save-btn">💾 現在の内容を保存</button>
+                    <button type="button" class="btn btn-secondary" id="mail-template-delete-btn">🗑 選択中を削除</button>
+                </div>
             </div>
-            <label>テンプレート名（保存するときの名前）:
-                <input type="text" id="mail-template-name" placeholder="例: 有休取得のお願い"
-                       style="width:60%; padding:6px 10px; margin-top:4px"></label>
-            <label>件名:
-                <input type="text" id="mail-subject" placeholder="例: 【ご確認】年次有給休暇の取得について"
-                       style="width:100%; padding:6px 10px; margin-top:4px"></label>
-            <label>本文（{{列名}} で一覧表の値を差し込み）:
-                <textarea id="mail-body" rows="9" placeholder="{{氏名}}さん&#10;&#10;お疲れさまです。管理部です。…"
-                          style="width:100%; padding:6px 10px; margin-top:4px; font-family:inherit"></textarea></label>
-            <div style="display:flex; gap:14px; flex-wrap:wrap">
-                <label>CC（; 区切り・空欄なら管理部の既定CCが自動で入ります）:
-                    <input type="text" id="mail-cc" placeholder="kanri@nmht.co.jp"
-                           style="width:300px; padding:6px 10px; margin-top:4px"></label>
-                <label>宛先の扱い:
-                    <select id="mail-bcc-mode" style="padding:6px 10px; margin-top:4px">
-                        <option value="to_only" selected>Toのみ（既定・BCCに入れない）</option>
-                        <option value="bcc">To＋就業先・個人を本人BCC</option>
-                    </select></label>
-                <label>重要度:
-                    <select id="mail-importance" style="padding:6px 10px; margin-top:4px">
-                        <option value="normal" selected>通常</option>
-                        <option value="high">高</option>
-                    </select></label>
+
+            <label class="field">
+                <span class="field-label">テンプレート名 <span class="tag tag-opt">保存するときだけ</span></span>
+                <input type="text" id="mail-template-name" placeholder="例: 有休取得のお願い" style="width:60%">
+            </label>
+            <label class="field">
+                <span class="field-label">件名 <span class="tag tag-req">必須</span></span>
+                <input type="text" id="mail-subject" placeholder="例: 【ご確認】年次有給休暇の取得について">
+            </label>
+            <label class="field">
+                <span class="field-label">本文 <span class="tag tag-req">必須</span></span>
+                <textarea id="mail-body" rows="9" placeholder="{{氏名}}さん&#10;&#10;お疲れさまです。管理部です。…"></textarea>
+                <span class="field-sub"><code>{{列名}}</code> と書くと、一覧表のその列の値が1人ずつ差し込まれます。</span>
+            </label>
+
+            <div class="field">
+                <span class="field-label">宛先の設定</span>
+                <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end">
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">CC（; 区切り）</span>
+                        <input type="text" id="mail-cc" placeholder="kanri@nmht.co.jp" style="width:300px">
+                    </label>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">宛先の扱い</span>
+                        <select id="mail-bcc-mode">
+                            <option value="to_only" selected>Toのみ（既定・BCCに入れない）</option>
+                            <option value="bcc">To＋就業先・個人を本人BCC</option>
+                        </select>
+                    </label>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">重要度</span>
+                        <select id="mail-importance">
+                            <option value="normal" selected>通常</option>
+                            <option value="high">高</option>
+                        </select>
+                    </label>
+                </div>
+                <span class="field-sub">CC を空欄にすると、管理部の既定CCが自動で入ります。</span>
             </div>
-            <details style="font-size:12px">
-                <summary style="cursor:pointer; color:#0070c0">詳細設定（ふだんは触らなくて大丈夫です）</summary>
-                <label style="display:block; margin-top:8px">メール台帳（空欄なら共有フォルダの既定。B=社員番号/C=氏名/D=社用/E=就業先/F=個人）
-                    <input type="text" id="mail-address-book" placeholder="Z:\NMHT社員勤務表\便利マクロ\メール一斉送信マクロ.xlsm"
-                           style="width:100%; padding:6px 10px; margin-top:4px"></label>
-            </details>
-            <div style="margin-top:8px; padding:10px 12px; border:1px dashed #0070c0; border-radius:6px">
-                <div style="font-weight:600; margin-bottom:4px">メール台帳の更新（jinjerと同期）</div>
-                <p class="hint" style="margin:0 0 8px">jinjerの最新の従業員情報と台帳を突き合わせ、<b>新入社員の追加</b>と<b>退職者の削除</b>を行います。
-                    就業先メール（E列）と既存行の内容は変更しません。反映前に必ず台帳のバックアップを作ります。</p>
-                <button type="button" class="btn" id="mail-ledger-diff-btn">🔄 最新のメールアドレスを取得（確認のみ・まだ書き込みません）</button>
-                <span id="mail-ledger-status" style="margin-left:12px; color:#666"></span>
+        </div>
+
+        <details class="more" style="margin-top:12px">
+            <summary>対象外になる人について</summary>
+            <div class="more-body">
+                台帳に無い人・氏名が一致しない人・差し込みができない人は「要確認」として自動で対象外になります。
+                プレビュー画面で誰が外れたか確認できます。
+            </div>
+        </details>
+
+        <details class="more">
+            <summary>詳細設定（ふだんは触らなくて大丈夫です）</summary>
+            <div class="more-body">
+                <label class="field">
+                    <span class="field-label">メール台帳 <span class="tag tag-opt">任意</span></span>
+                    <input type="text" id="mail-address-book" placeholder="Z:\NMHT社員勤務表\便利マクロ\メール一斉送信マクロ.xlsm">
+                    <span class="field-sub">空欄なら共有フォルダの既定。B=社員番号 / C=氏名 / D=社用 / E=就業先 / F=個人。</span>
+                </label>
+            </div>
+        </details>
+
+            <div style="margin-top:16px; padding:11px 13px; border:1px solid #d7dee5; border-radius:6px; background:#fafcfe">
+                <div class="sub-head">メール台帳の更新（jinjer と同期）</div>
+                <p class="card-lead" style="margin:0">jinjer の最新の従業員情報と台帳を突き合わせ、<b>新入社員の追加</b>と<b>退職者の削除</b>を行います。</p>
+                <details class="more">
+                    <summary>変更されない範囲とバックアップ</summary>
+                    <div class="more-body">
+                        就業先メール（E列）と既存行の内容は変更しません。反映前に必ず台帳のバックアップを作ります。
+                    </div>
+                </details>
+                <div class="actions" style="margin-top:11px">
+                <button type="button" class="btn btn-secondary" id="mail-ledger-diff-btn">🔄 最新のメールアドレスを取得（確認のみ）</button>
+                <span id="mail-ledger-status" class="status-text"></span>
+                </div>
                 <div id="mail-ledger-result" style="display:none; margin-top:8px">
                     <div id="mail-ledger-summary" style="margin-bottom:6px"></div>
                     <div id="mail-ledger-tables" style="max-height:320px; overflow:auto"></div>
-                    <div style="margin-top:8px">
-                        <button type="button" class="btn btn-primary" id="mail-ledger-apply-btn" style="background:#c00000" disabled>📥 チェックした内容を台帳に反映する</button>
-                        <span id="mail-ledger-apply-status" style="margin-left:12px; color:#666"></span>
+                    <div class="actions" style="margin-top:11px">
+                        <button type="button" class="btn btn-danger" id="mail-ledger-apply-btn" disabled>📥 チェックした内容を台帳に反映する</button>
+                        <span id="mail-ledger-apply-status" class="status-text"></span>
                     </div>
                     <div id="mail-ledger-apply-result" style="display:none; margin-top:6px; font-size:13px"></div>
                 </div>
             </div>
-            <div style="margin-top:6px">
-                <button type="button" class="btn btn-primary" id="mail-preview-btn" style="background:#0070c0">👀 プレビュー（まだ何も作りません）</button>
-                <span id="mail-status" style="margin-left:12px; color:#666"></span>
-            </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="mail-preview-btn">👀 プレビュー（まだ何も作りません）</button>
+            <span id="mail-status" class="status-text"></span>
         </div>
         <div id="mail-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
@@ -598,8 +664,8 @@
             <div class="hint" id="mail-columns-hint" style="margin-bottom:8px"></div>
             <div id="mail-plans" style="max-height:420px; overflow:auto"></div>
             <div style="margin-top:10px">
-                <button type="button" class="btn btn-primary" id="mail-drafts-btn" style="background:#0070c0" disabled>✉️ 選択した下書きをOutlookに作成</button>
-                <span id="mail-drafts-status" style="margin-left:12px; color:#666"></span>
+                <button type="button" class="btn btn-primary" id="mail-drafts-btn" disabled>✉️ 選択した下書きをOutlookに作成</button>
+                <span id="mail-drafts-status" class="status-text" style="margin-left:12px"></span>
             </div>
             <div id="mail-drafts-result" style="display:none; margin-top:8px; font-size:13px"></div>
         </div>
@@ -607,34 +673,52 @@
     </div>
     {% endraw %}
 
-    <div class="workflow-card" id="expense-card" style="border:2px solid #548235; display:none">
-        <div class="step-header">
+    <div class="workflow-card mode-accent acc-expense" id="expense-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-expense">💴</span>
             <div>
-                <div class="step-number" style="background:#548235">💴</div>
-                <div class="step-copy">
-                    <div class="section-title">経費チェック：テレワーク日数・出社日数（jinjer勤怠から自動集計）</div>
-                    <p class="hint">対象月を入れると、在籍者と対象月以降の退職者（例: 対象月7月なら7/31退職者まで＝8月給与計算の対象）のテレワーク日数・出社日数・テレワーク実施日を社員番号/氏名ごとにExcelでまとめます。全員分を1名ずつ取得するため数分かかります。</p>
-                </div>
+                <div class="card-title">jinjer 経費承認前作業</div>
+                <p class="card-lead">経費を承認する前のチェック用に、対象月のテレワーク日数・出社日数・実施日を社員番号／氏名ごとに Excel でまとめます。</p>
             </div>
         </div>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label style="display:inline-flex; align-items:center; gap:6px">
-                対象月:
-                <input type="text" id="ex-month" placeholder="例: 2026-05" style="width:160px; padding:6px 10px">
+
+        <div class="fields">
+            <label class="field field-inline">
+                <span class="field-label">対象月 <span class="tag tag-req">必須</span></span>
+                <input type="text" id="ex-month" placeholder="2026-05" style="width:150px">
             </label>
-            <label>
-                出力ファイル名(任意・.xlsxは自動で付きます):
-                <input type="text" id="ex-output-filename" placeholder="経費チェック_2026年05月.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">出力ファイル名 <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ex-output-filename" placeholder="経費チェック_2026年05月.xlsx">
+                <span class="field-sub">.xlsx は自動で付きます。</span>
             </label>
-            <label>
-                通勤費申請なしリスト(Excel・任意): 手動整備したブックのパスを指定すると、完全在宅者を除外し通勤費・区分を転記した「通勤費申請なし」シートを追加します（A列=社員番号、B列=氏名）。移動交通費（立替精算）対象者は下のリストを読んで区分を「移動交通費」に自動設定します（リスト漏れも自動追加）
-                <input type="text" id="ex-no-commute" placeholder="例: Z:\経費\通勤費申請なしリスト.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">通勤費申請なしリスト（Excel） <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ex-no-commute" placeholder="例: Z:\経費\通勤費申請なしリスト.xlsx">
+                <span class="field-sub">指定すると「通勤費申請なし」シートを追加します（A列=社員番号、B列=氏名）。</span>
             </label>
-            <div style="border:1px dashed #c55a11; border-radius:6px; padding:8px 10px; background:#fffaf5">
-                <button type="button" class="btn" id="ex-travel-toggle" style="background:#c55a11; color:#fff">🚗 移動交通費（立替精算）対象者リストを表示・編集</button>
-                <span class="hint" style="margin-left:8px">通勤経路が無くて正しい人たち（現場直行など）。保存すると次回実行から反映されます</span>
+        </div>
+
+        <details class="more" style="margin-top:12px">
+            <summary>対象になる人／かかる時間</summary>
+            <div class="more-body">
+                <p>在籍者と、対象月以降の退職者が対象です（例: 対象月が7月なら 7/31 退職者まで＝8月給与計算の対象）。</p>
+                <p>全員分を1名ずつ取得するため数分かかります。</p>
+            </div>
+        </details>
+
+        <details class="more">
+            <summary>「通勤費申請なしリスト」を指定したときの動き</summary>
+            <div class="more-body">
+                完全在宅者を除外し、通勤費・区分を転記します。移動交通費（立替精算）対象者は下のリストを読んで
+                区分を「移動交通費」に自動設定します（リスト漏れも自動追加）。
+            </div>
+        </details>
+
+            <div style="margin-top:14px; border:1px solid #e4d3c4; border-radius:6px; padding:10px 12px; background:#fffaf5">
+                <div class="sub-head">🚗 移動交通費（立替精算）対象者リスト</div>
+                <p class="card-lead" style="margin:0 0 9px">通勤経路が無いのが正しい人たち（現場直行など）。保存すると次回実行から反映されます。</p>
+                <button type="button" class="btn btn-secondary" id="ex-travel-toggle">リストを表示・編集</button>
                 <div id="ex-travel-editor" style="display:none; margin-top:8px">
                     <div class="hint" id="ex-travel-path"></div>
                     <table style="border-collapse:collapse; margin-top:6px">
@@ -645,17 +729,17 @@
                         </tr></thead>
                         <tbody id="ex-travel-tbody"></tbody>
                     </table>
-                    <div style="margin-top:6px">
-                        <button type="button" class="btn" id="ex-travel-add">＋ 行を追加</button>
-                        <button type="button" class="btn btn-primary" id="ex-travel-save" style="background:#c55a11">💾 保存（バックアップを作ってから上書き）</button>
-                        <span id="ex-travel-msg" style="margin-left:10px; color:#666"></span>
+                    <div class="actions" style="margin-top:9px">
+                        <button type="button" class="btn btn-secondary" id="ex-travel-add">＋ 行を追加</button>
+                        <button type="button" class="btn btn-primary" id="ex-travel-save">💾 保存（バックアップを作ってから上書き）</button>
+                        <span id="ex-travel-msg" class="status-text"></span>
                     </div>
                 </div>
             </div>
-            <div style="margin-top:6px">
-                <button type="button" class="btn btn-primary" id="ex-run-btn" style="background:#548235">💴 経費集計を実行</button>
-                <span id="ex-status" style="margin-left:12px; color:#666"></span>
-            </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="ex-run-btn">💴 集計を実行</button>
+            <span id="ex-status" class="status-text"></span>
         </div>
         <div id="ex-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
@@ -669,85 +753,101 @@
             <pre id="ex-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
         </div>
         <div id="ex-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
 
-        <!-- ==== 経費統合一覧表の生成（マクロ移植 P1a）==== -->
-        <div style="border-top:2px dashed #548235; margin:14px 0 0"></div>
-        <div class="step-header" style="margin-top:8px">
+    <!-- ==== 経費集計: 経費統合一覧表の生成（マクロ移植 P1a）==== -->
+    <div class="workflow-card mode-accent acc-keihi" id="ki-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keihi">📋</span>
             <div>
-                <div class="step-number" style="background:#2f5597">📋</div>
-                <div class="step-copy">
-                    <div class="section-title">経費統合一覧表の生成（4ソース取込 → 統合一覧表＋経路突合チェック）</div>
-                    <p class="hint">jinjer / e-staffing / SAP / freee の生CSVパスを入れて実行すると、社員番号照合・SAP税抜補正などの前処理をして34列の「経費統合一覧表」を作り、通勤経路と突合した「経路突合チェック」シートと合わせてExcel出力します。指定したソースだけ取り込みます（空欄は未取込）。</p>
-                </div>
+                <div class="card-title">経費集計</div>
+                <p class="card-lead">jinjer / e-staffing / SAP / freee の生CSVを統合し、経費統合一覧表・経路突合チェック・jinjer給与インポートCSVを作ります。</p>
             </div>
         </div>
-        <div style="padding:8px 14px; display:flex; flex-direction:column; gap:8px">
-            <label>
-                ① jinjer 経費CSV（仕訳データ <code>*仕訳データ.csv</code>・<b>ファイルまたはフォルダ</b>）:
-                <input type="text" id="ki-jinjer" placeholder="例: Z:\経費\jinjer仕訳データ置き場（フォルダ指定で中の全CSVを統合）"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <span class="hint" style="font-size:11px">フォルダを指定すると直下の全CSVを取り込みます（後から追加CSVを置く運用向け）。同じデータのCSVを2つ置くと二重計上になるのでご注意ください。</span>
+
+        <div class="warn-inline" style="margin-bottom:14px">
+            指定したソースだけを取り込みます（空欄にしたものは取り込みません）。
+        </div>
+
+        <div class="fields">
+            <label class="field">
+                <span class="field-label">① jinjer 経費CSV（仕訳データ） <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ki-jinjer" placeholder="例: Z:\経費\jinjer仕訳データ置き場（フォルダ指定で中の全CSVを統合）">
+                <span class="field-sub">ファイル・フォルダどちらでも可。フォルダなら直下の全CSVを取り込みます。</span>
+                <span class="warn-inline">同じデータのCSVを2つ置くと二重計上になります。</span>
             </label>
-            <label>
-                ② e-staffing 経費CSV（<code>勤怠データダウンロード_立替金_*.csv</code>）:
-                <input type="text" id="ki-estaffing" placeholder="例: Z:\経費\勤怠データダウンロード_立替金_20260702142834.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">② e-staffing 経費CSV <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ki-estaffing" placeholder="例: Z:\経費\勤怠データダウンロード_立替金_20260702142834.csv">
+                <span class="field-sub">ファイル名は <code>勤怠データダウンロード_立替金_*.csv</code>。</span>
             </label>
-            <label>
-                ③ SAP Fieldglass 経費CSV（生CSV <code>経費月次出力_API連携用*.csv</code>・税抜補正の対象）:
-                <input type="text" id="ki-sap" placeholder="例: Z:\経費\経費月次出力_API連携用 (5).csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">③ SAP Fieldglass 経費CSV <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ki-sap" placeholder="例: Z:\経費\経費月次出力_API連携用 (5).csv">
+                <span class="field-sub">生CSV <code>経費月次出力_API連携用*.csv</code>。税抜補正の対象です。</span>
             </label>
-            <label style="margin-left:18px">
-                ③-2 過去SAP経費CSV（<b>重複の自動除外</b>・ファイル/フォルダを <code>;</code> 区切りで複数可）:
+            <div class="field" style="margin-left:18px">
+                <label class="field-label" for="ki-sap-past">③-2 過去SAP経費CSV（重複の自動除外） <span class="tag tag-opt">任意</span></label>
                 <input type="text" id="ki-sap-past" value="{{ keihi_sap_past_default or '' }}"
-                       placeholder="例: Y:\給与明細\R8年（フォルダ指定でサブフォルダ内の全CSVと突合）"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-                <span class="hint" style="font-size:11px">
-                    SAPのCSVには前々月分の経費が混ざって落ちてくるため、ここで指定した過去CSVと
-                    「費用シート ID」が一致する行を<b>取込前に自動除外</b>します。除外された行は
-                    Excelの「SAP重複除外」シートと除外一覧CSVで確認できます。<b>空欄にすると従来通り除外なし</b>。
-                    フォルダ指定時、過去の「重複除外済/除外一覧」CSVは自動で読み飛ばします。
-                </span>
+                       placeholder="例: Y:\給与明細\R8年（フォルダ指定でサブフォルダ内の全CSVと突合）">
+                <span class="field-sub">ファイル／フォルダを <code>;</code> 区切りで複数指定できます。</span>
+                <details class="more">
+                    <summary>何が除外されるのか</summary>
+                    <div class="more-body">
+                        <p>SAP の CSV には前々月分の経費が混ざって落ちてくるため、ここで指定した過去CSVと
+                           「費用シート ID」が一致する行を<b>取込前に自動除外</b>します。</p>
+                        <p>除外された行は Excel の「SAP重複除外」シートと除外一覧CSVで確認できます。
+                           <b>空欄にすると除外なし</b>。フォルダ指定時、過去の「重複除外済／除外一覧」CSVは自動で読み飛ばします。</p>
+                    </div>
+                </details>
+            </div>
+            <label class="field">
+                <span class="field-label">④ freee 経費CSV <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ki-freee" placeholder="例: Z:\経費\経費精算-20260707120832.csv">
+                <span class="field-sub">本社経費 <code>経費精算-*.csv</code>。</span>
             </label>
-            <label>
-                ④ freee 経費CSV（本社経費 <code>経費精算-*.csv</code>）:
-                <input type="text" id="ki-freee" placeholder="例: Z:\経費\経費精算-20260707120832.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+            <label class="field">
+                <span class="field-label">出力ファイル名 <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ki-output-filename" placeholder="経費統合一覧表_2026年06月.xlsx">
+                <span class="field-sub">.xlsx は自動で付きます。</span>
             </label>
-            <label>
-                出力ファイル名(任意・.xlsxは自動で付きます):
-                <input type="text" id="ki-output-filename" placeholder="経費統合一覧表_2026年06月.xlsx"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
+
+            <div class="field">
+                <span class="field-label">あわせて作るもの</span>
+                <div class="check-row" style="flex-direction:column; gap:7px">
+                    <label><input type="checkbox" id="ki-route-check" checked> 経路突合チェックシートを付ける</label>
+                    <label><input type="checkbox" id="ki-classify" checked> 分類・集計シート＋jinjer給与インポートCSVも作る</label>
+                </div>
+                <details class="more">
+                    <summary>それぞれの中身</summary>
+                    <div class="more-body">
+                        <p><b>経路突合チェック</b>：通勤経路を jinjer API から取得して突き合わせます（要ネット接続）。
+                           移動交通費（立替精算）対象者は docs のリストを読んで専用判定します。</p>
+                        <p><b>分類・集計シート</b>：マクロの「集計」相当。新入社員も自動で計上します。</p>
+                    </div>
+                </details>
+            </div>
+
+            <label class="field">
+                <span class="field-label">jinjer給与インポートテンプレCSV <span class="tag tag-mode">推奨</span></span>
+                <input type="text" id="ki-import-template-csv" placeholder="例: Z:\経費\jinjer_経費インポート用_9637.csv">
+                <span class="field-sub">jinjer からダウンロードした空テンプレを指定すると、列の並びを自動で合わせます。</span>
+                <span class="warn-inline">jinjer は<b>列の位置</b>で取り込むため、ズレると値が別の項目に入ります。</span>
             </label>
-            <label style="display:inline-flex; align-items:center; gap:6px">
-                <input type="checkbox" id="ki-route-check" checked>
-                経路突合チェックシートを付ける（通勤経路は jinjer API から取得。要ネット接続。移動交通費（立替精算）対象者は docs のリストを読んで専用判定）
+            <label class="field">
+                <span class="field-label">分類キーワード設定 <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="ki-keywords" placeholder="例: Z:\経費\分類キーワード.xlsx（通常は空欄でOK）">
+                <span class="field-sub">設定シート形式の xlsx/CSV で上書きできます。空欄なら内蔵キーワード。</span>
             </label>
-            <label style="display:inline-flex; align-items:center; gap:6px">
-                <input type="checkbox" id="ki-classify" checked>
-                分類・集計シート＋jinjer給与インポートCSVも作る（マクロの「集計」相当。新入社員も自動計上）
-            </label>
-            <label>
-                分類キーワード設定（任意・空欄=内蔵キーワード）: 設定シート形式のxlsx/CSVで上書きできます
-                <input type="text" id="ki-keywords" placeholder="例: Z:\経費\分類キーワード.xlsx（通常は空欄でOK）"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-            </label>
-            <label>
-                jinjer給与インポートテンプレCSV（<b>推奨</b>・空欄=既定11列）: jinjerからダウンロードした空テンプレを指定すると、<b>列の並びを自動で合わせます</b>（jinjerは列の位置で取込むため、ズレると値が別項目に入ります）
-                <input type="text" id="ki-import-template-csv" placeholder="例: Z:\経費\jinjer_経費インポート用_9637.csv"
-                       style="width:100%; padding:6px 10px; margin-top:4px">
-            </label>
-            <div style="margin-top:10px; padding:10px 12px; border:1px solid #d7dee8; border-radius:6px; background:#fafcff">
-                <div style="font-weight:600; margin-bottom:4px">イレギュラー経費（任意）</div>
-                <p class="hint" style="margin:0 0 8px">
-                    経費データから作れない「その月に手で決める」金額です。項目を選び、<b>社員番号と金額を1人ずつ入力して</b>「追加」してください
-                    （Enterキーでも追加できます）。<b>マイナス金額も可</b>（過払いの戻し等）。同じ社員を何回追加しても合算されます。
-                    Excelから<b>「社員番号・金額」の2列をまとめて貼り付ける</b>こともできます。
+            <div style="margin-top:6px; padding:11px 13px; border:1px solid #d7dee8; border-radius:6px; background:#fafcff">
+                <div class="sub-head">イレギュラー経費 <span class="tag tag-opt">任意</span></div>
+                <p class="card-lead" style="margin:0 0 10px">
+                    経費データから作れない「その月に手で決める」金額です。項目を選び、社員番号と金額を入れて「追加」してください。
                 </p>
                 <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
-                    <label style="font-size:12px">項目<br>
-                        <select id="ki-irr-type" style="padding:6px 10px; min-width:190px; margin-top:3px">
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">項目</span>
+                        <select id="ki-irr-type" style="min-width:190px">
                             <option value="定常外業務対応手当">定常外業務対応手当</option>
                             <option value="その他手当">その他手当</option>
                             <option value="現物支給">現物支給</option>
@@ -755,26 +855,38 @@
                             <option value="社保調整">社保調整（控除）</option>
                         </select>
                     </label>
-                    <label style="font-size:12px">社員番号<br>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">社員番号</span>
                         <input type="text" id="ki-irr-id" placeholder="2026012" autocomplete="off"
-                               style="width:130px; padding:6px 10px; margin-top:3px; font-family:monospace"></label>
-                    <label style="font-size:12px">金額<br>
+                               style="width:130px; font-family:monospace"></label>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">金額</span>
                         <input type="text" id="ki-irr-amt" placeholder="15000" autocomplete="off"
-                               style="width:120px; padding:6px 10px; margin-top:3px; font-family:monospace; text-align:right"></label>
+                               style="width:120px; font-family:monospace; text-align:right"></label>
                     <button type="button" class="btn btn-secondary" id="ki-irr-add" style="padding:6px 16px; margin-bottom:1px">＋ 追加</button>
                 </div>
                 <div id="ki-irr-warn" style="margin-top:5px; font-size:12px; color:#c0392b; display:none"></div>
                 <div id="ki-irr-list" style="margin-top:8px"></div>
-                <label style="display:block; margin-top:10px">
-                    まとめて入れる場合はファイル指定（任意・CSV/xlsx）: <b>社員番号＋項目名の列</b>（例: 社員番号, 現物支給, 社保調整）か、<b>社員番号・項目・金額の3列</b>のどちらでもOK。見出しから自動判別します
-                    <input type="text" id="ki-irregular-file" placeholder="例: Z:\経費\イレギュラー経費_202608.xlsx"
-                           style="width:100%; padding:6px 10px; margin-top:4px">
-                </label>
+
+                <details class="more">
+                    <summary>入力のコツ（Enter・マイナス金額・貼り付け）</summary>
+                    <div class="more-body">
+                        <p>Enter キーでも追加できます。<b>マイナス金額も可</b>（過払いの戻し等）。同じ社員を何回追加しても合算されます。</p>
+                        <p>Excel から<b>「社員番号・金額」の2列をまとめて貼り付ける</b>こともできます。</p>
+                    </div>
+                </details>
+
+                <div class="field" style="margin-top:10px">
+                    <label class="field-label" for="ki-irregular-file">まとめて入れる場合のファイル指定 <span class="tag tag-opt">任意</span></label>
+                    <input type="text" id="ki-irregular-file" placeholder="例: Z:\経費\イレギュラー経費_202608.xlsx">
+                    <span class="field-sub">CSV/xlsx。<b>社員番号＋項目名の列</b>（例: 社員番号, 現物支給, 社保調整）でも、<b>社員番号・項目・金額の3列</b>でも構いません。見出しから自動判別します。</span>
+                </div>
             </div>
-            <div style="margin-top:6px">
-                <button type="button" class="btn btn-primary" id="ki-run-btn" style="background:#2f5597">📋 統合一覧表を生成</button>
-                <span id="ki-status" style="margin-left:12px; color:#666"></span>
-            </div>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="ki-run-btn">📋 統合一覧表を生成</button>
+            <span id="ki-status" class="status-text"></span>
         </div>
         <div id="ki-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
@@ -812,7 +924,7 @@
                         <input type="checkbox" id="ki-import-confirmed">
                         プレビューとCSVを確認しました
                     </label>
-                    <button type="button" class="btn btn-primary" id="ki-import-btn" style="background:#c00000" disabled>🚀 jinjer給与へAPIインポート</button>
+                    <button type="button" class="btn btn-danger" id="ki-import-btn" disabled>🚀 jinjer給与へAPIインポート</button>
                     <span id="ki-import-status" style="color:#666"></span>
                 </div>
                 <pre id="ki-import-console" style="margin-top:8px; max-height:160px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
