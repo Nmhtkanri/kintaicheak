@@ -6,25 +6,25 @@
     <!-- モード切替タブ（画面上部に固定。スクロール中もここでいつでも切り替えられる） -->
     <div class="mode-tabs">
         <span class="mode-tabs-caption">モード</span>
+        <label class="mode-tab" title="一覧表から Outlook 下書きを一括作成する（送信はしません）">
+            <input type="radio" name="mode" value="mail" checked>
+            <span class="mode-tab-face">メール下書き</span>
+        </label>
         <label class="mode-tab" title="請求勤怠と jinjer の差異を洗い出す">
-            <input type="radio" name="mode" value="match" checked>
+            <input type="radio" name="mode" value="match">
             <span class="mode-tab-face">勤怠チェック</span>
-        </label>
-        <label class="mode-tab" title="シフト表を読み取って jinjer へ登録する">
-            <input type="radio" name="mode" value="csv_export">
-            <span class="mode-tab-face">スケジュールアップロード</span>
-        </label>
-        <label class="mode-tab" title="給与明細から freee 取引インポート用の4CSVを作る">
-            <input type="radio" name="mode" value="keiri">
-            <span class="mode-tab-face">経理</span>
         </label>
         <label class="mode-tab" title="テレワーク・出社日数と経費を集計する">
             <input type="radio" name="mode" value="expense">
             <span class="mode-tab-face">経費チェック</span>
         </label>
-        <label class="mode-tab" title="一覧表から Outlook 下書きを一括作成する（送信はしません）">
-            <input type="radio" name="mode" value="mail">
-            <span class="mode-tab-face">メール下書き</span>
+        <label class="mode-tab" title="給与明細から freee 取引インポート用の4CSVを作る">
+            <input type="radio" name="mode" value="keiri">
+            <span class="mode-tab-face">経理</span>
+        </label>
+        <label class="mode-tab" title="シフト表を読み取って jinjer へ登録する">
+            <input type="radio" name="mode" value="csv_export">
+            <span class="mode-tab-face">スケジュールアップロード</span>
         </label>
         <span class="mode-tabs-hint" id="mode-bar-hint"></span>
     </div>

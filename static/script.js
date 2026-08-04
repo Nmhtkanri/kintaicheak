@@ -86,6 +86,14 @@ let pendingCodeSheets = [];
 let pendingMode = 'match';  // match | csv_export
 let pendingTemplates = [];  // jinjer スケジュール雛形の一覧（プルダウン用）
 
+// メール下書きモードの状態。
+// 起動時のモードがメールの場合、applyModeUI の初回実行（このすぐ下）から
+// loadMailTemplates が参照するため、必ずここ（初回実行より前）で宣言しておくこと。
+let mailPlans = [];
+let mailTemplates = [];
+let mailTemplatesLoaded = false;
+let mailDefaultCc = '';
+
 // =============================================================================
 // モード切替UI
 // =============================================================================
@@ -1800,10 +1808,8 @@ if (keiriRunBtn) {
 // メール下書きモード — 一覧表×テンプレート → Outlook下書き（送信機能なし）
 // =============================================================================
 
-let mailPlans = [];
-let mailTemplates = [];
-let mailTemplatesLoaded = false;
-let mailDefaultCc = '';
+// （状態変数 mailPlans / mailTemplates / mailTemplatesLoaded / mailDefaultCc は
+//   ファイル先頭の「グローバル状態」で宣言。起動時モードがメールでも参照できるようにするため）
 
 function mailEsc(s) {
     return String(s == null ? '' : s)
