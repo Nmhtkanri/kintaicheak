@@ -710,6 +710,31 @@ def _parse_employment_record_file(filepath):
                 pass
 
 
+def _find_header_column(ws, rows, names, max_col=40, before_col=None):
+    """見出し行から指定ラベルの列番号を探す（見つからなければ None）
+
+    列を決め打ちすると、テンプレートに列が1本挿入されただけで解析できなくなる
+    （2026-07 実例: 作業実績報告書 26年度版 v202606 で「勤務内容」列が N に入り、
+    実労働ブロックが P→Q へずれて専用パーサーが不発 → AI解析頼みになった）。
+
+    Args:
+        rows: 走査する見出し行番号のタプル（左が優先）
+        names: 一致させるラベル（前後の空白は無視）
+        before_col: この列より左にあるものだけを対象にする
+                    （「勤怠区分」は明細用と集計用が2か所にあるため）
+    """
+    limit = ws.max_column or max_col
+    limit = min(limit, max_col)
+    if before_col:
+        limit = min(limit, before_col - 1)
+    for row_idx in rows:
+        for col_idx in range(1, limit + 1):
+            text = str(ws.cell(row_idx, col_idx).value or "").strip()
+            if text and text in names:
+                return col_idx
+    return None
+
+
 def _parse_work_result_report_file(filepath):
     """Parse the stable 作業実績報告書 layout without using AI."""
     ext = os.path.splitext(filepath)[1].lower()
@@ -735,25 +760,42 @@ def _parse_work_result_report_file(filepath):
             return None
         if str(ws["A14"].value or "").strip() != "日付":
             return None
-        if str(ws["P15"].value or "").strip() != "実労働":
+        # 「実労働」の位置はテンプレート改版で動く（旧版=P / 26年度版 v202606=Q）ため
+        # 決め打ちせず見出しから探す。この列があること自体がテンプレートの目印。
+        total_col = _find_header_column(ws, (15,), {"実労働"})
+        if total_col is None:
             return None
 
         employee_name = str(ws["D7"].value or "").strip()
         if not employee_name:
             return None
 
+        start_col = _find_header_column(ws, (15,), {"開始時刻"}, before_col=total_col) or 4  # D
+        end_col = _find_header_column(ws, (15,), {"終了時刻"}, before_col=total_col) or 5    # E
+        # コメントは「勤怠区分」＋「備考」だけを拾う。26年度版で入った「勤務内容」は
+        # 毎日同じ値が並ぶだけなので差異一覧のノイズになる＝拾わない。
+        # 「勤怠区分」は明細用と集計用の2か所にあるので、実労働より左のものを採る。
+        comment_cols = [
+            col
+            for col in (
+                _find_header_column(ws, (14, 15), {"勤怠区分"}, before_col=total_col),
+                _find_header_column(ws, (14, 15), {"備考"}, before_col=total_col),
+            )
+            if col
+        ]
+
         rows = []
         for row_idx in range(16, ws.max_row + 1):
             work_date = _parse_excel_date(ws.cell(row_idx, 1).value)  # A
             if work_date is None:
                 continue
-            start = _parse_excel_time(ws.cell(row_idx, 4).value)  # D
-            end = _parse_excel_time(ws.cell(row_idx, 5).value)  # E
+            start = _parse_excel_time(ws.cell(row_idx, start_col).value)
+            end = _parse_excel_time(ws.cell(row_idx, end_col).value)
             if start is None and end is None:
                 continue
 
             comment_parts = []
-            for col_idx in (13, 14):  # M: 勤怠区分 / N: 備考
+            for col_idx in comment_cols:
                 value = ws.cell(row_idx, col_idx).value
                 if value is None:
                     continue
@@ -768,7 +810,7 @@ def _parse_work_result_report_file(filepath):
                 "退勤時刻": end,
                 "コメント": " / ".join(comment_parts) or None,
                 "データソース": "勤務表",
-                "総労働時間(分)": _duration_to_minutes(ws.cell(row_idx, 16).value),  # P
+                "総労働時間(分)": _duration_to_minutes(ws.cell(row_idx, total_col).value),
             })
 
         if not rows:

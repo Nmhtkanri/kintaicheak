@@ -138,6 +138,12 @@ def test_parse_work_result_report_excel_direct(tmp_path):
     ws["A1"] = "作業実績報告書"
     ws["D7"] = "佐藤　可奈子"
     ws["A14"] = "日付"
+    ws["M14"] = "勤怠区分"
+    ws["N14"] = "備考"
+    ws["P14"] = "労働時間"
+    ws["S14"] = "勤怠区分"  # 集計用。明細の勤怠区分と取り違えない
+    ws["D15"] = "開始時刻"
+    ws["E15"] = "終了時刻"
     ws["P15"] = "実労働"
     ws["A16"] = "2026/6/1"
     ws["D16"] = "08:45"
@@ -155,6 +161,52 @@ def test_parse_work_result_report_excel_direct(tmp_path):
     assert row["日付"] == date(2026, 6, 1)
     assert row["総労働時間(分)"] == 450
     assert row["コメント"] == "出勤 / 現場"
+
+
+def test_parse_work_result_report_v202606_layout_direct(tmp_path):
+    """26年度版 v202606（列が1本ずれたテンプレート）もAIなしで直接解析する。
+
+    林広美さん 2026-07 の実例: N列に「勤務内容」が挿入されて備考が O:P へ、
+    実労働ブロックが P→Q へずれた。P15 決め打ちの判定では不発になり、
+    AI解析へフォールバック → AIが失敗した回に請求勤怠ごと捨てられて
+    「jinjer にはいるが請求勤怠が届いていない」未提出者に落ちた。
+    """
+    path = tmp_path / "林_2026年7月作業報告書（26年度版）_v202606.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "作業実績報告書"
+    ws["A1"] = "作業実績報告書"
+    ws["D7"] = "林広美"
+    ws["A14"] = "日付"
+    ws["M14"] = "勤怠区分"
+    ws["N14"] = "勤務内容"
+    ws["O14"] = "備考"
+    ws["Q14"] = "労働時間"
+    ws["T14"] = "勤怠区分"  # 集計用。明細の勤怠区分と取り違えない
+    ws["D15"] = "開始時刻"
+    ws["E15"] = "終了時刻"
+    ws["Q15"] = "実労働"
+    ws["A16"] = "2026/7/21"
+    ws["D16"] = "09:00"
+    ws["E16"] = "17:30"
+    ws["M16"] = "早退"
+    ws["N16"] = "DHD_社内ヘルプデスク"
+    ws["O16"] = "自社面談のため"
+    ws["Q16"] = timedelta(hours=7, minutes=30)
+    ws["T16"] = 1
+    wb.save(path)
+
+    result = parse_timesheet_smart(str(path))
+    row = result["df"].iloc[0]
+
+    assert result["mode"] == "direct"
+    assert row["氏名"] == "林広美"
+    assert row["日付"] == date(2026, 7, 21)
+    assert row["出勤時刻"] == time(9, 0)
+    assert row["退勤時刻"] == time(17, 30)
+    assert row["総労働時間(分)"] == 450
+    # 毎日同じ値が並ぶ「勤務内容」は差異一覧のノイズになるので拾わない
+    assert row["コメント"] == "早退 / 自社面談のため"
 
 
 def test_ai_total_work_time_is_normalized_to_minutes():
