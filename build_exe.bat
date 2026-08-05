@@ -40,6 +40,7 @@ python -m PyInstaller ^
   --hidden-import services.kdx_shift_parser ^
   --hidden-import services.ual_shift_parser ^
   --hidden-import services.employee_alias ^
+  --hidden-import services.kotsuhi_seisa ^
   launcher.py
 
 if errorlevel 1 goto :build_failed
