@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import time as _time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -45,7 +45,9 @@ def _norm_date_str(v) -> str:
 
 
 def fetch_active_employees(
-    client: JinjerClient, include_retired_since: "date | None" = None
+    client: JinjerClient,
+    include_retired_since: "date | None" = None,
+    joined_on_or_before: "date | None" = None,
 ) -> list[dict]:
     """在籍中の従業員を [{id, name}] で返す（社員番号順）。
 
@@ -54,12 +56,19 @@ def fetch_active_employees(
     「対象月の月末までに退職した人」まで拾える
     （例: 8月給与計算＝対象月7月 → 2026-07-01 を渡すと 7/15・7/31 退職者を含む）。
 
+    joined_on_or_before に対象月の月末を渡すと、その日より後に入社した人を外す。
+    退職側だけ見ていると翌月入社の人が対象月のシートに載り、7月実績を計上する
+    8月給与に通勤費が混ざる（2026-08-05: 8月入社の3名が7月分に載っていた）。
+
     在籍区分は 0=在籍 / 1=退職 / 2=休職（2026-08-03 実測）。
     休職者・退職日が読めない退職者は従来どおり含めない。
+    入社日 company.joined_on は YYYY-MM-DD（jinjer_api_cheatsheet）。
+    読めない場合は絞り込まない（消すより残して気づける方を採る）。
     """
     include_retirees = include_retired_since is not None
     employees = client.get_employees(only_active=not include_retirees)
     cutoff = include_retired_since.isoformat() if include_retirees else ""
+    joined_cutoff = joined_on_or_before.isoformat() if joined_on_or_before else ""
     result = []
     for emp in employees:
         if not isinstance(emp, dict):
@@ -67,8 +76,12 @@ def fetch_active_employees(
         emp_id = emp.get("id") or emp.get("employee_id")
         if emp_id is None:
             continue
+        company = emp.get("company") or {}
+        if joined_cutoff:
+            joined = _norm_date_str(company.get("joined_on"))
+            if joined and joined > joined_cutoff:
+                continue  # 対象月より後に入社 → 対象外
         if include_retirees:
-            company = emp.get("company") or {}
             cls_id = str((company.get("enrollment_classification") or {}).get("id"))
             if cls_id == "1":
                 if _norm_date_str(company.get("retirement_date")) < cutoff:
@@ -929,15 +942,19 @@ def run_telework_export(
         log_func(f"[error] {result.error}")
         return result
 
-    # 対象月の1日以降に退職した人まで含める（前月分精算＝翌月給与計算の対象者と一致させる）
+    # 対象月の1日以降に退職した人まで含め、対象月より後に入社した人は外す
+    # （前月分精算＝翌月給与計算の対象者と一致させる）
     try:
         y, m = month.split("-")
         month_start = date(int(y), int(m), 1)
+        month_end = date(int(y) + (int(m) == 12), int(m) % 12 + 1, 1) - timedelta(days=1)
     except ValueError:
-        month_start = None
+        month_start = month_end = None
 
     try:
-        employees = fetch_active_employees(client, include_retired_since=month_start)
+        employees = fetch_active_employees(
+            client, include_retired_since=month_start, joined_on_or_before=month_end
+        )
     except JinjerAPIError as e:
         result.error = f"従業員一覧の取得に失敗しました: {e}"
         log_func(f"[error] {result.error}")
@@ -948,7 +965,8 @@ def run_telework_export(
     total = len(employees)
     log_func(
         f"[start] 対象月 {month} / 対象 {total} 名"
-        f"（在籍＋{month} 月以降の退職者。1名ずつ取得するため数分かかります）"
+        f"（{month} 月末までに入社し、{month} 月以降に退職した人まで。"
+        f"1名ずつ取得するため数分かかります）"
     )
 
     rows: list[dict] = []

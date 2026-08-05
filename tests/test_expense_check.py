@@ -64,11 +64,12 @@ def test_norm_date_str():
 # 従業員取得（前月退職者を含める。2026-08-03 谷津さん依頼）
 # ----------------------------------------------------------------------
 
-def _emp(emp_id, last, first, cls_id, retired_on=""):
+def _emp(emp_id, last, first, cls_id, retired_on="", joined_on="2020-04-01"):
     return {"id": emp_id, "company": {
         "last_name": last, "first_name": first,
         "enrollment_classification": {"id": cls_id, "name": {0: "在籍", 1: "退職", 2: "休職"}[cls_id]},
         "retirement_date": retired_on,
+        "joined_on": joined_on,
     }}
 
 
@@ -94,13 +95,16 @@ _EMPLOYEES = [
     _emp("2016012", "守屋", "圭祐", 1, "2026-06-30"),          # 前月より前の退職者
     _emp("2020021", "二神", "啓城", 2),                        # 休職 → 従来どおり対象外
     _emp("2010001", "昔の", "退職者", 1, ""),                   # 退職日なし → 対象外
+    _emp("2026016", "髙垣", "和希", 0, "", "2026-08-01"),       # 翌月入社 → 対象外
+    _emp("2026019", "一戸", "仁美", 0, "", "2026-07-31"),       # 対象月末入社 → 対象
+    _emp("2026021", "矢野", "淳大", 0, "", ""),                 # 入社日が読めない → 絞り込まない
 ]
 
 
 def test_fetch_active_employees_default_only_active():
     client = _FakeEmployeeClient(_EMPLOYEES)
     got = fetch_active_employees(client)
-    assert [e["id"] for e in got] == ["2020001", "2025001"]
+    assert [e["id"] for e in got] == ["2020001", "2025001", "2026016", "2026019", "2026021"]
     assert client.calls == [True]      # 従来どおり在籍者のみの取得
 
 
@@ -109,11 +113,35 @@ def test_fetch_active_employees_includes_recent_retirees():
     client = _FakeEmployeeClient(_EMPLOYEES)
     got = fetch_active_employees(client, include_retired_since=date(2026, 7, 1))
     ids = [e["id"] for e in got]
-    assert ids == ["2020001", "2023019", "2025001", "2025022"]
+    assert "2023019" in ids            # 7/31 退職 → 対象
+    assert "2025022" in ids            # 7/15 退職 → 対象
     assert "2016012" not in ids        # 6/30 退職 → 対象外
     assert "2020021" not in ids        # 休職は含めない
     by = {e["id"]: e["name"] for e in got}
     assert by["2023019"] == "小池 裕也"
+
+
+def test_fetch_active_employees_excludes_next_month_hires():
+    """8月入社の人が7月分に載ると、7月実績を計上する8月給与に通勤費が混ざる。"""
+    from datetime import date
+    client = _FakeEmployeeClient(_EMPLOYEES)
+    got = fetch_active_employees(
+        client, include_retired_since=date(2026, 7, 1), joined_on_or_before=date(2026, 7, 31)
+    )
+    ids = [e["id"] for e in got]
+    assert "2026016" not in ids        # 8/1 入社 → 対象外
+    assert "2026019" in ids            # 7/31 入社（対象月末）→ 対象
+    assert "2026021" in ids            # 入社日が読めない → 絞り込まず残す
+    assert "2023019" in ids            # 退職側の判定は従来どおり効く
+    assert "2016012" not in ids
+
+
+def test_fetch_active_employees_hire_filter_is_opt_in():
+    """joined_on_or_before を渡さなければ従来どおり入社日で絞らない。"""
+    from datetime import date
+    client = _FakeEmployeeClient(_EMPLOYEES)
+    got = fetch_active_employees(client, include_retired_since=date(2026, 7, 1))
+    assert "2026016" in [e["id"] for e in got]
 
 
 # ----------------------------------------------------------------------
