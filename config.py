@@ -123,6 +123,11 @@ class Config:
     # 勤怠管理者ロールを付与してから .env に JINJER_IMPORT_EXECUTOR_ID=9999999 を設定する。
     JINJER_IMPORT_EXECUTOR_ID = os.environ.get("JINJER_IMPORT_EXECUTOR_ID", "")
 
+    # 通勤費の精査対象外者リスト（社員番号,氏名,理由）。共有フォルダを読む（再ビルド不要）。
+    # 勤怠データからは判別できない事情で通勤費が発生しない人を落とす。
+    KOTSUHI_EXCLUDED_MEMBERS_CSV = os.environ.get(
+        "KOTSUHI_EXCLUDED_MEMBERS_CSV", r"Z:\API連携\docs\通勤費_精査対象外者.csv")
+
     # ------------------------------------------------------------------
     # メール下書きモード（Outlook 下書きの一括作成。送信機能は作らない）
     # ------------------------------------------------------------------

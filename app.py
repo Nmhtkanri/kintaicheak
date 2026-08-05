@@ -1649,6 +1649,84 @@ def route_expense_telework():
     return jsonify(payload)
 
 
+@app.route("/expense_prereview", methods=["POST"])
+def route_expense_prereview():
+    """経費チェック: 承認前の交通費精査。金額・経路を通勤費マスタと突き合わせる。
+
+    フォーム:
+      - month        : YYYY-MM
+      - kotsuhi_csv  : jinjer「交通費申請」エクスポートCSV（進行中も含む）
+      - check_xlsx   : 経費チェックが出力したブック（通勤費・サマリを読む）
+
+    jinjer API は叩かないので数秒で終わる。承認が進むたびに同じ月で何度でも
+    実行する前提で、前回の出力があれば各行に「前回比（新規/継続/解消）」を入れる。
+    """
+    from services.kotsuhi_seisa import run_pre_approval_review
+
+    month_label = (request.form.get("month") or "").strip()
+    csv_str = _clean_path_input(request.form.get("kotsuhi_csv"))
+    xlsx_str = _clean_path_input(request.form.get("check_xlsx"))
+
+    errors = []
+    if not re.fullmatch(r"\d{4}-\d{2}", month_label):
+        errors.append("対象月は YYYY-MM 形式で入力してください（例: 2026-07）")
+    if not csv_str:
+        errors.append("交通費申請CSVのパスを入力してください")
+    elif not _Path(csv_str).exists():
+        errors.append(f"交通費申請CSVが見つかりません: {csv_str}")
+    if not xlsx_str:
+        errors.append("経費チェックのブックのパスを入力してください")
+    elif not _Path(xlsx_str).exists():
+        errors.append(f"経費チェックのブックが見つかりません: {xlsx_str}")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    y, m = month_label.split("-")
+    output_filename = f"交通費精査結果_{y}年{int(m)}月.xlsx"
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result = run_pre_approval_review(
+            csv_path=_Path(csv_str), check_xlsx=_Path(xlsx_str),
+            output_path=output_path, month=month_label, log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("expense_prereview failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    if not result.ok:
+        return jsonify({
+            "success": False,
+            "errors": [result.error or "交通費精査に失敗しました"],
+            "console": log_lines,
+        }), 500
+
+    mail_name = result.mail_path.name if result.mail_path else None
+    return jsonify({
+        "success": True,
+        "download_url": f"/download/{output_filename}",
+        "output_filename": output_filename,
+        "mail_download_url": f"/download/{mail_name}" if mail_name else None,
+        "mail_filename": mail_name,
+        "stats": {
+            "approved_rows": result.approved_rows,
+            "pending_rows": result.pending_rows,
+            "first_run": result.first_run,
+            "new_count": result.new_count,
+            "resolved_count": result.resolved_count,
+            "flagged": result.flagged or {},
+            "flagged_total": sum((result.flagged or {}).values()),
+            "mail_targets": result.mail_targets,
+        },
+        "console": log_lines,
+    })
+
+
 @app.route("/travel_expense_members", methods=["GET"])
 def route_travel_expense_members():
     """経費チェック: 移動交通費（立替精算）対象者リストの取得（UI表示・編集用）。

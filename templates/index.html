@@ -753,6 +753,62 @@
             <pre id="ex-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
         </div>
         <div id="ex-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+
+        <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
+            <h3 style="margin:0 0 4px; font-size:14px">承認前の交通費精査</h3>
+            <p class="card-lead" style="margin-top:0">
+                jinjer の交通費申請（<b>進行中も含む</b>）を通勤費マスタと突き合わせ、金額と経路の誤りを
+                <b>承認する前に</b>見つけます。統合一覧表の経路突合は仕訳データ＝承認済みしか見られないため、
+                差し戻せるうちに直すにはこちらを先に回します。
+                jinjer API は使わないので数秒で終わり、<b>承認が進むたび何度でも実行できます</b>。
+            </p>
+            <div class="field-grid">
+                <label class="field">
+                    <span class="field-label">交通費申請CSV <span class="tag tag-req">必須</span></span>
+                    <input type="text" id="pr-csv" placeholder="例: Y:\給与明細\R8年\8月\経費確認精査データ\交通費申請_9637_20260804.csv">
+                    <span class="field-hint">jinjer 経費 → 交通費申請のエクスポート（Shift-JIS）</span>
+                </label>
+                <label class="field">
+                    <span class="field-label">経費チェックのブック <span class="tag tag-req">必須</span></span>
+                    <input type="text" id="pr-xlsx" placeholder="例: Y:\給与明細\R8年\8月\経費確認精査データ\経費チェック2026年7月.xlsx">
+                    <span class="field-hint">上の「集計を実行」で出したブック。通勤費マスタと勤怠を読みます</span>
+                </label>
+            </div>
+            <details class="hint-details">
+                <summary>何を見るか／繰り返し実行したときの動き</summary>
+                <div class="hint-body">
+                    <p><b>金額</b>：定期代は人単位・実費は日単位で合算し、通勤費マスタの登録額と突合します。
+                    マスタの複数経路は「乗継の区間分割（合算が正）」と「勤務地パターンの選択制（1つが正）」の
+                    両方を当てにいきます。</p>
+                    <p><b>経路</b>：申請の発着とマスタの登録経路を照合します。出張の寄り道で誤検知しないよう、
+                    その月の半分以上の日に出てくる区間だけを「常用」とみなします。</p>
+                    <p><b>マスタ更新漏れ</b>：勤務地変更や運賃改定がマスタに反映されていない人、
+                    出社しているのに通勤費が未設定の人などを M1〜M8 の区分で出します。</p>
+                    <p><b>繰り返し実行</b>：同じ月で再実行すると、前回の結果と突き合わせて各行に
+                    <b>新規／継続／解消</b>が入ります。サマリの「承認状況」で<b>進行中が0になれば
+                    その月は見終わり</b>です。出力は同じファイル名で上書きします。</p>
+                    <p>通勤費が1円も出ていない可能性のある人は、メール下書きモードにそのまま読ませられる
+                    <b>宛先表</b>としても別ブックで出ます。</p>
+                </div>
+            </details>
+            <div class="actions">
+                <button type="button" class="btn btn-primary" id="pr-run-btn">🔍 承認前精査を実行</button>
+                <span id="pr-status" class="status-text"></span>
+            </div>
+            <div id="pr-result-area" style="display:none; margin-top:8px">
+                <div class="summary-cards" style="margin-bottom:8px">
+                    <div class="summary-card"><div class="card-label">要確認</div><div class="card-value" id="pr-cnt-flagged">0</div></div>
+                    <div class="summary-card"><div class="card-label">進行中(未承認)</div><div class="card-value" id="pr-cnt-pending">0</div></div>
+                    <div class="summary-card"><div class="card-label">前回から新規</div><div class="card-value" id="pr-cnt-new">—</div></div>
+                    <div class="summary-card"><div class="card-label">前回から解消</div><div class="card-value" id="pr-cnt-resolved">—</div></div>
+                    <div class="summary-card"><div class="card-label">通勤費未登録(メール対象)</div><div class="card-value" id="pr-cnt-mail">0</div></div>
+                </div>
+                <a id="pr-download-link" href="#" class="btn btn-download" style="display:none">📥 精査結果xlsxをダウンロード</a>
+                <a id="pr-mail-link" href="#" class="btn btn-secondary" style="display:none">📧 メール宛先表をダウンロード</a>
+                <pre id="pr-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+            </div>
+            <div id="pr-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
+        </div>
     </div>
 
     <!-- ==== 経費集計: 経費統合一覧表の生成（マクロ移植 P1a）==== -->
@@ -1224,6 +1280,61 @@
                 document.getElementById('ex-status').textContent = '';
             } finally {
                 exRunBtn.disabled = false;
+            }
+        });
+    }
+
+    // ----- 承認前の交通費精査 -----
+    // jinjer API を叩かないので数秒で終わる。承認が進むたび何度でも実行する前提で、
+    // 前回の出力と突き合わせて 新規/継続/解消 を出す。
+    const prRunBtn = document.getElementById('pr-run-btn');
+    if (prRunBtn) {
+        prRunBtn.addEventListener('click', async () => {
+            hideError('pr-error-area');
+            document.getElementById('pr-result-area').style.display = 'none';
+            document.getElementById('pr-status').textContent = '突合中...';
+            prRunBtn.disabled = true;
+
+            const fd = new FormData();
+            fd.append('month', document.getElementById('ex-month').value);
+            fd.append('kotsuhi_csv', document.getElementById('pr-csv').value);
+            fd.append('check_xlsx', document.getElementById('pr-xlsx').value);
+
+            try {
+                const res = await fetch('/expense_prereview', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success){
+                    showError('pr-error-area', data.errors || ['処理に失敗しました']);
+                    document.getElementById('pr-status').textContent = '';
+                    return;
+                }
+                const s = data.stats;
+                document.getElementById('pr-cnt-flagged').textContent = s.flagged_total;
+                document.getElementById('pr-cnt-pending').textContent = s.pending_rows;
+                document.getElementById('pr-cnt-new').textContent = s.first_run ? '初回' : s.new_count;
+                document.getElementById('pr-cnt-resolved').textContent = s.first_run ? '初回' : s.resolved_count;
+                document.getElementById('pr-cnt-mail').textContent = s.mail_targets;
+                const dl = document.getElementById('pr-download-link');
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+                const ml = document.getElementById('pr-mail-link');
+                if (data.mail_download_url) {
+                    ml.href = data.mail_download_url;
+                    ml.style.display = 'inline-block';
+                } else {
+                    ml.style.display = 'none';
+                }
+                const consoleEl = document.getElementById('pr-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                document.getElementById('pr-result-area').style.display = 'block';
+                document.getElementById('pr-status').textContent =
+                    s.pending_rows === 0 ? '完了（進行中の申請なし＝この月は見終わりです）' : '完了';
+            } catch (e) {
+                showError('pr-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('pr-status').textContent = '';
+            } finally {
+                prRunBtn.disabled = false;
             }
         });
     }
