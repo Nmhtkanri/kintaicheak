@@ -332,12 +332,20 @@ def read_commute_csv(path: str | Path) -> list[dict]:
     return result
 
 
-def fetch_commute_rows_via_api(client: JinjerClient, id_to_name: dict | None = None) -> list[dict]:
+def fetch_commute_rows_via_api(
+    client: JinjerClient,
+    id_to_name: dict | None = None,
+    only_listed: bool = False,
+) -> list[dict]:
     """jinjer API（commuting-information）から通勤情報を取得し、シート用の行に整形する。
 
     複数経路は経路ごとに1行（経路No=1,2,…）。氏名は ``id_to_name`` で補完（無ければ空）。
     出発・到着・経由1・経由2・通勤経路・利用交通機関・支給間隔・支給方法・支給金額・
     非課税/課税通勤費・支給開始・片道距離 を取り出す。
+
+    only_listed=True で ``id_to_name`` に居る人だけに絞る。APIは全従業員分を返すため、
+    絞らないと対象月に在職していない人（翌月入社など）の経路までシートに載る。
+    氏名が空の行が並ぶのはこれが原因（2026-08-05）。
     """
     items = client.get_commuting_information()
     id_to_name = id_to_name or {}
@@ -346,6 +354,8 @@ def fetch_commute_rows_via_api(client: JinjerClient, id_to_name: dict | None = N
         if not isinstance(item, dict):
             continue
         eid = str(item.get("employee_id") or "").strip()
+        if only_listed and eid not in id_to_name:
+            continue
         for i, route in enumerate(item.get("commuting") or [], start=1):
             if not isinstance(route, dict):
                 continue
@@ -998,7 +1008,8 @@ def run_telework_export(
             log_func(f"[info] 通勤費CSV 読込: {len(commute_rows)} 行 → 通勤費シート追加")
         else:
             id_to_name = {e["id"]: e["name"] for e in employees}
-            commute_rows = fetch_commute_rows_via_api(client, id_to_name)
+            # 対象月に在職している人だけに絞る（APIは全従業員分を返すため）
+            commute_rows = fetch_commute_rows_via_api(client, id_to_name, only_listed=True)
             log_func(f"[info] 通勤情報をAPIから取得: {len(commute_rows)} 行 → 通勤費シート追加")
         add_commute_sheet(wb, commute_rows)
         commute_count = len(commute_rows)

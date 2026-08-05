@@ -136,6 +136,33 @@ def test_fetch_active_employees_excludes_next_month_hires():
     assert "2016012" not in ids
 
 
+class _FakeCommuteClient:
+    """get_commuting_information が全従業員分を返すのを再現する。"""
+    def __init__(self, ids):
+        self._ids = ids
+
+    def get_commuting_information(self):
+        return [{"employee_id": i, "commuting": [{"departure": "自宅", "arrival": "本社"}]}
+                for i in self._ids]
+
+
+def test_fetch_commute_rows_returns_everyone_by_default():
+    from services.expense_check import fetch_commute_rows_via_api
+    client = _FakeCommuteClient(["2020001", "2026016"])
+    rows = fetch_commute_rows_via_api(client, {"2020001": "田中 一郎"})
+    assert [r["社員番号"] for r in rows] == ["2020001", "2026016"]
+    assert rows[1]["氏名"] == ""      # 対象外の人は氏名が空で並ぶ
+
+
+def test_fetch_commute_rows_can_be_limited_to_listed_employees():
+    """翌月入社の人の経路が対象月の通勤費シートに載らないこと。"""
+    from services.expense_check import fetch_commute_rows_via_api
+    client = _FakeCommuteClient(["2020001", "2026016"])
+    rows = fetch_commute_rows_via_api(client, {"2020001": "田中 一郎"}, only_listed=True)
+    assert [r["社員番号"] for r in rows] == ["2020001"]
+    assert rows[0]["氏名"] == "田中 一郎"
+
+
 def test_fetch_active_employees_hire_filter_is_opt_in():
     """joined_on_or_before を渡さなければ従来どおり入社日で絞らない。"""
     from datetime import date
