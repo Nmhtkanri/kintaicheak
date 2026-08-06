@@ -1873,8 +1873,14 @@ def route_expense_integration():
     # 突合（＝除外・要確認の判定）は行い、台帳への記録だけ止める。
     from services.sap_import_ledger import can_write as _ledger_can_write
     ledger_writable, ledger_write_msg = _ledger_can_write(Config.KEIHI_SAP_LEDGER_WRITERS_CSV)
-    if sap_record_ledger and not ledger_writable:
+    sap_record_skip_reason = None
+    if not sap_record_ledger:
+        sap_record_skip_reason = "画面の設定により台帳へ記録しませんでした。"
+    elif not ledger_writable:
         sap_record_ledger = False
+        sap_record_skip_reason = (
+            f"{ledger_write_msg} → 突合（除外・要確認の判定）は行いましたが、"
+            "台帳には記録していません。取込年月の確定は書き込み権限のある方が行ってください。")
     if sap_import_month:
         mp = sap_import_month.split("-")
         if len(mp) != 2 or len(mp[0]) != 4 or not mp[0].isdigit() or not mp[1].isdigit():
@@ -1911,6 +1917,7 @@ def route_expense_integration():
             sap_ledger_csv=sap_ledger_csv or None,
             sap_import_month=sap_import_month or None,
             sap_record_ledger=sap_record_ledger,
+            sap_record_skip_reason=sap_record_skip_reason,
             log_func=_log,
         )
     except Exception as e:
@@ -1999,7 +2006,8 @@ def route_sap_ledger_confirm():
     書き込みは許可ユーザー（谷津さん・平良さん）だけ。
     """
     from services.sap_import_ledger import (
-        can_write, confirm_month, current_user, load_ledger, save_ledger, unconfirm_month)
+        LedgerConflictError, can_write, confirm_month, current_user, load_ledger,
+        save_ledger, unconfirm_month)
 
     month = (request.form.get("month") or "").strip()
     action = (request.form.get("action") or "confirm").strip()
@@ -2025,6 +2033,9 @@ def route_sap_ledger_confirm():
                          f"（{already}か、その月の記録がありません）。",
             }), 400
         bak = save_ledger(ledger)
+    except LedgerConflictError as e:
+        # 他の人が同時に台帳を触った。相手の変更を消さずに中止する
+        return jsonify({"success": False, "error": str(e)}), 409
     except Exception as e:  # noqa: BLE001
         logger.exception("sap_ledger_confirm failed")
         return jsonify({"success": False, "error": str(e)}), 500

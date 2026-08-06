@@ -226,6 +226,35 @@ class TestKeihiIntegrationWithLedger:
         # 暫定は判定に使われないので、確定しない限り翌回も除外されない
         assert led.confirmed_rows == []
 
+    def test_skip_reason_is_reported(self, tmp_path):
+        """記録しなかったことを黙って進まない（確定漏れ＝翌月の二重計上につながるため）"""
+        cur = self._cur(tmp_path, [_sap_row("EXP-1")])
+        res = run_keihi_integration(
+            output_path=tmp_path / "integrated.xlsx", sap_csv=cur,
+            route_check=False, classify=False,
+            sap_ledger_csv=str(tmp_path / "台帳.csv"),
+            sap_record_ledger=False,
+            sap_record_skip_reason="台帳への書き込みは 谷津さん・平良さん のみです。",
+            client=_NoApiClient(), log_func=lambda m: None,
+        )
+        assert res.ok is True
+        assert res.sap_dedup["record_skipped"] is True
+        assert "谷津さん・平良さん" in res.sap_dedup["record_skip_reason"]
+        # 記録していないので台帳ファイルは作られない
+        assert not (tmp_path / "台帳.csv").exists()
+
+    def test_no_skip_flag_when_recorded(self, tmp_path):
+        cur = self._cur(tmp_path, [_sap_row("EXP-1")])
+        res = run_keihi_integration(
+            output_path=tmp_path / "integrated.xlsx", sap_csv=cur,
+            route_check=False, classify=False,
+            sap_ledger_csv=str(tmp_path / "台帳.csv"),
+            sap_import_month="2026-08", sap_record_ledger=True,
+            client=_NoApiClient(), log_func=lambda m: None,
+        )
+        assert res.sap_dedup.get("record_skipped") is None
+        assert res.sap_dedup["recorded_rows"] == 1
+
     def test_ledger_failure_aborts(self, tmp_path):
         """台帳が壊れていて読めないときは、黙って重複入りで進めず中止する"""
         broken = tmp_path / "壊れた台帳.csv"

@@ -978,6 +978,7 @@
                 <div class="summary-card"><div class="card-label">集計 社員数</div><div class="card-value" id="ki-cnt-summary">—</div></div>
                 <div class="summary-card"><div class="card-label">判定「差分あり」</div><div class="card-value" id="ki-cnt-diffng">—</div></div>
             </div>
+            <div id="ki-ledger-warn" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:13px"></div>
             <a id="ki-download-link" href="#" class="btn btn-download" style="display:none">📥 統合一覧表xlsxをダウンロード</a>
             <a id="ki-import-csv-link" href="#" class="btn btn-download" style="display:none; margin-left:8px">📥 jinjer給与インポートCSVをダウンロード</a>
             <pre id="ki-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
@@ -1694,6 +1695,16 @@
                         : '未実施';
                 if (sd.review_rows) {
                     document.getElementById('ki-cnt-sap-dedup').style.color = '#b8860b';
+                }
+                // 台帳へ記録しなかった場合は必ず知らせる。黙って進むと「台帳に入ったつもり」
+                // になり、確定が漏れて翌月の除外が効かず二重計上になる。
+                const warnEl = document.getElementById('ki-ledger-warn');
+                if (sd.record_skipped) {
+                    warnEl.textContent = '⚠ 台帳には記録していません — ' + (sd.record_skip_reason || '');
+                    warnEl.style.display = '';
+                } else {
+                    warnEl.style.display = 'none';
+                    warnEl.textContent = '';
                 }
                 // 台帳へ暫定登録された結果を画面に反映する
                 kiLoadLedger();

@@ -14,6 +14,7 @@ from services.sap_import_ledger import (
     STATUS_CONFIRMED,
     STATUS_PROVISIONAL,
     Ledger,
+    LedgerConflictError,
     append_provisional,
     can_write,
     classify_rows,
@@ -229,6 +230,59 @@ class TestSaveLoad:
         save_ledger(led)
         with led.path.open(encoding="utf-8-sig", newline="") as f:
             assert next(csv.reader(f)) == LEDGER_COLUMNS
+
+
+class TestConcurrentWrite:
+    """谷津さんと平良さんの操作が重なっても、後から書いた方が相手の変更を消さないこと"""
+
+    def _saved(self, tmp_path):
+        led = Ledger(path=tmp_path / "台帳.csv", rows=[])
+        append_provisional(led, [_sap("EXP-1")], "2026-08", "a.csv", user="谷津晴香")
+        save_ledger(led)
+        return led
+
+    def test_overwrite_after_someone_else_saved_is_blocked(self, tmp_path):
+        import pytest
+        a = self._saved(tmp_path)                 # 谷津さんが読み込んだ状態
+        b = load_ledger(a.path)                   # 平良さんが同じ台帳を読み込む
+
+        confirm_month(b, "2026-08", user="平良菜津子")   # 平良さんが先に保存
+        save_ledger(b)
+
+        # 谷津さんが古い内容のまま保存しようとする → 平良さんの確定を消さずに中止
+        append_provisional(a, [_sap("EXP-2")], "2026-09", "b.csv", user="谷津晴香")
+        with pytest.raises(LedgerConflictError, match="他の人によって更新"):
+            save_ledger(a)
+
+        # ファイルには平良さんの確定が残っている
+        again = load_ledger(a.path)
+        assert len(again.confirmed_rows) == 1
+        assert again.rows[0]["確定者"] == "平良菜津子"
+        assert again.months() == ["2026-08"]      # 2026-09 は書かれていない
+
+    def test_force_overwrites(self, tmp_path):
+        a = self._saved(tmp_path)
+        b = load_ledger(a.path)
+        confirm_month(b, "2026-08")
+        save_ledger(b)
+        save_ledger(a, force=True)                # 明示的な強制上書きは通る
+        assert load_ledger(a.path).confirmed_rows == []
+
+    def test_sequential_saves_by_same_holder(self, tmp_path):
+        """自分で連続保存するときは止まらない（保存後にシグネチャを更新している）"""
+        led = self._saved(tmp_path)
+        confirm_month(led, "2026-08")
+        save_ledger(led)
+        append_provisional(led, [_sap("EXP-3")], "2026-09", "c.csv")
+        save_ledger(led)
+        assert load_ledger(led.path).months() == ["2026-08", "2026-09"]
+
+    def test_first_save_of_new_ledger(self, tmp_path):
+        """台帳がまだ無いときの初回保存は競合扱いにしない"""
+        led = load_ledger(tmp_path / "まだ無い.csv")
+        append_provisional(led, [_sap("EXP-1")], "2026-08", "a.csv")
+        save_ledger(led)
+        assert load_ledger(led.path).rows
 
 
 class TestCanWrite:

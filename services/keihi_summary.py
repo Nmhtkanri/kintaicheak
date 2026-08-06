@@ -820,6 +820,7 @@ def run_keihi_integration(
     sap_ledger_csv: "str | Path | None" = None,
     sap_import_month: "str | None" = None,
     sap_record_ledger: bool = False,
+    sap_record_skip_reason: "str | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -841,6 +842,9 @@ def run_keihi_integration(
         sap_import_month: 台帳へ記録する取込年月（YYYY-MM）。未指定なら実行日の年月
         sap_record_ledger: True なら取込対象の明細を台帳へ「暫定」で記録する
                            （書き込み許可の判定は呼び出し側で済ませておくこと）
+        sap_record_skip_reason: sap_record_ledger=False にした理由（画面に出す）。
+                           黙って記録しないと「台帳に入ったつもり」で確定が漏れ、
+                           翌月の除外が効かず二重計上になるため必ず伝える
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -861,8 +865,8 @@ def run_keihi_integration(
     if sap_csv and sap_ledger_csv:
         try:
             from services.sap_import_ledger import (
-                REVIEW_EXTRA_COLUMNS, append_provisional, classify_rows,
-                default_import_month, load_ledger, save_ledger)
+                REVIEW_EXTRA_COLUMNS, LedgerConflictError, append_provisional,
+                classify_rows, default_import_month, load_ledger, save_ledger)
             ledger = load_ledger(sap_ledger_csv)
             sap_headers, sap_raw = read_csv_any_enc(sap_csv)
             sap_dicts = [dict(zip(sap_headers, r)) for r in sap_raw]
@@ -919,8 +923,22 @@ def run_keihi_integration(
                 log_func(f"[info] 台帳へ暫定登録: {month} に {n} 行（確定は取込後に画面から）")
                 result.sap_dedup["recorded_month"] = month
                 result.sap_dedup["recorded_rows"] = n
+            except LedgerConflictError as e:
+                # 他の人の変更を消さないための中止。次に何をすればよいかまで出す
+                result.sap_dedup["record_skipped"] = True
+                result.sap_dedup["record_skip_reason"] = str(e)
+                log_func(f"[warn] 台帳へ記録しませんでした: {e}")
             except Exception as e:  # noqa: BLE001 — 記録に失敗しても統合一覧表は出す
+                result.sap_dedup["record_skipped"] = True
+                result.sap_dedup["record_skip_reason"] = f"台帳への暫定登録に失敗しました: {e}"
                 log_func(f"[warn] 台帳への暫定登録に失敗しました（統合一覧表は出します）: {e}")
+        else:
+            # 権限が無い等で記録しなかった場合、黙って進むと「台帳に入ったつもり」になる。
+            # 確定が漏れると翌月の除外が効かず二重計上になるので、必ず画面に出す。
+            result.sap_dedup["record_skipped"] = True
+            result.sap_dedup["record_skip_reason"] = (
+                sap_record_skip_reason or "台帳への記録は行いませんでした。")
+            log_func(f"[warn] 台帳へ記録しませんでした: {result.sap_dedup['record_skip_reason']}")
 
     # --- ロスター（氏名→社員番号）を jinjer API から構築（e-staffing/SAP/freee 用） ---
     # 経費は前月分を当月の給与計算で精算するため、前月1日以降の退職者も含める

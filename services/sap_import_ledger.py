@@ -38,6 +38,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import getpass
+import hashlib
 import logging
 import os
 import shutil
@@ -130,10 +131,23 @@ def row_key(row: dict, id_column: str = ID_COLUMN) -> tuple:
 # 台帳の読み書き
 # ----------------------------------------------------------------------
 
+def _signature(path: Path) -> str:
+    """台帳ファイルの内容シグネチャ（同時書き込み検知用）。無ければ空文字。
+
+    NAS では mtime の粒度が粗く当てにならないので中身のハッシュを使う。
+    """
+    if not path.exists():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @dataclass
 class Ledger:
     path: Path
     rows: list[dict] = field(default_factory=list)
+    # 読み込んだ時点のシグネチャ。保存直前に読み直して変わっていたら、
+    # 自分が読んでから誰かが台帳を更新したということなので上書きしない。
+    loaded_signature: str = ""
 
     @property
     def confirmed_rows(self) -> list[dict]:
@@ -171,7 +185,7 @@ def load_ledger(path: "str | Path") -> Ledger:
     p = Path(path).expanduser()
     if not p.exists():
         logger.info("SAP台帳がまだありません（新規作成されます）: %s", p)
-        return Ledger(path=p, rows=[])
+        return Ledger(path=p, rows=[], loaded_signature="")
     data = p.read_bytes()
     encoding = "utf-8-sig" if data.startswith(b"\xef\xbb\xbf") else "utf-8"
     try:
@@ -190,7 +204,8 @@ def load_ledger(path: "str | Path") -> Ledger:
     if missing:
         raise ValueError(
             f"台帳CSVの形式が不正です（列 {'・'.join(sorted(missing))} がありません）: {p}")
-    return Ledger(path=p, rows=rows)
+    return Ledger(path=p, rows=rows,
+                  loaded_signature=hashlib.sha256(data).hexdigest())
 
 
 def _backup(path: Path) -> "Path | None":
@@ -205,8 +220,26 @@ def _backup(path: Path) -> "Path | None":
     return bak
 
 
-def save_ledger(ledger: Ledger) -> "Path | None":
-    """台帳CSVを書き出す（BOM付きUTF-8＝谷津さんのExcelで文字化けしない）。戻り値はバックアップ先。"""
+class LedgerConflictError(RuntimeError):
+    """自分が読み込んでから他の人が台帳を更新していた（＝上書きすると相手の変更が消える）。"""
+
+
+def save_ledger(ledger: Ledger, force: bool = False) -> "Path | None":
+    """台帳CSVを書き出す（BOM付きUTF-8＝谷津さんのExcelで文字化けしない）。戻り値はバックアップ先。
+
+    書き込みは「読む→直す→書く」なので、谷津さんと平良さんの操作が数秒重なると
+    後から書いた方が相手の変更を消す。たとえば片方が「2026-07を確定」した直後に
+    もう片方が経費統合を実行すると**確定が消え、翌月の除外が効かなくなる**。
+    そこで保存の直前にファイルを読み直し、読み込んだ時点から変わっていたら中止する。
+
+    force=True で強制上書き（相手の変更は失われる。通常は使わない）。
+    """
+    if not force and _signature(ledger.path) != ledger.loaded_signature:
+        raise LedgerConflictError(
+            f"台帳が他の人によって更新されています（{ledger.path}）。"
+            "あなたが読み込んだ後に変更されたため、上書きせず中止しました。"
+            "画面を開き直して、もう一度実行してください。"
+        )
     bak = _backup(ledger.path)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     with ledger.path.open("w", encoding="utf-8-sig", newline="") as f:
@@ -214,6 +247,7 @@ def save_ledger(ledger: Ledger) -> "Path | None":
                            lineterminator="\r\n")
         w.writeheader()
         w.writerows(ledger.rows)
+    ledger.loaded_signature = _signature(ledger.path)  # 連続保存できるよう更新
     return bak
 
 
