@@ -153,6 +153,58 @@ def _sap_row(sei="太田", mei="裕一", amt="398", vendor="京葉線", desc="",
     return r
 
 
+_SAP_HEADERS_13 = ["姓", "名", "費用合計", "業者名", "費用エントリ日", "説明",
+                   "費用シート承認日", "事業単位", "コストセンター", "通貨",
+                   "費用シート ID", "勤務地", "費用シートのステータス"]
+# 2026-08-06 SAP側がAPI連携用に6列追加（13列→19列）。増えたのは11列目以降だったので
+# 位置決め打ちのままでも壊れなかったが、前の方に入ったら黙って別の列を読んでしまう。
+_SAP_HEADERS_19 = ["姓", "名", "費用合計", "業者名", "費用エントリ日", "説明",
+                   "費用シート承認日", "事業単位", "コストセンター", "通貨",
+                   "費用シート ID", "費用コード", "費用名", "勤務地",
+                   "費用シートのステータス", "スタッフ ID", "費用シート提出日",
+                   "発注者", "作業オーダー ID"]
+
+
+class TestTransformSapColumnLayout:
+    """SAP生CSVの列が増減・並べ替えされても壊れないこと（列名で位置を決める）"""
+
+    def _base(self):
+        return transform_sap(_SAP_HEADERS_13, [_sap_row(cc="CC1", sid="EXP-1")], {})
+
+    def test_19col_layout_matches_13col(self):
+        """新19列レイアウト（末尾寄りに6列追加）でも結果が変わらない"""
+        r13 = _sap_row(cc="CC1", sid="EXP-1")
+        # 11列目までは同じ、以降に 費用コード/費用名 を差し込み 勤務地・ステータスが後ろへ
+        r19 = r13[:11] + ["CODE", "費用名X"] + [r13[11], r13[12]] + ["S-1", "2026/6/28", "発注者A", "WO-1"]
+        assert transform_sap(_SAP_HEADERS_19, [r19], {}) == self._base()
+
+    def test_column_inserted_at_front_does_not_shift_data(self):
+        """先頭に列が入っても列名で引くのでズレない（旧実装ならここで全部ズレた）"""
+        r13 = _sap_row(cc="CC1", sid="EXP-1")
+        got = transform_sap(["作業オーダー ID"] + _SAP_HEADERS_13, [["WO-1"] + r13], {})
+        assert got == self._base()
+
+    def test_reordered_columns(self):
+        """並べ替えにも耐える"""
+        order = [10, 0, 1, 8, 2, 3, 4, 5, 6, 7, 9, 11, 12]
+        headers = [_SAP_HEADERS_13[i] for i in order]
+        r13 = _sap_row(cc="CC1", sid="EXP-1")
+        assert transform_sap(headers, [[r13[i] for i in order]], {}) == self._base()
+
+    def test_falls_back_to_positions_without_header_names(self):
+        """ヘッダー名が読めないCSVは従来の13列レイアウトの位置で読む（後方互換）"""
+        r13 = _sap_row(cc="CC1", sid="EXP-1")
+        assert transform_sap([], [r13], {}) == self._base()
+        assert transform_sap([""] * 13, [r13], {}) == self._base()
+
+    def test_approved_date_alias(self):
+        """承認日の列名が「承認日」でも「費用シート承認日」でも同じ列を読む"""
+        alias = list(_SAP_HEADERS_13)
+        alias[6] = "承認日"
+        r13 = _sap_row(cc="CC1", sid="EXP-1")
+        assert transform_sap(alias, [r13], {}) == self._base()
+
+
 def test_transform_sap_normal_to_customer_bill():
     row = transform_sap([], [_sap_row(vendor="京葉線", amt="398")], {})[0]
     assert row[C_DETAIL] == "京葉線"

@@ -328,41 +328,80 @@ def transform_estaffing(headers: list[str], rows: list[list[str]], roster: dict)
     return out
 
 
+# SAP 生CSV で実際に読む列。(列名の候補, 従来の位置)。
+# ヘッダーに名前があればそれを使い、無ければ従来の位置にフォールバックする。
+# SAPは列を増やすことがあり（2026-08-06: API連携用に 費用コード/費用名/スタッフ ID/
+# 費用シート提出日/発注者/作業オーダー ID の6列が追加され13列→19列）、位置決め打ちのままだと
+# 前の方に列が入った瞬間に**エラーも出さず別の列を読む**。名前で引けば増減・並べ替えに耐える。
+_SAP_FIELDS = {
+    "sei": (("姓",), 0),
+    "mei": (("名",), 1),
+    "amount": (("費用合計",), 2),
+    "vendor": (("業者名",), 3),
+    "entry_date": (("費用エントリ日",), 4),
+    "desc": (("説明",), 5),
+    "approved": (("費用シート承認日", "承認日"), 6),
+    "cost_center": (("コストセンター",), 8),
+    "sheet_id": (("費用シート ID", "費用シートID"), 10),
+}
+
+
+def _sap_col_map(headers: "list[str] | None") -> dict:
+    """SAP生CSVのヘッダーから、読みたい項目の列位置を決める。"""
+    norm = [str(h or "").strip().lstrip("﻿") for h in (headers or [])]
+    out = {}
+    for key, (names, default_pos) in _SAP_FIELDS.items():
+        pos = default_pos
+        for name in names:
+            if name in norm:
+                pos = norm.index(name)
+                break
+        out[key] = pos
+    return out
+
+
 def transform_sap(headers: list[str], rows: list[list[str]], roster: dict) -> list[list[str]]:
     """SAP Fieldglass 経費 生CSV → 経費統合一覧表(34列)。
 
-    生CSV(13列): 姓(1) 名(2) 費用合計(3) 業者名(4) 費用エントリ日(5) 説明(6) 承認日(7)
-    事業単位(8) コストセンター(9) 通貨(10) 費用シートID(11) 勤務地(12) ステータス(13)。
+    読む列: 姓 名 費用合計 業者名 費用エントリ日 説明 費用シート承認日 コストセンター 費用シートID。
+    **列位置はヘッダーの名前から決める**（見つからなければ従来の13列レイアウトの位置を使う）。
     前処理 8a/8b（Paste_SAP経費_From_File）→ 34列マッピング（Append_SAP経費）を行う。
       8a: 夜間当番KWが説明(F)のみにあり業者名(D)に無い行は D←F を転記
       8b: 業者名(D)or説明(F)に「顧客対応/顧客当番」を含む行は 費用合計(C)を ÷1.1（四捨五入）で税抜化
     夜間当番系業者名の行は金額を D:合計（夜間当番手当）へ、その他は 34列目:顧客請求分 へ入れる。
     """
-    work = [list(r) + [""] * (13 - len(r)) for r in rows]
+    col = _sap_col_map(headers)
+    i_sei, i_mei = col["sei"], col["mei"]
+    i_amt, i_vendor = col["amount"], col["vendor"]
+    i_date, i_desc = col["entry_date"], col["desc"]
+    i_appr, i_cc, i_id = col["approved"], col["cost_center"], col["sheet_id"]
+
+    width = max(13, max(col.values()) + 1)
+    work = [list(r) + [""] * (width - len(r)) for r in rows]
     # 8a
     for w in work:
-        if _is_sap_taxstrip_row(w[5]) and not _is_sap_taxstrip_row(w[3]):
-            w[3] = w[5]
+        if _is_sap_taxstrip_row(w[i_desc]) and not _is_sap_taxstrip_row(w[i_vendor]):
+            w[i_vendor] = w[i_desc]
     # 8b
     for w in work:
-        if _is_sap_taxstrip_row(w[3], w[5]):
-            raw = str(w[2]).replace(",", "").replace("\\", "").replace("￥", "").replace("円", "").strip()
+        if _is_sap_taxstrip_row(w[i_vendor], w[i_desc]):
+            raw = str(w[i_amt]).replace(",", "").replace("\\", "").replace("￥", "").replace("円", "").strip()
             try:
-                w[2] = str(_round_half_up(float(raw) / 1.1))
+                w[i_amt] = str(_round_half_up(float(raw) / 1.1))
             except ValueError:
                 pass
 
     out: list[list[str]] = []
     for w in work:
-        sei, mei = (w[0] or "").strip(), (w[1] or "").strip()
-        amt = parse_amount(w[2])
-        vendor = (w[3] or "").strip()
-        entry_date = norm_date_pad(w[4])       # 費用エントリ日 → 利用日
+        sei, mei = (w[i_sei] or "").strip(), (w[i_mei] or "").strip()
+        amt = parse_amount(w[i_amt])
+        vendor = (w[i_vendor] or "").strip()
+        entry_date = norm_date_pad(w[i_date])   # 費用エントリ日 → 利用日
         # 説明(F): Excel が OpenText で「6月5日」等を日付化するため、その挙動を再現して備考に入れる。
         # 非日付は原文そのまま（前後空白も保持＝マクロ CStr 相当）
-        desc = excel_coerce_jp_date(w[5], entry_date)
-        cc = (w[8] or "").strip()
-        sap_id = (w[10] or "").strip()
+        desc = excel_coerce_jp_date(w[i_desc], entry_date)
+        cc = (w[i_cc] or "").strip()
+        sap_id = (w[i_id] or "").strip()
 
         memo = desc
         if cc:
@@ -373,14 +412,14 @@ def transform_sap(headers: list[str], rows: list[list[str]], roster: dict) -> li
         row = _blank_row()
         row[C_EMP] = roster.get(normkey(sei + mei)) or roster.get(normkey(mei + sei)) or ""
         row[C_NAME] = (sei + " " + mei).strip()
-        row[C_APPDATE] = norm_date_pad(w[6])   # 申請日 ← 承認日
-        row[C_USEDATE] = entry_date            # 利用日 ← 費用エントリ日
-        row[C_DETAIL] = vendor[:80]            # 内訳 ← 業者名（80文字制限）
-        row[C_MEMO_LINE] = memo                # 備考(明細)
+        row[C_APPDATE] = norm_date_pad(w[i_appr])  # 申請日 ← 費用シート承認日
+        row[C_USEDATE] = entry_date                # 利用日 ← 費用エントリ日
+        row[C_DETAIL] = vendor[:80]                # 内訳 ← 業者名（80文字制限）
+        row[C_MEMO_LINE] = memo                    # 備考(明細)
         if any(k in vendor for k in NIGHT_DUTY_KEYWORDS):
-            row[C_TOTAL] = amt                 # D: 合計（夜間当番手当として集計）
+            row[C_TOTAL] = amt                     # D: 合計（夜間当番手当として集計）
         else:
-            row[C_CUSTOMER_BILL] = amt         # 34: 顧客請求分（SAP 通常行）
+            row[C_CUSTOMER_BILL] = amt             # 34: 顧客請求分（SAP 通常行）
         out.append(row)
     return out
 
