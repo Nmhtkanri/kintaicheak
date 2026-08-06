@@ -136,57 +136,105 @@ class TestParsePastInputs:
         assert parse_past_inputs("  \n ; ") == []
 
 
-class TestKeihiIntegrationWithSapDedup:
-    def _run(self, tmp_path, sap_past_inputs):
-        past = _write_sap_csv(tmp_path / "past.csv", [_sap_row("EXP-1")])
-        cur = _write_sap_csv(tmp_path / "current.csv",
-                             [_sap_row("EXP-1"), _sap_row("EXP-2"), _sap_row("EXP-3")])
+class TestKeihiIntegrationWithLedger:
+    """run_keihi_integration が取込済み費用シート台帳と突合することの確認（2026-08-06〜）"""
+
+    def _ledger(self, tmp_path, rows):
+        from services.sap_import_ledger import (
+            Ledger, append_provisional, confirm_month, save_ledger)
+        led = Ledger(path=tmp_path / "台帳.csv", rows=[])
+        append_provisional(led, rows, "2026-07", "past.csv", user="tester")
+        confirm_month(led, "2026-07", user="tester")
+        save_ledger(led)
+        return led.path
+
+    def _cur(self, tmp_path, rows):
+        return _write_sap_csv(tmp_path / "current.csv", rows)
+
+    def test_ledger_applied_before_transform(self, tmp_path):
+        """明細まで一致＝除外／IDだけ一致＝要確認／台帳に無い＝取込"""
+        ledger_csv = self._ledger(tmp_path, [dict(zip(SAP_HEADERS, _sap_row("EXP-1")))])
+        cur = self._cur(tmp_path, [
+            _sap_row("EXP-1"),                    # 明細まで一致 → 除外
+            _sap_row("EXP-1", total="9999"),      # IDだけ一致   → 要確認
+            _sap_row("EXP-2"),                    # 台帳に無い   → 取込
+        ])
         out = tmp_path / "integrated.xlsx"
         res = run_keihi_integration(
-            output_path=out, sap_csv=cur,
-            route_check=False, classify=False,
-            sap_past_inputs=[str(past)] if sap_past_inputs == "auto" else sap_past_inputs,
-            client=_NoApiClient(),
-            log_func=lambda m: None,
+            output_path=out, sap_csv=cur, route_check=False, classify=False,
+            sap_ledger_csv=str(ledger_csv), client=_NoApiClient(), log_func=lambda m: None,
         )
-        return res, out
-
-    def test_dedup_applied_before_transform(self, tmp_path):
-        res, out = self._run(tmp_path, "auto")
         assert res.ok is True
-        assert res.sap_dedup["removed_rows"] == 1
-        assert res.sap_dedup["kept_rows"] == 2
-        # 統合一覧表にはEXP-1を除いた2行だけが載る
-        assert res.source_counts["sap"] == 2
-        # Excel に「SAP重複除外」シートがあり、除外行が載っている
-        wb = load_workbook(out)
-        assert "SAP重複除外" in wb.sheetnames
-        ws = wb["SAP重複除外"]
-        headers = [c.value for c in ws[1]]
-        assert "費用シート ID" in headers and "除外理由" in headers
-        keys = [ws.cell(row=r, column=headers.index("照合キー") + 1).value
-                for r in range(2, ws.max_row + 1)]
-        assert keys == ["EXP-1"]
-        # 除外済みCSV・除外一覧CSVが出力フォルダに残る
-        assert (tmp_path / "integrated_SAP重複除外済.csv").exists()
-        assert (tmp_path / "integrated_SAP除外一覧.csv").exists()
+        assert res.sap_dedup["excluded_rows"] == 1
+        assert res.sap_dedup["review_rows"] == 1
+        assert res.sap_dedup["kept_rows"] == 1
+        # 統合一覧表に載るのは取込対象の1行だけ（要確認は取り込まない）
+        assert res.source_counts["sap"] == 1
 
-    def test_without_past_behaves_as_before(self, tmp_path):
-        res, out = self._run(tmp_path, None)
+        wb = load_workbook(out)
+        assert "SAP除外(支給済み)" in wb.sheetnames
+        assert "SAP要確認" in wb.sheetnames
+        ws = wb["SAP除外(支給済み)"]
+        headers = [c.value for c in ws[1]]
+        assert "費用シート ID" in headers and "判定" in headers and "理由" in headers
+        assert ws.cell(row=2, column=headers.index("費用シート ID") + 1).value == "EXP-1"
+        # 3種のCSVが出力フォルダに残る（証跡）
+        assert (tmp_path / "integrated_SAP取込対象.csv").exists()
+        assert (tmp_path / "integrated_SAP除外.csv").exists()
+        assert (tmp_path / "integrated_SAP要確認.csv").exists()
+
+    def test_without_ledger_behaves_as_before(self, tmp_path):
+        cur = self._cur(tmp_path, [_sap_row("EXP-1"), _sap_row("EXP-2")])
+        out = tmp_path / "integrated.xlsx"
+        res = run_keihi_integration(
+            output_path=out, sap_csv=cur, route_check=False, classify=False,
+            sap_ledger_csv=None, client=_NoApiClient(), log_func=lambda m: None,
+        )
         assert res.ok is True
         assert res.sap_dedup == {}
-        assert res.source_counts["sap"] == 3
-        wb = load_workbook(out)
-        assert "SAP重複除外" not in wb.sheetnames
+        assert res.source_counts["sap"] == 2
+        assert "SAP除外(支給済み)" not in load_workbook(out).sheetnames
 
-    def test_dedup_failure_aborts(self, tmp_path):
-        cur = _write_sap_csv(tmp_path / "current.csv", [_sap_row("EXP-1")])
+    def test_missing_ledger_file_is_not_an_error(self, tmp_path):
+        """台帳がまだ無いとき（初回運用）は除外なしで通す"""
+        cur = self._cur(tmp_path, [_sap_row("EXP-1")])
         res = run_keihi_integration(
             output_path=tmp_path / "integrated.xlsx", sap_csv=cur,
             route_check=False, classify=False,
-            sap_past_inputs=[str(tmp_path / "存在しないフォルダ")],
-            client=_NoApiClient(),
-            log_func=lambda m: None,
+            sap_ledger_csv=str(tmp_path / "まだ無い台帳.csv"),
+            client=_NoApiClient(), log_func=lambda m: None,
+        )
+        assert res.ok is True
+        assert res.sap_dedup["excluded_rows"] == 0
+        assert res.sap_dedup["kept_rows"] == 1
+
+    def test_record_ledger_writes_provisional(self, tmp_path):
+        from services.sap_import_ledger import load_ledger
+        ledger_csv = tmp_path / "台帳.csv"
+        cur = self._cur(tmp_path, [_sap_row("EXP-1"), _sap_row("EXP-2")])
+        res = run_keihi_integration(
+            output_path=tmp_path / "integrated.xlsx", sap_csv=cur,
+            route_check=False, classify=False,
+            sap_ledger_csv=str(ledger_csv), sap_import_month="2026-08",
+            sap_record_ledger=True, client=_NoApiClient(), log_func=lambda m: None,
+        )
+        assert res.ok is True
+        assert res.sap_dedup["recorded_month"] == "2026-08"
+        assert res.sap_dedup["recorded_rows"] == 2
+        led = load_ledger(ledger_csv)
+        assert led.provisional_months == ["2026-08"]
+        # 暫定は判定に使われないので、確定しない限り翌回も除外されない
+        assert led.confirmed_rows == []
+
+    def test_ledger_failure_aborts(self, tmp_path):
+        """台帳が壊れていて読めないときは、黙って重複入りで進めず中止する"""
+        broken = tmp_path / "壊れた台帳.csv"
+        broken.write_bytes(b"\xff\xfe\x00\x00not a csv")
+        cur = self._cur(tmp_path, [_sap_row("EXP-1")])
+        res = run_keihi_integration(
+            output_path=tmp_path / "integrated.xlsx", sap_csv=cur,
+            route_check=False, classify=False, sap_ledger_csv=str(broken),
+            client=_NoApiClient(), log_func=lambda m: None,
         )
         assert res.ok is False
-        assert "SAP重複除外に失敗" in res.error
+        assert "SAP台帳との突合に失敗" in res.error

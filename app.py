@@ -361,7 +361,7 @@ def index():
     return render_template(
         "index.html",
         api_key_set=api_key_set,
-        keihi_sap_past_default=Config.KEIHI_SAP_PAST_DIR,
+        keihi_sap_ledger_csv=Config.KEIHI_SAP_LEDGER_CSV,
         build_stamp=_build_stamp(),
     )
 
@@ -1804,9 +1804,12 @@ def route_expense_integration():
         "sap_csv": _clean_path_input(request.form.get("sap_csv")),
         "freee_csv": _clean_path_input(request.form.get("freee_csv")),
     }
-    # SAP重複除外: 過去SAP CSV/フォルダ（; 区切りで複数可。空欄なら除外なし）
-    from services.sap_duplicate_filter import parse_past_inputs
-    sap_past_inputs = parse_past_inputs(request.form.get("sap_past") or "")
+    # SAP重複除外: 取込済み費用シート台帳と突合する（過去CSVを画面で選ぶ方式は 2026-08-06 に廃止。
+    # 「どのファイルで取り込んだか」を人間が思い出す必要をなくすため）。
+    sap_ledger_csv = (_clean_path_input(request.form.get("sap_ledger_csv"))
+                      or Config.KEIHI_SAP_LEDGER_CSV)
+    sap_import_month = (request.form.get("sap_import_month") or "").strip()
+    sap_record_ledger = (request.form.get("sap_record_ledger") or "1").strip() != "0"
     output_filename = (request.form.get("output_filename") or "").strip()
     route_check = (request.form.get("route_check") or "1").strip() != "0"
     classify = (request.form.get("classify") or "1").strip() != "0"
@@ -1866,12 +1869,16 @@ def route_expense_integration():
         if not p.exists():
             errors.append(f"{key} が見つかりません: {p}")
         paths[key] = p
-    for sp in sap_past_inputs:
-        if not _Path(sp).exists():
-            errors.append(f"過去SAP CSV/フォルダが見つかりません: {sp}")
-    if sap_past_inputs and not sources["sap_csv"]:
-        # SAP本体が無いのに過去だけ指定 → 除外は動かないことを明示（黙って無視しない）
-        errors.append("過去SAP CSVが指定されていますが、③SAP経費CSV本体が空欄です（重複除外はSAP CSV指定時のみ動きます）。")
+    # 台帳への書き込みは許可ユーザー（谷津さん・平良さん）のみ。許可が無い人が実行した場合は
+    # 突合（＝除外・要確認の判定）は行い、台帳への記録だけ止める。
+    from services.sap_import_ledger import can_write as _ledger_can_write
+    ledger_writable, ledger_write_msg = _ledger_can_write(Config.KEIHI_SAP_LEDGER_WRITERS_CSV)
+    if sap_record_ledger and not ledger_writable:
+        sap_record_ledger = False
+    if sap_import_month:
+        mp = sap_import_month.split("-")
+        if len(mp) != 2 or len(mp[0]) != 4 or not mp[0].isdigit() or not mp[1].isdigit():
+            errors.append(f"取込年月は YYYY-MM の形式で指定してください: {sap_import_month}")
     keywords_file = _Path(keywords_file_str) if keywords_file_str else None
     if keywords_file and not keywords_file.exists():
         errors.append(f"キーワード設定ファイルが見つかりません: {keywords_file}")
@@ -1901,7 +1908,9 @@ def route_expense_integration():
             route_check=route_check, classify=classify, keywords_file=keywords_file,
             import_template_csv=import_template_csv,
             manual_items=manual_items,
-            sap_past_inputs=sap_past_inputs or None,
+            sap_ledger_csv=sap_ledger_csv or None,
+            sap_import_month=sap_import_month or None,
+            sap_record_ledger=sap_record_ledger,
             log_func=_log,
         )
     except Exception as e:
@@ -1923,6 +1932,8 @@ def route_expense_integration():
             "route_summary": result.route_summary,
             "classify_summary": result.classify_summary,
             "sap_dedup": result.sap_dedup,
+            "ledger_writable": ledger_writable,
+            "ledger_write_msg": ledger_write_msg,
         },
         "console": log_lines,
     }
@@ -1930,6 +1941,101 @@ def route_expense_integration():
         payload["errors"] = [result.error] if result.error else ["統合一覧表の生成に失敗しました"]
         return jsonify(payload), 500
     return jsonify(payload)
+
+
+@app.route("/sap_ledger_status", methods=["GET"])
+def route_sap_ledger_status():
+    """SAP取込済み費用シート台帳の状態を返す（画面の表示用）。
+
+    どのファイルで取り込んだかを人間が覚えておく必要をなくすため、経費チェックモードは
+    過去CSVを選ばせず、この台帳と突合する。画面には台帳のパス・現在のWindowsユーザー名・
+    書き込み可否・月ごとの状態（確定/暫定）を出す。
+    """
+    from services.sap_import_ledger import (
+        STATUS_CONFIRMED, can_write, current_user, default_import_month, load_ledger)
+
+    path = str(Config.KEIHI_SAP_LEDGER_CSV)
+    writable, write_msg = can_write(Config.KEIHI_SAP_LEDGER_WRITERS_CSV)
+    base = {
+        "ledger_csv": path,
+        "writers_csv": str(Config.KEIHI_SAP_LEDGER_WRITERS_CSV),
+        "exists": _Path(path).exists(),
+        "user": current_user(),
+        "writable": writable,
+        "write_msg": write_msg,
+        "default_month": default_import_month(),
+    }
+    try:
+        ledger = load_ledger(path)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sap_ledger_status failed")
+        return jsonify({**base, "success": False, "error": str(e)}), 500
+
+    months = []
+    for m in ledger.months():
+        rows = [r for r in ledger.rows if (r.get("取込年月") or "").strip() == m]
+        conf = sum(1 for r in rows if (r.get("状態") or "").strip() == STATUS_CONFIRMED)
+        months.append({
+            "month": m,
+            "rows": len(rows),
+            "confirmed": conf,
+            "status": "確定" if conf == len(rows) else ("暫定" if conf == 0 else "一部確定"),
+        })
+    return jsonify({
+        **base,
+        "success": True,
+        "total_rows": len(ledger.rows),
+        "confirmed_rows": len(ledger.confirmed_rows),
+        "provisional_months": ledger.provisional_months,
+        "months": months,
+    })
+
+
+@app.route("/sap_ledger_confirm", methods=["POST"])
+def route_sap_ledger_confirm():
+    """暫定の取込年月を確定にする（jinjerへ取り込んだ後に押す）／確定を暫定に戻す。
+
+    判定に使われるのは確定分のみなので、確定するまでは翌月の除外が効かない。
+    書き込みは許可ユーザー（谷津さん・平良さん）だけ。
+    """
+    from services.sap_import_ledger import (
+        can_write, confirm_month, current_user, load_ledger, save_ledger, unconfirm_month)
+
+    month = (request.form.get("month") or "").strip()
+    action = (request.form.get("action") or "confirm").strip()
+    if not month:
+        return jsonify({"success": False, "error": "取込年月が指定されていません。"}), 400
+
+    writable, write_msg = can_write(Config.KEIHI_SAP_LEDGER_WRITERS_CSV)
+    if not writable:
+        return jsonify({"success": False, "error": write_msg}), 403
+
+    try:
+        ledger = load_ledger(Config.KEIHI_SAP_LEDGER_CSV)
+        if action == "unconfirm":
+            n = unconfirm_month(ledger, month)
+            verb, already = "暫定に戻しました", "すでに暫定"
+        else:
+            n = confirm_month(ledger, month, user=current_user())
+            verb, already = "確定しました", "すでに確定済み"
+        if n == 0:
+            return jsonify({
+                "success": False,
+                "error": f"{month} に対象の行がありませんでした"
+                         f"（{already}か、その月の記録がありません）。",
+            }), 400
+        bak = save_ledger(ledger)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sap_ledger_confirm failed")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    return jsonify({
+        "success": True,
+        "message": f"{month} の {n} 行を{verb}（実行: {current_user()}）",
+        "month": month,
+        "rows": n,
+        "backup": str(bak) if bak else None,
+    })
 
 
 @app.route("/expense_payroll_import", methods=["POST"])

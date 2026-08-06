@@ -92,6 +92,18 @@ def read_csv_any_enc(path: "str | Path") -> tuple[list[str], list[list[str]]]:
     raise ValueError(f"CSV の文字コードを判別できませんでした: {path}")
 
 
+def _write_dict_csv(path: "str | Path", fieldnames: list[str], rows: list[dict]) -> Path:
+    """dict の行リストを CSV へ書く（BOM付きUTF-8＝谷津さんのExcelで文字化けしない）。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore",
+                           lineterminator="\r\n")
+        w.writeheader()
+        w.writerows(rows)
+    return path
+
+
 def excel_coerce(v) -> str:
     """Excel が `Workbooks.Open(csv, Local:=True)` で CSV を開いたときの型変換を再現する。
 
@@ -572,17 +584,20 @@ def add_integrated_sheet(wb: Workbook, rows: list[list[str]]) -> None:
         ws.auto_filter.ref = f"A1:{get_column_letter(NCOL)}{n + 1}"
 
 
-def add_sap_dedup_sheet(wb: Workbook, fieldnames: list[str], removed_rows: list[dict]) -> None:
-    """「SAP重複除外」シートを追加する（除外された行の一覧＝精査の証跡）。
+def add_sap_dedup_sheet(wb: Workbook, fieldnames: list[str], removed_rows: list[dict],
+                        title: str = "SAP重複除外", accent: str = "C05046",
+                        empty_note: str = "(除外された行はありません)") -> None:
+    """台帳突合の結果シートを追加する（＝精査の証跡）。
 
-    fieldnames は SAP 生CSVの列＋付加列（除外理由/照合キー/重複元ファイル/重複元CSV行/重複元件数）。
-    除外 0 行でも「除外なし」が確認できるようシート自体は作る。
+    fieldnames は SAP 生CSVの列＋付加列（判定/理由/台帳の取込年月）。
+    0 行でも「該当なし」が確認できるようシート自体は作る。
+    除外シート（支給済み）と要確認シートで色を変えて呼び分ける。
     """
     header_font = Font(name=FONT, bold=True, color="FFFFFF")
-    header_fill = PatternFill("solid", start_color="C05046")
+    header_fill = PatternFill("solid", start_color=accent)
     body_font = Font(name=FONT)
 
-    ws = wb.create_sheet("SAP重複除外")
+    ws = wb.create_sheet(title)
     ws.append(fieldnames)
     for cell in ws[1]:
         cell.font = header_font
@@ -596,7 +611,7 @@ def add_sap_dedup_sheet(wb: Workbook, fieldnames: list[str], removed_rows: list[
                 cell.font = body_font
         ws.auto_filter.ref = f"A1:{get_column_letter(len(fieldnames))}{len(removed_rows) + 1}"
     else:
-        ws.append(["(除外された行はありません)"])
+        ws.append([empty_note])
         ws.cell(row=2, column=1).font = body_font
     for i, name in enumerate(fieldnames, start=1):
         ws.column_dimensions[get_column_letter(i)].width = max(12, min(40, len(str(name)) * 2 + 6))
@@ -674,7 +689,7 @@ class KeihiResult:
     import_preview: list = field(default_factory=list)     # インポート行プレビュー（人間チェック用）
     import_warnings: list = field(default_factory=list)
     import_csv_name: str = ""                               # 出力したインポートCSVのファイル名
-    sap_dedup: dict = field(default_factory=dict)           # SAP重複除外の統計（未実施なら空）
+    sap_dedup: dict = field(default_factory=dict)           # SAP台帳突合の統計（未実施なら空）
     error: str = ""
     logs: list[str] = field(default_factory=list)
 
@@ -763,7 +778,9 @@ def run_keihi_integration(
     keywords_file: "str | Path | None" = None,
     import_template_csv: "str | Path | None" = None,
     manual_items: "dict | None" = None,
-    sap_past_inputs: "list | None" = None,
+    sap_ledger_csv: "str | Path | None" = None,
+    sap_import_month: "str | None" = None,
+    sap_record_ledger: bool = False,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -779,9 +796,12 @@ def run_keihi_integration(
         manual_items: イレギュラー経費 {項目名: {社員番号: 金額}}。経費4ソースから導けない
                       手決めの金額（定常外業務対応手当/その他手当/現物支給/支給過不足調整/
                       社保調整）。画面の入力欄またはファイル一括取込から渡す。負数可
-        sap_past_inputs: 過去SAP CSVのファイル/フォルダのリスト。指定時、SAP取込前に
-                         「費用シート ID」が過去と一致する行を除外する（前々月分の混入対策）。
-                         除外に失敗した場合は二重計上事故防止のため処理を中止する
+        sap_ledger_csv: 取込済み費用シート台帳CSV。指定時、SAP取込前に台帳と突合して
+                        支給済みの明細を除外する（前々月分の再掲対策）。
+                        突合に失敗した場合は二重計上事故防止のため処理を中止する
+        sap_import_month: 台帳へ記録する取込年月（YYYY-MM）。未指定なら実行日の年月
+        sap_record_ledger: True なら取込対象の明細を台帳へ「暫定」で記録する
+                           （書き込み許可の判定は呼び出し側で済ませておくこと）
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -791,32 +811,77 @@ def run_keihi_integration(
         log_func(f"[error] {result.error}")
         return result
 
-    # --- SAP重複除外（オプトイン）: 取込前に過去CSVと費用シートIDで突合 ---
-    sap_dedup_removed_rows: list[dict] = []
-    sap_dedup_removed_fieldnames: list[str] = []
-    if sap_csv and sap_past_inputs:
+    # --- SAP重複除外: 取込済み費用シート台帳と突合（前々月分の再掲を取込前に落とす）---
+    # 判定は3段階（2026-08-06 谷津さん決定）:
+    #   台帳と明細まで一致 → 除外／費用シートIDだけ一致 → 要確認／該当なし → 取込。
+    # IDだけで弾くと「遅れて申請された前々月分」を落として未払いになり、明細だけで弾くと
+    # SAPが金額訂正して再発行した分を二重計上する（2026-07 に27件実在）。両方を分けて出す。
+    sap_excluded_rows: list[dict] = []
+    sap_review_rows: list[dict] = []
+    sap_ledger_fieldnames: list[str] = []
+    if sap_csv and sap_ledger_csv:
         try:
-            from services.sap_duplicate_filter import run_sap_dedup
-            dedup = run_sap_dedup(
-                past_inputs=sap_past_inputs,
-                current_csv=sap_csv,
-                output_dir=Path(output_path).parent,
-                output_stem=Path(output_path).stem,
-            )
-        except Exception as e:  # noqa: BLE001 — 黙って重複入りで進むと二重計上になるため中止
-            result.error = f"SAP重複除外に失敗しました: {e}"
+            from services.sap_import_ledger import (
+                REVIEW_EXTRA_COLUMNS, append_provisional, classify_rows,
+                default_import_month, load_ledger, save_ledger)
+            ledger = load_ledger(sap_ledger_csv)
+            sap_headers, sap_raw = read_csv_any_enc(sap_csv)
+            sap_dicts = [dict(zip(sap_headers, r)) for r in sap_raw]
+            plan = classify_rows(sap_dicts, ledger)
+        except Exception as e:  # noqa: BLE001 — 黙って再掲入りで進むと二重計上になるため中止
+            result.error = f"SAP台帳との突合に失敗しました: {e}"
             log_func(f"[error] {result.error}")
             return result
+
+        stem = Path(output_path).stem
+        out_dir = Path(output_path).parent
+        clean_path = out_dir / f"{stem}_SAP取込対象.csv"
+        excluded_path = out_dir / f"{stem}_SAP除外.csv"
+        review_path = out_dir / f"{stem}_SAP要確認.csv"
+        sap_ledger_fieldnames = list(sap_headers) + REVIEW_EXTRA_COLUMNS
+        try:
+            _write_dict_csv(clean_path, sap_headers, plan.kept_rows)
+            _write_dict_csv(excluded_path, sap_ledger_fieldnames, plan.excluded_rows)
+            _write_dict_csv(review_path, sap_ledger_fieldnames, plan.review_rows)
+        except Exception as e:  # noqa: BLE001
+            result.error = f"SAP突合結果のCSV出力に失敗しました: {e}"
+            log_func(f"[error] {result.error}")
+            return result
+
         log_func(
-            f"[info] SAP重複除外: 過去 {dedup.past_file_count} ファイル/{dedup.past_row_count} 行と突合 → "
-            f"当月 {dedup.current_row_count} 行から {dedup.removed_row_count} 行を除外（残り {dedup.kept_row_count} 行）"
+            f"[info] SAP台帳突合: 台帳 {plan.ledger_row_count} 行（{plan.ledger_month_count} か月分）→ "
+            f"当月 {plan.current_row_count} 行のうち 取込 {len(plan.kept_rows)} 行 / "
+            f"除外 {len(plan.excluded_rows)} 行 / 要確認 {len(plan.review_rows)} 行"
         )
-        if dedup.removed_row_count:
-            log_func(f"[info]   除外一覧CSV: {dedup.removed_path.name} / 取込対象CSV: {dedup.clean_path.name}")
-        sap_csv = dedup.clean_path   # 以降は除外済みCSVを取り込む
-        result.sap_dedup = dedup.summary_dict()
-        sap_dedup_removed_rows = dedup.removed_rows
-        sap_dedup_removed_fieldnames = dedup.removed_fieldnames
+        if plan.review_rows:
+            log_func(
+                f"[warn] ★要確認 {len(plan.review_rows)} 行: 費用シートIDは台帳にあるが明細が違います"
+                f"（金額訂正の再発行の可能性）。取込対象には含めていません → {review_path.name}"
+            )
+        if ledger.provisional_months:
+            log_func(
+                f"[warn] 台帳に暫定のままの月があります: {'・'.join(ledger.provisional_months)}"
+                f"。判定には使われないので、取込済みなら「台帳を確定」してください"
+            )
+
+        sap_csv = clean_path          # 以降は取込対象CSVだけを取り込む
+        result.sap_dedup = plan.summary_dict()
+        result.sap_dedup["review_csv_name"] = review_path.name
+        result.sap_dedup["excluded_csv_name"] = excluded_path.name
+        sap_excluded_rows = plan.excluded_rows
+        sap_review_rows = plan.review_rows
+
+        # 取込対象を「暫定」で台帳へ記録（確定はjinjer取込後に画面から行う）
+        if sap_record_ledger:
+            month = sap_import_month or default_import_month()
+            try:
+                n = append_provisional(ledger, plan.kept_rows, month, clean_path)
+                save_ledger(ledger)
+                log_func(f"[info] 台帳へ暫定登録: {month} に {n} 行（確定は取込後に画面から）")
+                result.sap_dedup["recorded_month"] = month
+                result.sap_dedup["recorded_rows"] = n
+            except Exception as e:  # noqa: BLE001 — 記録に失敗しても統合一覧表は出す
+                log_func(f"[warn] 台帳への暫定登録に失敗しました（統合一覧表は出します）: {e}")
 
     # --- ロスター（氏名→社員番号）を jinjer API から構築（e-staffing/SAP/freee 用） ---
     # 経費は前月分を当月の給与計算で精算するため、前月1日以降の退職者も含める
@@ -867,8 +932,14 @@ def run_keihi_integration(
     wb = Workbook()
     add_integrated_sheet(wb, rows)
     if result.sap_dedup:
-        # SAP重複除外を実施した場合は、除外行の一覧シート（精査の証跡）を付ける
-        add_sap_dedup_sheet(wb, sap_dedup_removed_fieldnames, sap_dedup_removed_rows)
+        # 台帳突合を実施した場合は、除外行と要確認行のシート（精査の証跡）を付ける。
+        # 要確認は「取込対象に入れなかったが、捨ててよいとも言えない」行なので必ず目視する。
+        add_sap_dedup_sheet(wb, sap_ledger_fieldnames, sap_excluded_rows,
+                            title="SAP除外(支給済み)", accent="C05046",
+                            empty_note="(台帳と一致した行はありません＝再掲なし)")
+        add_sap_dedup_sheet(wb, sap_ledger_fieldnames, sap_review_rows,
+                            title="SAP要確認", accent="B8860B",
+                            empty_note="(要確認の行はありません)")
     if route_check:
         try:
             # 移動交通費（立替精算）対象者リスト（共有フォルダ）。読めなくても続行する

@@ -843,17 +843,40 @@
                 <span class="field-sub">生CSV <code>経費月次出力_API連携用*.csv</code>。税抜補正の対象です。</span>
             </label>
             <div class="field" style="margin-left:18px">
-                <label class="field-label" for="ki-sap-past">③-2 過去SAP経費CSV（重複の自動除外） <span class="tag tag-opt">任意</span></label>
-                <input type="text" id="ki-sap-past" value="{{ keihi_sap_past_default or '' }}"
-                       placeholder="例: Y:\給与明細\R8年（フォルダ指定でサブフォルダ内の全CSVと突合）">
-                <span class="field-sub">ファイル／フォルダを <code>;</code> 区切りで複数指定できます。</span>
+                <span class="field-label">③-2 SAP重複の自動除外（取込済み費用シート台帳）</span>
+                <div id="ki-ledger-box" class="field-sub" style="border:1px solid var(--border,#ccc); border-radius:6px; padding:9px 11px">
+                    <div id="ki-ledger-status">台帳を読み込み中…</div>
+                    <div style="margin-top:7px">
+                        台帳: <code id="ki-ledger-path">-</code><br>
+                        実行ユーザー: <code id="ki-ledger-user">-</code>
+                        <span id="ki-ledger-write"></span>
+                    </div>
+                    <div id="ki-ledger-months" style="margin-top:7px"></div>
+                    <div id="ki-ledger-confirm-row" style="margin-top:8px; display:none">
+                        <label>取込後にここで確定 →
+                            <select id="ki-ledger-month" style="min-width:110px"></select>
+                        </label>
+                        <button type="button" id="ki-ledger-confirm-btn" class="btn-sub">台帳を確定</button>
+                        <span id="ki-ledger-confirm-msg"></span>
+                    </div>
+                </div>
                 <details class="more">
-                    <summary>何が除外されるのか</summary>
+                    <summary>過去CSVを選ばなくてよくなった理由（2026-08-06）</summary>
                     <div class="more-body">
-                        <p>SAP の CSV には前々月分の経費が混ざって落ちてくるため、ここで指定した過去CSVと
-                           「費用シート ID」が一致する行を<b>取込前に自動除外</b>します。</p>
-                        <p>除外された行は Excel の「SAP重複除外」シートと除外一覧CSVで確認できます。
-                           <b>空欄にすると除外なし</b>。フォルダ指定時、過去の「重複除外済／除外一覧」CSVは自動で読み飛ばします。</p>
+                        <p>SAP の CSV には前々月分が<b>再掲されて</b>落ちてくるため、取込前に除外が要ります。
+                           従来は「前月の生CSV」を画面で指定して突合していましたが、実際に取り込んだファイルが
+                           どれだったかを人が思い出す必要があり、<b>2026-08-06 に別のダウンロードを指定してしまい
+                           285,642円（13名/93行）が二重支給になりかけました</b>。</p>
+                        <p>そこで、取り込んだ費用シートを<b>台帳に記録し、翌月は台帳と突合する</b>方式に変えました。
+                           判定は3段階です。</p>
+                        <ul>
+                            <li><b>除外</b>… 台帳と明細（氏名・日付・金額・業者名・説明）まで一致＝支給済み</li>
+                            <li><b>要確認</b>… 費用シートIDだけ一致し明細が違う＝<b>金額訂正の再発行の可能性</b>。
+                                自動除外も自動取込もせず、人が見て判断します（2026-07 に27件実在）</li>
+                            <li><b>取込</b>… 台帳に無い＝遅れて申請された前々月分もここで拾えます</li>
+                        </ul>
+                        <p>結果は Excel の「SAP除外(支給済み)」「SAP要確認」シートと、同名の CSV で確認できます。
+                           判定に使われるのは<b>確定分だけ</b>なので、jinjer へ取り込んだら「台帳を確定」を押してください。</p>
                     </div>
                 </details>
             </div>
@@ -948,7 +971,7 @@
             <div class="summary-cards" style="margin-bottom:8px">
                 <div class="summary-card"><div class="card-label">統合一覧表(行)</div><div class="card-value" id="ki-cnt-rows">0</div></div>
                 <div class="summary-card"><div class="card-label">ソース取込(jinjer/e-staffing/SAP/freee)</div><div class="card-value" id="ki-cnt-sources" style="font-size:14px">—</div></div>
-                <div class="summary-card"><div class="card-label">SAP重複除外(行)</div><div class="card-value" id="ki-cnt-sap-dedup" style="font-size:14px">—</div></div>
+                <div class="summary-card"><div class="card-label">SAP台帳突合</div><div class="card-value" id="ki-cnt-sap-dedup" style="font-size:14px">—</div></div>
                 <div class="summary-card"><div class="card-label">社員番号 未照合(行)</div><div class="card-value" id="ki-cnt-unmatched">0</div></div>
                 <div class="summary-card"><div class="card-label">★要確認(経路突合)</div><div class="card-value" id="ki-cnt-flagged">—</div></div>
                 <div class="summary-card"><div class="card-label">△逆要確認</div><div class="card-value" id="ki-cnt-rev">—</div></div>
@@ -1555,6 +1578,72 @@
         });
     }
 
+    // ----- SAP取込済み費用シート台帳（過去CSV指定を置き換えたもの。2026-08-06）-----
+    async function kiLoadLedger() {
+        const statusEl = document.getElementById('ki-ledger-status');
+        if (!statusEl) return;
+        try {
+            const res = await fetch('/sap_ledger_status');
+            const d = await res.json();
+            document.getElementById('ki-ledger-path').textContent = d.ledger_csv || '-';
+            document.getElementById('ki-ledger-user').textContent = d.user || '-';
+            const writeEl = document.getElementById('ki-ledger-write');
+            writeEl.textContent = d.writable ? '（書き込み可）' : '（閲覧のみ）';
+            writeEl.title = d.write_msg || '';
+            if (!d.success) {
+                statusEl.textContent = '台帳を読めませんでした: ' + (d.error || '');
+                return;
+            }
+            statusEl.textContent = (!d.exists || !d.total_rows)
+                ? '台帳がまだありません。初回は除外なしで取り込まれます。'
+                : `台帳に ${d.confirmed_rows} 行が確定済み（${(d.months || []).length}か月分）。過去CSVの指定は不要です。`;
+
+            const monthsEl = document.getElementById('ki-ledger-months');
+            monthsEl.innerHTML = (d.months || []).map(m =>
+                `<span style="margin-right:12px">${m.month} <b>${m.status}</b> ${m.rows}行</span>`).join('');
+            const prov = d.provisional_months || [];
+            if (prov.length) {
+                monthsEl.innerHTML += `<div style="color:#b8860b; margin-top:5px">`
+                    + `⚠ ${prov.join('・')} が暫定のままです。判定に使われないので、`
+                    + `jinjerへ取り込み済みなら確定してください。</div>`;
+            }
+            const sel = document.getElementById('ki-ledger-month');
+            sel.innerHTML = (d.months || []).map(m =>
+                `<option value="${m.month}">${m.month}（${m.status}）</option>`).join('');
+            if (prov.length) sel.value = prov[0];
+            document.getElementById('ki-ledger-confirm-row').style.display = d.writable ? '' : 'none';
+        } catch (e) {
+            statusEl.textContent = '台帳の状態を取得できませんでした: ' + e;
+        }
+    }
+    kiLoadLedger();
+
+    const kiLedgerBtn = document.getElementById('ki-ledger-confirm-btn');
+    if (kiLedgerBtn) {
+        kiLedgerBtn.addEventListener('click', async () => {
+            const month = document.getElementById('ki-ledger-month').value;
+            const msg = document.getElementById('ki-ledger-confirm-msg');
+            if (!month) return;
+            if (!confirm(`${month} の取込分を「確定」にします。\n`
+                       + `確定すると翌月の重複除外に使われます。jinjerへの取込は済んでいますか？`)) return;
+            kiLedgerBtn.disabled = true;
+            msg.textContent = '確定中…';
+            try {
+                const fd = new FormData();
+                fd.append('month', month);
+                fd.append('action', 'confirm');
+                const res = await fetch('/sap_ledger_confirm', {method: 'POST', body: fd});
+                const d = await res.json();
+                msg.textContent = d.success ? d.message : ('失敗: ' + (d.error || ''));
+                if (d.success) kiLoadLedger();
+            } catch (e) {
+                msg.textContent = '失敗: ' + e;
+            } finally {
+                kiLedgerBtn.disabled = false;
+            }
+        });
+    }
+
     // ----- 経費統合一覧表の生成（4ソース取込・マクロ移植 P1a）-----
     const kiRunBtn = document.getElementById('ki-run-btn');
     if (kiRunBtn) {
@@ -1570,7 +1659,9 @@
             fd.append('jinjer_csv', document.getElementById('ki-jinjer').value);
             fd.append('estaffing_csv', document.getElementById('ki-estaffing').value);
             fd.append('sap_csv', document.getElementById('ki-sap').value);
-            fd.append('sap_past', document.getElementById('ki-sap-past').value);
+            // 過去SAP CSVの指定は廃止（取込済み費用シート台帳と突合する）。
+            // 取込対象は「暫定」で台帳へ記録し、jinjer取込後に「台帳を確定」で確定させる。
+            fd.append('sap_record_ledger', '1');
             fd.append('freee_csv', document.getElementById('ki-freee').value);
             fd.append('output_filename', document.getElementById('ki-output-filename').value);
             fd.append('route_check', routeCheck ? '1' : '0');
@@ -1596,9 +1687,16 @@
                     fmt(sc.jinjer) + ' / ' + fmt(sc.estaffing) + ' / ' + fmt(sc.sap) + ' / ' + fmt(sc.freee);
                 const sd = st.sap_dedup || {};
                 document.getElementById('ki-cnt-sap-dedup').textContent =
-                    (sd.removed_rows !== undefined)
-                        ? (sd.removed_rows + '行 (過去' + sd.past_files + 'ファイルと突合)')
+                    (sd.excluded_rows !== undefined)
+                        ? ('除外 ' + sd.excluded_rows + '行 / ★要確認 ' + sd.review_rows + '行'
+                           + '（台帳' + sd.ledger_rows + '行と突合、取込 ' + sd.kept_rows + '行）'
+                           + (sd.recorded_month ? ' → ' + sd.recorded_month + 'を暫定登録' : ''))
                         : '未実施';
+                if (sd.review_rows) {
+                    document.getElementById('ki-cnt-sap-dedup').style.color = '#b8860b';
+                }
+                // 台帳へ暫定登録された結果を画面に反映する
+                kiLoadLedger();
                 document.getElementById('ki-cnt-unmatched').textContent = st.unmatched_emp || 0;
                 const rs = st.route_summary || {};
                 document.getElementById('ki-cnt-flagged').textContent =
