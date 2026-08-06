@@ -41,6 +41,7 @@ python -m PyInstaller ^
   --hidden-import services.ual_shift_parser ^
   --hidden-import services.employee_alias ^
   --hidden-import services.kotsuhi_seisa ^
+  --hidden-import services.sap_import_ledger ^
   launcher.py
 
 if errorlevel 1 goto :build_failed
