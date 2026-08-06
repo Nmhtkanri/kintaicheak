@@ -727,6 +727,7 @@ class KeihiResult:
     classify_summary: dict = field(default_factory=dict)   # 分類・集計の統計（P1b）
     import_preview: list = field(default_factory=list)     # インポート行プレビュー（人間チェック用）
     import_warnings: list = field(default_factory=list)
+    commute_cuts: list = field(default_factory=list)        # 通勤費の上限カット明細（投入前確認用）
     import_csv_name: str = ""                               # 出力したインポートCSVのファイル名
     sap_dedup: dict = field(default_factory=dict)           # SAP台帳突合の統計（未実施なら空）
     error: str = ""
@@ -1038,6 +1039,9 @@ def run_keihi_integration(
             stats = classify_and_summarize(rows, wb, keywords, roster_id_to_name)
             agg = stats.pop("_agg")
             emp_names = stats.pop("_emp_names")
+            commute_by_id = stats.pop("_commute", {})
+            commute_other_by_id = stats.pop("_commute_other", {})
+            commute_months = stats.pop("_commute_months", {})
             result.classify_summary = stats
             log_func(
                 f"[info] 分類・集計: 処理 {stats['classified_hits']} 件 / 集計 {stats['summary_employees']} 名 / "
@@ -1047,9 +1051,36 @@ def run_keihi_integration(
                 log_func(f"[info] 給与計算対象外(5/6/9始まり)を集計から除外: {stats['excluded_out_of_scope']} 名")
 
             # インポート行（人間チェック用のプレビューとCSV）
-            import_rows, warnings = build_import_rows(
-                agg.by_id, emp_names, roster_id_to_name, manual=manual_items)
+            # 通勤費の月額上限は集計ではなくここで掛ける。集計シートはマクロとの
+            # 全行一致検証に使うので値を動かさない（2026-08-06 谷津さん指定）。
+            from config import Config as _Cfg
+            from services.expense_check import load_travel_expense_members as _load_travel
+            from services.kotsuhi_seisa import load_limit_exempt_members as _load_exempt
+            _limit = int(getattr(_Cfg, "KOTSUHI_MONTHLY_LIMIT", 0) or 0)
+            _exempt: dict = {}
+            _travel: dict = {}
+            if _limit:
+                from pathlib import Path as _P
+                try:
+                    _exempt = _load_exempt(_P(getattr(_Cfg, "KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV", "")))
+                except Exception as _e:  # noqa: BLE001
+                    log_func(f"[warn] 上限免除者リストを読めませんでした（免除なしで続行）: {_e}")
+                try:
+                    _travel = _load_travel()
+                except Exception as _e:  # noqa: BLE001
+                    log_func(f"[warn] 移動交通費対象者リストを読めませんでした（免除なしで続行）: {_e}")
+                log_func(f"[info] 通勤費の上限 {_limit:,}円 を適用（免除 {len(_exempt)}名 / "
+                         f"移動交通費対象者 {len(_travel)}名）")
+            import_rows, warnings, commute_cuts = build_import_rows(
+                agg.by_id, emp_names, roster_id_to_name, manual=manual_items,
+                commute_by_id=commute_by_id, commute_other_by_id=commute_other_by_id,
+                commute_limit=_limit or None, limit_exempt=_exempt, travel_members=_travel,
+                commute_months=commute_months)
             result.import_preview = import_rows
+            result.commute_cuts = commute_cuts
+            for c in commute_cuts:
+                log_func(f"[info] 上限カット {c['社員番号']} {c['氏名']}: "
+                         f"{c['交通費(H)']:,}円 → {c['カット後']:,}円（-{c['カット額']:,}円）")
             for _label, _d in (manual_items or {}).items():
                 _n = sum(1 for a in (_d or {}).values() if a)
                 if _n:

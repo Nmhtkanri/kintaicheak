@@ -261,33 +261,57 @@ def load_irregular_file(path: "str | Path", label: str = "イレギュラー経�
 
 def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" = None,
                       manual: "dict | None" = None,
-                      ) -> tuple[list[dict], list[str]]:
-    """集計（数字ID→7バケット）＋イレギュラー経費からインポート行と警告リストを返す。
+                      commute_by_id: "dict | None" = None,
+                      commute_other_by_id: "dict | None" = None,
+                      commute_limit: "int | None" = None,
+                      limit_exempt: "dict | None" = None,
+                      travel_members: "dict | None" = None,
+                      commute_months: "dict | None" = None,
+                      ) -> tuple[list[dict], list[str], list[dict]]:
+    """集計（数字ID→7バケット）＋イレギュラー経費からインポート行・警告・上限カット明細を返す。
 
     行は 20YY 始まりの社員のみ・社員番号昇順（5/6/9始まりは給与計算対象外）。
     manual は {項目名: {社員番号: 金額}}（項目名は MANUAL_ITEM_KEYS）。
     **経費が無くイレギュラー経費だけの社員も行を出す**（マクロの「A列に無い社員は
     無言スキップ」で起きた計上漏れ事故と同じ轍を踏まないため）。
+
+    commute_limit を渡すと**非課税通勤費に月額上限を適用する**（2026-08-06 谷津さん指定）。
+    切るのは交通費(H)のうち通勤系と確信できる分（commute_by_id）だけで、同じHに入る
+    駐車場代など（commute_other_by_id）は上限の対象外として素通しする。
+    上限が掛からないのは limit_exempt（個別許可）と travel_members（移動交通費＝立替精算）。
+    カットは黙って行わず、必ず warnings と cuts の両方に出して投入前に人が見られるようにする。
     """
     from services.keihi_summary import in_company_scope
     roster_names = roster_names or {}
     manual = manual or {}
+    commute_by_id = commute_by_id or {}
+    commute_other_by_id = commute_other_by_id or {}
+    limit_exempt = limit_exempt or {}
+    travel_members = travel_members or {}
+    commute_months = commute_months or {}
     manual_ids: set = set()
     for _d in manual.values():
         manual_ids |= set(_d or {})
 
     rows: list[dict] = []
     warnings: list[str] = []
+    cuts: list[dict] = []
     for emp_id in sorted(set(by_id) | manual_ids):
         if not in_company_scope(emp_id):
             continue
         v = by_id.get(emp_id) or [0.0] * 7
         name = emp_names.get(emp_id) or roster_names.get(emp_id, "")
+        trans = int(v[B_TRANS])
+        if commute_limit:
+            trans = _apply_commute_limit(
+                emp_id, name, trans, commute_by_id, commute_other_by_id,
+                commute_limit, limit_exempt, travel_members,
+                commute_months.get(emp_id) or set(), cuts, warnings)
         row = {
             "社員番号": emp_id,
             "氏名": name,
             "夜間当番手当": int(v[B_YAKAN] + v[B_RINK]),   # F列相当（夜間＋RINK）
-            "非課税通勤費": int(v[B_TRANS]),
+            "非課税通勤費": trans,
             "立替金（顧客請求分）": int(v[B_BILL]),
             "立替金": int(v[B_NONTAX]),
             "その他": int(v[B_ETC]),
@@ -302,7 +326,52 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
         if in_company_scope(emp_id) and roster_names and emp_id not in roster_names:
             warnings.append(
                 f"⚠️ イレギュラー経費: 社員番号 {emp_id} が在籍者一覧にありません（入力ミスの可能性）。")
-    return rows, warnings
+    if cuts:
+        total = sum(c["カット額"] for c in cuts)
+        warnings.insert(0, f"✂️ 通勤費の上限カット: {len(cuts)}名 / 計 {total:,}円 を減額しました。"
+                           f"投入前に下の明細を必ず確認してください。")
+    return rows, warnings, cuts
+
+
+def _apply_commute_limit(emp_id: str, name: str, trans: int,
+                         commute_by_id: dict, commute_other_by_id: dict,
+                         limit: int, limit_exempt: dict, travel_members: dict,
+                         months: set, cuts: list, warnings: list) -> int:
+    """非課税通勤費に月額上限を適用した金額を返す（対象外ならそのまま返す）。"""
+    commute = int(round(commute_by_id.get(emp_id, 0)))
+    other = int(round(commute_other_by_id.get(emp_id, 0)))
+    if commute <= limit:
+        return trans
+    if len(months) > 1:
+        # 定期代を複数月分まとめて申請している。合計は上限超過でも月ごとなら
+        # 上限内のことがあり、切ると過少支給になる。自動では切らず人が判断する。
+        warnings.append(
+            f"⚠️ {emp_id} {name}: 通勤費 {commute:,}円 が上限超過ですが、利用日が "
+            f"{'・'.join(sorted(months))} の {len(months)}か月分に分かれています。"
+            f"月ごとなら上限内の可能性があるため**自動ではカットしていません**。"
+            f"1か月分だけを当月に計上すべきかを確認してください。")
+        return trans
+    if emp_id in travel_members:
+        warnings.append(f"ℹ️ {emp_id} {name}: 通勤費 {commute:,}円 は上限超過ですが、"
+                        f"移動交通費（立替精算）対象者のためカットしていません。")
+        return trans
+    if emp_id in limit_exempt:
+        warnings.append(f"ℹ️ {emp_id} {name}: 通勤費 {commute:,}円 は上限超過ですが、"
+                        f"上限免除者のためカットしていません。")
+        return trans
+    # 交通費(H) と通勤費分がズレる＝Hに通勤系と判定できない金額が混ざっている。
+    # その分は上限の対象外として残す（切りすぎて過少支給にしない）。
+    cut = commute - limit
+    after = trans - cut
+    cuts.append({
+        "社員番号": emp_id, "氏名": name,
+        "交通費(H)": trans, "うち通勤費": commute, "うち上限対象外": other,
+        "上限": limit, "カット額": cut, "カット後": after,
+    })
+    if other:
+        warnings.append(f"ℹ️ {emp_id} {name}: 交通費(H) のうち {other:,}円 は通勤系と判定できないため"
+                        f"（駐車場代など）上限の対象外として残しました。")
+    return after
 
 
 def _escape_csv(s: str) -> str:

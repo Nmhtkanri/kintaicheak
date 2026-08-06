@@ -593,6 +593,62 @@ def add_log_sheet(wb: Workbook, entries: list) -> None:
 # オーケストレータ（keihi_summary.run_keihi_integration から呼ばれる）
 # ----------------------------------------------------------------------
 
+# 交通費(H)のうち「通勤費」として上限3万円の対象になるキーワード（2026-08-06 谷津さん確認）。
+# H には駐車場・ガソリン等も入り得るので、**通勤系だと確信できるものだけ**を上限の対象にする。
+# ここに無いキーワードは切らない（＝取りこぼしても過少支給にならない側に倒す）。
+COMMUTE_LIMIT_KEYWORDS = frozenset({
+    "通勤交通費（実費）", "通勤定期代", "定期代", "定期券", "日ごとの通勤費",
+})
+
+
+COL_USE_DATE = 5   # 利用日(yyyy/mm/dd)
+_RE_YM = re.compile(r"(\d{4})[/\-年](\d{1,2})")
+
+
+def _use_month(value) -> str:
+    """利用日セルから 'YYYY-MM' を取り出す（読めなければ空文字）。"""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (datetime, date)):
+        return f"{value.year}-{value.month:02d}"
+    m = _RE_YM.match(str(value).strip())
+    return f"{m.group(1)}-{int(m.group(2)):02d}" if m else ""
+
+
+def commute_totals_from_log(cls_result: "ClassifyResult",
+                            integrated_rows: "list | None" = None,
+                            ) -> tuple[dict, dict, dict]:
+    """分類ログから、社員別の「交通費(H)のうち通勤費分 / それ以外 / 利用月の集合」を返す。
+
+    バケットの値そのものには触れない（マクロとの全行一致検証を壊さないため）。
+    上限カットの判定材料としてだけ使う。非通勤分は駐車場代など上限の対象外として
+    素通しさせるために持つ。
+
+    利用月は**上限を月額として掛けてよいかの判定**に要る。定期代を2か月分まとめて
+    申請する人がいて（2026-08 吉田拓矢さん＝7月分と8月分の各20,250円）、合算すると
+    上限超過に見えるが月ごとなら上限内。切ると過少支給になるので呼び出し側で警告する。
+    """
+    commute: dict = {}
+    other: dict = {}
+    months: dict = {}
+    rows = integrated_rows or []
+    for e in cls_result.log:
+        if not e.emp_no or not str(e.result or "").startswith("H:交通費"):
+            continue
+        amt = float(e.amount or 0)
+        is_commute = str(e.matched_kw or "") in COMMUTE_LIMIT_KEYWORDS
+        tgt = commute if is_commute else other
+        tgt[e.emp_no] = tgt.get(e.emp_no, 0.0) + amt
+        # row_no は統合一覧表の行番号（ヘッダーを除いた rows では row_no-2）
+        idx = e.row_no - 2
+        if is_commute and 0 <= idx < len(rows):
+            row = rows[idx]
+            ym = _use_month(row[COL_USE_DATE]) if len(row) > COL_USE_DATE else ""
+            if ym:
+                months.setdefault(e.emp_no, set()).add(ym)
+    return commute, other, months
+
+
 def classify_and_summarize(
     integrated_rows: list[list[str]],
     wb: Workbook,
@@ -609,4 +665,6 @@ def classify_and_summarize(
     stats["log_rows"] = len(cls.log)
     stats["_agg"] = agg           # 後段（インポート行生成）用
     stats["_emp_names"] = cls.emp_names
+    (stats["_commute"], stats["_commute_other"],
+     stats["_commute_months"]) = commute_totals_from_log(cls, integrated_rows)
     return stats

@@ -1938,6 +1938,7 @@ def route_expense_integration():
         "import_csv_name": result.import_csv_name or None,
         "import_preview": result.import_preview,
         "import_warnings": result.import_warnings,
+        "commute_cuts": result.commute_cuts,
         "stats": {
             "integrated_rows": result.integrated_rows,
             "source_counts": result.source_counts,

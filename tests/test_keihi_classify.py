@@ -296,7 +296,7 @@ def test_build_import_rows_mapping():
         "2026013": [2500.0, 1000.0, 5000.0, 300.0, 400.0, 8990.0, 1160.0],
         "5000001": [1.0, 0, 0, 0, 0, 0, 0],   # 対象外
     }
-    rows, warnings = build_import_rows(by_id, {"2026013": "川口 祐ノ輔"})
+    rows, warnings, _ = build_import_rows(by_id, {"2026013": "川口 祐ノ輔"})
     assert len(rows) == 1
     r = rows[0]
     assert r["夜間当番手当"] == 3500            # D+E（F列相当。live集計R/S実測に基づく）
@@ -309,8 +309,103 @@ def test_build_import_rows_mapping():
     assert r["テレワーク手当"] == 400           # K（テンプレにテレワーク手当列があれば搬送される）
 
 
+# ----------------------------------------------------------------------
+# 通勤費の月額上限カット（2026-08-06）
+# ----------------------------------------------------------------------
+
+def _by_id(trans):
+    """交通費(H)だけ入った集計を作る。"""
+    return {"2014013": [0, 0, float(trans), 0, 0, 0, 0]}
+
+
+def test_commute_limit_cuts_only_the_commute_portion():
+    """上限を超えた分だけ減らす。同じ交通費(H)の駐車場代などは切らない。"""
+    # 交通費(H)=37,660 の内訳: 通勤費35,090 + 駐車場2,570
+    rows, warns, cuts = build_import_rows(
+        _by_id(37660), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 35090.0}, commute_other_by_id={"2014013": 2570.0},
+        commute_limit=30000)
+
+    # 30,000 + 上限対象外2,570 = 32,570（切ったのは 5,090 だけ）
+    assert rows[0]["非課税通勤費"] == 32570
+    assert len(cuts) == 1
+    assert (cuts[0]["カット額"], cuts[0]["うち通勤費"], cuts[0]["うち上限対象外"]) == (5090, 35090, 2570)
+    assert any("上限カット" in w for w in warns)
+    assert any("通勤系と判定できない" in w for w in warns)
+
+
+def test_commute_limit_leaves_amounts_within_the_limit_untouched():
+    rows, warns, cuts = build_import_rows(
+        _by_id(29999), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 29999.0}, commute_limit=30000)
+    assert rows[0]["非課税通勤費"] == 29999
+    assert cuts == [] and warns == []
+
+
+def test_commute_limit_skips_exempt_members_and_travel_members():
+    """免除者と移動交通費対象者は切らない。ただし黙って通さず理由を出す。"""
+    for kwargs, kw in (({"limit_exempt": {"2014013": "個別許可"}}, "上限免除者"),
+                       ({"travel_members": {"2014013": "柴田 和浩"}}, "移動交通費")):
+        rows, warns, cuts = build_import_rows(
+            _by_id(35090), {"2014013": "柴田 和浩"},
+            commute_by_id={"2014013": 35090.0}, commute_limit=30000, **kwargs)
+        assert rows[0]["非課税通勤費"] == 35090
+        assert cuts == []
+        assert any(kw in w for w in warns), f"{kw} の理由が出ていません"
+
+
+def test_commute_limit_is_off_when_no_limit_given():
+    """上限未指定なら従来どおり素通し（既存の動作を変えない）。"""
+    rows, _, cuts = build_import_rows(
+        _by_id(35090), {"2014013": "柴田 和浩"}, commute_by_id={"2014013": 35090.0})
+    assert rows[0]["非課税通勤費"] == 35090 and cuts == []
+
+
+def test_commute_totals_from_log_splits_commute_and_other():
+    """交通費(H)のうち通勤系KWだけを上限対象として数える。"""
+    from services.keihi_classify import LogEntry, ClassifyResult, commute_totals_from_log
+    cls = ClassifyResult()
+    cls.log = [
+        LogEntry(2, "2014013", "柴田和浩", "", 35090.0, "H:交通費", "定期代"),
+        LogEntry(3, "2021008", "野田祐介", "", 1800.0, "H:交通費", "駐車場"),
+        LogEntry(4, "2021008", "野田祐介", "", 2736.0, "H:交通費", "通勤交通費（実費）"),
+        LogEntry(5, "2014013", "柴田和浩", "", 9999.0, "I:非課税精算", "交通費（電車・バス）"),
+    ]
+    commute, other, _ = commute_totals_from_log(cls)
+    assert commute == {"2014013": 35090.0, "2021008": 2736.0}   # I:非課税精算 は入らない
+    assert other == {"2021008": 1800.0}
+
+
+def test_commute_totals_from_log_collects_use_months():
+    """定期代を2か月分まとめて申請している人を見分けるため利用月を集める。"""
+    from services.keihi_classify import LogEntry, ClassifyResult, commute_totals_from_log
+    cls = ClassifyResult()
+    cls.log = [
+        LogEntry(2, "2025007", "吉田拓矢", "", 20250.0, "H:交通費", "定期代"),
+        LogEntry(3, "2025007", "吉田拓矢", "", 20250.0, "H:交通費", "定期代"),
+    ]
+    rows = [
+        ["2025007", "吉田 拓矢", "2026/8/2", "", "", "2026/7/1"],
+        ["2025007", "吉田 拓矢", "2026/8/2", "", "", "2026/8/1"],
+    ]
+    _, _, months = commute_totals_from_log(cls, rows)
+    assert months == {"2025007": {"2026-07", "2026-08"}}
+
+
+def test_commute_limit_does_not_cut_when_spanning_multiple_months():
+    """2か月分まとめての申請は月ごとなら上限内かもしれないので自動で切らない。"""
+    rows, warns, cuts = build_import_rows(
+        {"2025007": [0, 0, 40500.0, 0, 0, 0, 0]}, {"2025007": "吉田 拓矢"},
+        commute_by_id={"2025007": 40500.0}, commute_limit=30000,
+        commute_months={"2025007": {"2026-07", "2026-08"}})
+
+    assert rows[0]["非課税通勤費"] == 40500     # 切らない（過少支給を避ける）
+    assert cuts == []
+    assert any("2か月分" in w and "カットしていません" in w for w in warns)
+
+
 def test_render_import_csv_sjis_and_quoting():
-    rows, _ = build_import_rows({"2026013": [0, 0, 100.0, 0, 0, 0, 0]}, {"2026013": "川口 祐ノ輔"})
+    rows, _, _ = build_import_rows({"2026013": [0, 0, 100.0, 0, 0, 0, 0]}, {"2026013": "川口 祐ノ輔"})
     data = render_import_csv(rows)
     text = data.decode("cp932")
     lines = text.strip().split("\r\n")
@@ -328,7 +423,7 @@ def test_render_import_csv_follows_template_positions():
     tpl = ["*社員番号", "", "", "夜間当番手当", "", "",
            "立替金（顧客請求分）", "非課税通勤費", "その他", "テレワーク手当"]
     # by_id: [夜間, RINK, 交通費(→非課税通勤費), その他, テレワーク, 顧客請求, 非課税精算(→立替金)]
-    rows, _ = build_import_rows(
+    rows, _, _ = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"})
     data = render_import_csv(rows, tpl).decode("cp932")
     line = data.strip().split("\r\n")[1].split(",")
@@ -353,7 +448,7 @@ def test_render_import_csv_template_44450_covers_all():
     tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
            "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給"]
     # 川口: 夜間当番30000 + 立替金(非課税精算)12177
-    rows, _ = build_import_rows(
+    rows, _, _ = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"})
     line = render_import_csv(rows, tpl).decode("cp932").strip().split("\r\n")[1].split(",")
     assert line[0] == '"2026013"'
@@ -396,7 +491,7 @@ def test_parse_manual_allowances_errors_and_scope():
 
 def test_build_import_rows_with_manual_allowances():
     """手入力の定常外/その他手当が行に乗り、手当だけの社員も行が出る（計上漏れ防止）。"""
-    rows, warns = build_import_rows(
+    rows, warns, _ = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]},
         {"2026013": "川口 祐ノ輔"},
         roster_names={"2026013": "川口 祐ノ輔", "2024050": "加藤 英人"},
@@ -420,7 +515,7 @@ def test_build_import_rows_with_manual_allowances():
 
 def test_build_import_rows_manual_allowance_unknown_id_warns():
     """在籍者一覧に無い社員番号は入力ミスの可能性として警告（行は出す）。"""
-    rows, warns = build_import_rows(
+    rows, warns, _ = build_import_rows(
         {}, {}, roster_names={"2026013": "川口 祐ノ輔"},
         manual={"定常外業務対応手当": {"2029999": 1000}})
     assert [r["社員番号"] for r in rows] == ["2029999"]
@@ -505,7 +600,7 @@ def test_load_irregular_file_undetectable_header(tmp_path):
 
 def test_build_import_rows_genbutsu_and_kabusoku():
     """現物支給・支給過不足調整が行に乗る（調整だけの社員も行が出る）。"""
-    rows, warns = build_import_rows(
+    rows, warns, _ = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]},
         {"2026013": "川口 祐ノ輔"},
         roster_names={"2026013": "川口 祐ノ輔", "2026012": "橘 伸俊"},
@@ -525,7 +620,7 @@ def test_shaho_chosei_missing_column_warns():
     from services.keihi_payroll_import import check_template_coverage
     tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
            "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給"]
-    rows, _ = build_import_rows({}, {}, manual={"社保調整": {"2026013": 2000}})
+    rows, _, _ = build_import_rows({}, {}, manual={"社保調整": {"2026013": 2000}})
     cov = check_template_coverage(rows, tpl)
     assert any("社保調整" in w and "2,000" in w for w in cov)
 
@@ -535,7 +630,7 @@ def test_render_csv_all_manual_items_on_template_44450():
     tpl = ["*社員番号", "", "夜間当番手当", "定常外業務対応手当", "支給過不足調整",
            "非課税通勤費", "立替金（顧客請求分）", "立替金", "その他", "その他手当", "現物支給",
            "社保調整"]
-    rows, _ = build_import_rows(
+    rows, _, _ = build_import_rows(
         {"2026013": [30000.0, 0, 0, 0, 0, 0, 12177.0]}, {"2026013": "川口 祐ノ輔"},
         manual={"定常外業務対応手当": {"2026013": 15000},
                 "その他手当": {"2026013": 5000},
