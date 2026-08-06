@@ -1852,6 +1852,12 @@ def route_expense_integration():
         irregular_path = _Path(irregular_str)
         if not irregular_path.exists():
             errors.append(f"イレギュラー経費の一括取込ファイルが見つかりません: {irregular_path}")
+        elif irregular_path.is_dir():
+            # フォルダを open() すると Windows は PermissionError（Errno 13）を返すため、
+            # 「アクセス権が無い」と誤解される前に指定違いであることを伝える。
+            errors.append(
+                "イレギュラー経費の一括取込は、フォルダではなくファイル（CSV/xlsx）を指定してください"
+                f"（使わない場合は空欄のままで構いません）: {irregular_path}")
         else:
             try:
                 file_items, file_errs = load_irregular_file(irregular_path)

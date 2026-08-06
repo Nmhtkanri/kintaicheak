@@ -43,6 +43,10 @@ KIND_TRAVEL = ("交通費（電車・バス）", "交通費（特急・新幹線
 MAX_COMBO_LEGS = 12          # 経路数がこれを超える人は部分集合の全探索をしない
 MIN_DAYS_FOR_DOMINANCE = 3   # 実費申請がこの日数未満だと常用経路を判定できない
 
+# 通勤費（定期代＋実費）の月額上限。移動交通費（KIND_TRAVEL）には適用しない。
+# 既定値は Config.KOTSUHI_MONTHLY_LIMIT から渡される。
+COMMUTE_MONTHLY_LIMIT = 30000
+
 HDR_FILL = PatternFill("solid", fgColor="1F4E78")
 HDR_FONT = Font(color="FFFFFF", bold=True, size=10)
 NG_FILL = PatternFill("solid", fgColor="FCE4E4")     # 要確認
@@ -72,12 +76,11 @@ def norm_station(value) -> str:
     return s.replace("　", "").replace(" ", "")
 
 
-def load_excluded_members(path: Path | None) -> dict[str, str]:
-    """通勤費の精査対象外リストを読み {社員番号: 理由} を返す。
+def _load_member_reason_csv(path: Path | None) -> dict[str, str]:
+    """「社員番号, 氏名, 理由」形式の名簿CSVを読み {社員番号: 理由} を返す。
 
-    勤怠データからは判別できない事情で通勤費が発生しない人を落とすための表。
-    全テレワークでも勤怠上テレワーク0で登録されている人がいるので、
-    条件式では拾えず明示リストが要る。理由も持たせて根拠を残す。
+    谷津さんが直す運用ファイルなので exe に同梱せず共有フォルダを読む。
+    無い・壊れている場合は空 dict を返し、精査そのものは止めない。
     """
     if not path or not path.exists():
         return {}
@@ -95,6 +98,26 @@ def load_excluded_members(path: Path | None) -> dict[str, str]:
         if row and row[0].strip():
             out[row[0].strip()] = (row[2].strip() if len(row) > 2 else "")
     return out
+
+
+def load_excluded_members(path: Path | None) -> dict[str, str]:
+    """通勤費の精査対象外リストを読み {社員番号: 理由} を返す。
+
+    勤怠データからは判別できない事情で通勤費が発生しない人を落とすための表。
+    全テレワークでも勤怠上テレワーク0で登録されている人がいるので、
+    条件式では拾えず明示リストが要る。理由も持たせて根拠を残す。
+    """
+    return _load_member_reason_csv(path)
+
+
+def load_limit_exempt_members(path: Path | None) -> dict[str, str]:
+    """通勤費の上限免除者リストを読み {社員番号: 理由} を返す。
+
+    通勤費は月 COMMUTE_MONTHLY_LIMIT 円が上限で超過分は基本的に切るが、
+    個別に実費全額を認めている人がいる（2026-08-06 谷津さん指定）。
+    金額からは判別できないので明示リストで持つ。
+    """
+    return _load_member_reason_csv(path)
 
 
 def is_company_employee(emp: str) -> bool:
@@ -290,6 +313,75 @@ def build_pass_rows(details, idx, master: CommuteMaster) -> list[dict]:
                 "経路判定": judge_route(acc["pairs"], master.leg_pairs(emp, "毎月")),
                 "申請経路": " / ".join(dict.fromkeys(acc["経路"])),
                 "マスタ経路": master.route_text(emp, "毎月"),
+                "説明": note,
+            }
+        )
+    return out
+
+
+def build_limit_over_rows(details, idx, exempt: dict[str, str],
+                          limit: int = COMMUTE_MONTHLY_LIMIT,
+                          travel_members: set[str] | None = None) -> list[dict]:
+    """通勤費（定期代＋実費）の月合計が上限を超えた人を洗い出す。
+
+    当社の通勤費は月3万円が上限で、超過分は基本的に切る。上限は定期代だけでなく
+    **実費の月累計にも掛かる**（2026-08-06 谷津さん確認）。移動交通費（立替精算）は
+    上限が無いので合算しない。
+
+    上限が掛からない人が2種類いるので、どちらも OK 扱いにして理由を書き分ける。
+      - 上限免除者リストの人 … 会社が個別に実費全額を認めている
+      - 移動交通費（立替精算）対象者 … 通勤費ではなく立替精算で計上する人。
+        jinjer 上は通勤系で申請されるので、金額だけでは判別できない
+        （2026-08 山田大海さんがこれで要確認に挙がった）
+    **どちらのリストにも無いのに超過している人だけ**を要確認に落とす
+    （＝上限を切り忘れて満額払ってしまう事故の検知が目的）。
+
+    定期代は分割申請、実費は日ごとの複数明細で出てくるので、どちらも人単位で
+    合算してから判定する。
+    """
+    travel_members = travel_members or set()
+    per = defaultdict(lambda: {"定期": 0, "実費": 0, "申請書": set()})
+    for r in details:
+        kind = r[idx["交通機関"]]
+        if kind not in (KIND_PASS, KIND_ACTUAL) or r[idx["ステータス"]] not in ACTIVE_STATUS:
+            continue
+        emp = r[idx["社員番号"]]
+        if not is_company_employee(emp):
+            continue
+        acc = per[(emp, r[idx["申請者"]], r[idx["所属グループ"]])]
+        acc["定期" if kind == KIND_PASS else "実費"] += to_int(r[idx["小計"]])
+        acc["申請書"].add(r[idx["申請書No."]])
+
+    hint = "免除リストに無いので切るか、許可済みなら docs の 通勤費_上限免除者.csv に追加してください"
+    out = []
+    for (emp, name, group), acc in sorted(per.items()):
+        total = acc["定期"] + acc["実費"]
+        if total <= limit:
+            continue
+        reason = exempt.get(emp)
+        is_travel = emp in travel_members
+        is_exempt = emp in exempt or is_travel
+        if is_travel:
+            note = "移動交通費（立替精算）対象者。通勤費ではなく立替精算で計上するため上限なし"
+        elif reason:
+            note = "上限免除者。" + reason
+        elif is_exempt:
+            note = "上限免除者（実費全額）"
+        else:
+            note = f"上限 {limit:,}円 を {total - limit:,}円 超過。" + hint
+        out.append(
+            {
+                "社員番号": emp,
+                "氏名": name,
+                "所属グループ": group,
+                "申請書No.": ", ".join(sorted(acc["申請書"])),
+                "通勤費合計": total,
+                "うち定期代": acc["定期"],
+                "うち実費": acc["実費"],
+                "上限": limit,
+                "超過額": total - limit,
+                "上限免除": "○" if is_exempt else "",
+                "区分": "OK" if is_exempt else "要確認",
                 "説明": note,
             }
         )
@@ -886,7 +978,8 @@ def write_sheet(wb, title: str, rows: list[dict], columns: list[str], widths: di
             if fill:
                 cell.fill = fill
             if columns[c - 1] in ("申請額(合計)", "申請額(日計)", "マスタ支給額", "マスタ日額",
-                                  "差額", "金額合計", "金額", "小計"):
+                                  "差額", "金額合計", "金額", "小計",
+                                  "通勤費合計", "うち定期代", "うち実費", "上限", "超過額"):
                 cell.number_format = "#,##0"
 
     ws.freeze_panes = "A2"
@@ -1055,7 +1148,8 @@ def read_previous_keys(path: Path) -> dict[str, set[str]]:
         return {}
     out: dict[str, set[str]] = {}
     try:
-        for sheet in ("通勤費申請なし", "マスタ更新漏れ", "定期代突合", "実費突合", "移動交通費"):
+        for sheet in ("通勤費申請なし", "マスタ更新漏れ", "定期代突合", "実費突合",
+                      "通勤費上限超過", "移動交通費"):
             if sheet not in wb.sheetnames:
                 continue
             ws = wb[sheet]
@@ -1100,7 +1194,9 @@ def apply_diff(sheet: str, rows: list[dict], prev: dict[str, set[str]],
 
 def main(csv_path: Path, check_path: Path, out_path: Path,
          target_list: Path | None = None, target_ym: str = "2026-07",
-         excluded_list: Path | None = None):
+         excluded_list: Path | None = None,
+         limit_exempt_list: Path | None = None,
+         monthly_limit: int = COMMUTE_MONTHLY_LIMIT):
     header, all_details = read_cp932_csv(csv_path)
     names = ["ステータス", "交通機関", "社員番号", "申請者", "所属グループ", "申請書No.",
              "明細No.", "利用日", "金額", "往復", "小計", "乗車場所", "降車場所", "経路", "目的地"]
@@ -1133,9 +1229,11 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
                 target_ids.add(row[0].strip())
 
     excluded = load_excluded_members(excluded_list)
+    limit_exempt = load_limit_exempt_members(limit_exempt_list)
 
     pass_rows = build_pass_rows(details, idx, master)
     actual_rows = build_actual_rows(details, idx, master, workdays)
+    limit_rows = build_limit_over_rows(details, idx, limit_exempt, monthly_limit, target_ids)
     travel_rows, travel_details = build_travel_rows(details, idx, target_ids)
     gap_rows, stock_rows = build_master_gap_rows(details, idx, master, workdays, pass_rows, actual_rows, excluded)
     no_commute_rows = build_no_commute_rows(details, idx, master, workdays, target_ids, excluded)
@@ -1147,8 +1245,10 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
     resolved += apply_diff("マスタ更新漏れ", gap_rows, prev)
     resolved += apply_diff("定期代突合", pass_rows, prev)
     resolved += apply_diff("実費突合", actual_rows, prev)
+    resolved += apply_diff("通勤費上限超過", limit_rows, prev)
     resolved += apply_diff("移動交通費", travel_rows, prev)
-    new_count = sum(1 for rows in (no_commute_rows, gap_rows, pass_rows, actual_rows, travel_rows)
+    new_count = sum(1 for rows in (no_commute_rows, gap_rows, pass_rows, actual_rows,
+                                   limit_rows, travel_rows)
                     for r in rows if r.get("前回比") == "新規")
 
     wb = openpyxl.Workbook()
@@ -1172,6 +1272,10 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
                 ["社員番号", "氏名", "所属グループ", "利用日", "ステータス", "申請書No.", "明細件数",
                  "申請額(日計)", "マスタ日額", "差額", "判定", "区分", "前回比", "経路判定",
                  "申請日数/出社日数", "テレワーク重複", "申請経路", "マスタ経路", "説明"])
+    write_sheet(wb, "通勤費上限超過", limit_rows,
+                ["社員番号", "氏名", "所属グループ", "申請書No.", "通勤費合計", "うち定期代",
+                 "うち実費", "上限", "超過額", "上限免除", "区分", "前回比", "説明"],
+                {"説明": 62, "上限免除": 9})
     write_sheet(wb, "移動交通費", travel_rows,
                 ["社員番号", "氏名", "所属グループ", "明細件数", "利用日数", "金額合計",
                  "対象者リスト", "区分", "前回比", "説明"])
@@ -1197,6 +1301,13 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
         "通勤費マスタ": f"{len(master.rows)}名 / {sum(len(v) for v in master.rows.values())}経路",
         "マスタ対象外(合計行・非20YY番号)": "、".join(master.skipped) or "なし",
         "精査対象外リスト": f"{len(excluded)}名（docs\通勤費_精査対象外者.csv）" if excluded else "なし",
+        "通勤費の上限": f"月 {monthly_limit:,}円（移動交通費は対象外）",
+        "上限免除リスト": (f"{len(limit_exempt)}名（docs\通勤費_上限免除者.csv）"
+                     if limit_exempt else "なし（リスト未配置＝超過者は全員 要確認になります）"),
+        "上限超過": (f"{len(limit_rows)}名（うち免除 "
+                 f"{sum(1 for r in limit_rows if r['上限免除'])}名 / "
+                 f"要確認 {sum(1 for r in limit_rows if r['区分'] == '要確認')}名）"
+                 if limit_rows else "なし"),
     })
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1262,11 +1373,18 @@ def run_pre_approval_review(
         if getattr(Config, "KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV", "") else None
     excluded_csv = Path(getattr(Config, "KOTSUHI_EXCLUDED_MEMBERS_CSV", "")) \
         if getattr(Config, "KOTSUHI_EXCLUDED_MEMBERS_CSV", "") else None
+    exempt_csv = Path(getattr(Config, "KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV", "")) \
+        if getattr(Config, "KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV", "") else None
+    monthly_limit = int(getattr(Config, "KOTSUHI_MONTHLY_LIMIT", COMMUTE_MONTHLY_LIMIT))
+    if exempt_csv and not exempt_csv.exists():
+        # 上限超過の判定自体は続ける。免除者が全員 要確認 に出るので気づける。
+        log_func(f"[warn] 通勤費の上限免除者リストが見つかりません（免除なしで続行）: {exempt_csv}")
 
     try:
         out, pass_rows, actual_rows, travel_rows, mail_path, mail_rows = main(
             csv_path, check_xlsx, output_path,
             target_list=travel_csv, target_ym=month, excluded_list=excluded_csv,
+            limit_exempt_list=exempt_csv, monthly_limit=monthly_limit,
         )
     except Exception as e:  # noqa: BLE001
         log_func(f"[error] 精査に失敗しました: {e}")
@@ -1276,7 +1394,8 @@ def run_pre_approval_review(
     wb = openpyxl.load_workbook(out, data_only=True, read_only=True)
     try:
         flagged = {}
-        for sheet in ("通勤費申請なし", "マスタ更新漏れ", "定期代突合", "実費突合", "移動交通費"):
+        for sheet in ("通勤費申請なし", "マスタ更新漏れ", "定期代突合", "実費突合",
+                      "通勤費上限超過", "移動交通費"):
             if sheet not in wb.sheetnames:
                 continue
             rows = list(wb[sheet].iter_rows(values_only=True))

@@ -142,6 +142,15 @@ class Config:
     KOTSUHI_EXCLUDED_MEMBERS_CSV = os.environ.get(
         "KOTSUHI_EXCLUDED_MEMBERS_CSV", r"Z:\API連携\docs\通勤費_精査対象外者.csv")
 
+    # 通勤費の月額上限と、上限を適用しない免除者リスト（社員番号,氏名,理由）。
+    # 当社の通勤費は月3万円が上限で、超えた分は基本的に切る。ただし個別に実費全額を
+    # 認めている人がいるため明示リストで持つ（2026-08-06 谷津さん指定）。
+    # 移動交通費（立替精算）には上限が無いので、この判定には含めない。
+    # 共有フォルダを読むので、対象者が増えても exe 再ビルドなしで反映される。
+    KOTSUHI_MONTHLY_LIMIT = int(os.environ.get("KOTSUHI_MONTHLY_LIMIT", "30000"))
+    KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV = os.environ.get(
+        "KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV", r"Z:\API連携\docs\通勤費_上限免除者.csv")
+
     # ------------------------------------------------------------------
     # メール下書きモード（Outlook 下書きの一括作成。送信機能は作らない）
     # ------------------------------------------------------------------

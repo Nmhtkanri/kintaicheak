@@ -8,8 +8,10 @@ import pytest
 
 from services.kotsuhi_seisa import (
     apply_diff,
+    build_limit_over_rows,
     build_workdays,
     is_company_employee,
+    load_limit_exempt_members,
     read_previous_keys,
     row_key,
 )
@@ -143,3 +145,90 @@ def test_build_workdays_uses_cached_values_when_present():
 ])
 def test_is_company_employee(emp, expected):
     assert is_company_employee(emp) is expected
+
+
+# ----------------------------------------------------------------------
+# 通勤費の上限（月3万円）超過の検出
+# ----------------------------------------------------------------------
+
+LIMIT_IDX = {"交通機関": 0, "ステータス": 1, "社員番号": 2, "申請者": 3,
+             "所属グループ": 4, "申請書No.": 5, "小計": 6}
+
+
+def _row(kind, emp, name, amount, no="1", status="承認完了", group="UAL 平和島"):
+    return [kind, status, emp, name, group, no, amount]
+
+
+def test_limit_over_flags_only_people_missing_from_the_exempt_list():
+    """許可者はOK、リストに無い人だけ要確認（＝上限の切り忘れ検知）。"""
+    details = [
+        _row("通勤定期代", "2014013", "柴田 和浩", "35090"),   # 許可なしで超過
+        _row("通勤定期代", "2025029", "奥山 昌苗", "34350"),   # 許可あり
+        _row("通勤定期代", "2026006", "大村 賢治", "30000"),   # 上限ちょうど＝対象外
+    ]
+    rows = build_limit_over_rows(details, LIMIT_IDX, {"2025029": "個別許可"}, limit=30000)
+
+    by = {r["社員番号"]: r for r in rows}
+    assert set(by) == {"2014013", "2025029"}        # 30,000ちょうどは挙がらない
+    assert by["2014013"]["区分"] == "要確認"
+    assert by["2014013"]["超過額"] == 5090
+    assert by["2014013"]["上限免除"] == ""
+    assert by["2025029"]["区分"] == "OK"
+    assert by["2025029"]["上限免除"] == "○"
+    assert "個別許可" in by["2025029"]["説明"]
+
+
+def test_limit_over_treats_travel_expense_members_as_no_limit():
+    """移動交通費（立替精算）対象者は通勤系で申請されていても上限が掛からない。
+
+    2026-08 の山田大海さん（実費51,067円）がこれで要確認に挙がった。金額からは
+    判別できないので、対象者リストを見に行かないと毎月ここで引っかかる。
+    """
+    details = [
+        _row("通勤交通費（実費）", "2025033", "山田 大海", "51067"),
+        _row("通勤交通費（実費）", "2018001", "有田 功太郎", "31832"),
+    ]
+    rows = build_limit_over_rows(details, LIMIT_IDX, {}, limit=30000,
+                                 travel_members={"2025033"})
+
+    by = {r["社員番号"]: r for r in rows}
+    assert by["2025033"]["区分"] == "OK"
+    assert by["2025033"]["上限免除"] == "○"
+    assert "移動交通費" in by["2025033"]["説明"]
+    assert by["2018001"]["区分"] == "要確認"       # リストに無い人はこれまでどおり
+
+
+def test_limit_over_sums_split_applications_and_ignores_travel_expense():
+    """定期代の分割申請は合算し、移動交通費（上限なし）は混ぜない。"""
+    details = [
+        _row("通勤定期代", "2021020", "稲場 直哉", "16000", no="1"),
+        _row("通勤交通費（実費）", "2021020", "稲場 直哉", "16070", no="2"),
+        # 移動交通費は何円あっても上限判定に入れない
+        _row("交通費（電車・バス）", "2021020", "稲場 直哉", "99999", no="3"),
+        _row("交通費（電車・バス）", "2019048", "阿部 涼平", "80000", no="4"),
+    ]
+    rows = build_limit_over_rows(details, LIMIT_IDX, {}, limit=30000)
+
+    assert [r["社員番号"] for r in rows] == ["2021020"]
+    got = rows[0]
+    assert (got["通勤費合計"], got["うち定期代"], got["うち実費"]) == (32070, 16000, 16070)
+    assert got["申請書No."] == "1, 2"
+
+
+def test_limit_over_skips_withdrawn_applications_and_non_employees():
+    details = [
+        _row("通勤定期代", "2014013", "柴田 和浩", "35090", status="取下げ"),
+        _row("通勤定期代", "5000001", "派遣 太郎", "40000"),
+    ]
+    assert build_limit_over_rows(details, LIMIT_IDX, {}, limit=30000) == []
+
+
+def test_load_limit_exempt_members_reads_number_and_reason(tmp_path):
+    p = tmp_path / "通勤費_上限免除者.csv"
+    p.write_text("社員番号,氏名,理由\n2025017,杉原 司,個別許可\n\n", encoding="utf-8-sig")
+    assert load_limit_exempt_members(p) == {"2025017": "個別許可"}
+
+
+def test_load_limit_exempt_members_returns_empty_when_missing(tmp_path):
+    """リストが無くても精査は止めない（超過者が全員 要確認 に出るので気づける）。"""
+    assert load_limit_exempt_members(tmp_path / "ない.csv") == {}
