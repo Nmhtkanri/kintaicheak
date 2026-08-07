@@ -15,7 +15,8 @@ from services.keiri_engine import (GENBUTSU_KEY, KEIHI_TENKI_KEY, KYUSHOKU_BIKO,
                                    is_shaho_menjo_prev, jp_date, load_sonota_manual,
                                    master_skipped_report, save_sonota_manual, split_halves,
                                    split_shaho_chosei, ym_add)
-from services.keiri_keihi_tenki import MAPPING_CSV, classify, decompose, load_mapping
+from services.keiri_keihi_tenki import (MAPPING_CSV, classify, decompose, decompose_rows,
+                                        load_mapping)
 
 
 def _pi(kenpo=0, kaigo=0, kounen=0, kodomo=0):
@@ -155,6 +156,45 @@ class KeihiTenkiTests(unittest.TestCase):
         self.assertEqual(total, 550)
         self.assertEqual({k[0]: v for k, v in by_item.items()}, {"雑費": 550})
         self.assertIn("ほか4件", list(biko.values())[0])
+
+    def test_rows_split_kaigihi_per_detail(self):
+        """会議費は1明細=1行（2026-08 加藤2018012: 103,356 → 28,506＋74,850 の手修正を自動化）。"""
+        details = [("その他経費", 28506, "懇親会：岡野、金、野田、瀬川、加藤"),
+                   ("その他経費", 74850, "FE部懇親会（参加者：21名）"),
+                   ("その他経費", 4072, "熱中症対策費"), ("その他経費", 500, "熱中症対策の飲料購入")]
+        rows, reasons, total = decompose_rows(details, self.mapping)
+        self.assertEqual(total, 107928)
+        kaigi = [(amt, biko) for (item, _a, _t), amt, biko in rows if item == "会議接待費"]
+        self.assertEqual(kaigi, [(28506, "懇親会：岡野、金、野田、瀬川、加藤"),
+                                 (74850, "FE部懇親会（参加者：21名）")])
+        shomo = [(amt, biko) for (item, _a, _t), amt, biko in rows if item == "消耗品費"]
+        self.assertEqual(shomo, [(4572, "熱中症対策費 ほか1件")])   # 10万円以下は従来どおり合算
+        self.assertEqual(len(reasons), 4)
+
+    def test_rows_split_shomohin_over_100k_only(self):
+        """消耗品費は10万円を**超える明細だけ**独立行（合計が超えても1件ずつ下回るなら合算）。"""
+        details = [("工具代", 100001, "電動工具一式"),      # 10万円超 → 独立行
+                   ("工具代", 60000, "作業台"), ("工具代", 50000, "収納棚")]  # 合計11万でも各々は下回る
+        rows, _reasons, total = decompose_rows(details, self.mapping)
+        self.assertEqual(total, 210001)
+        shomo = [(amt, biko) for (item, _a, _t), amt, biko in rows if item == "消耗品費"]
+        self.assertEqual(shomo, [(110000, "作業台 ほか1件"), (100001, "電動工具一式")])
+
+    def test_rows_boundary_100k_is_aggregated(self):
+        """ちょうど10万円は「超える」に当たらないので合算のまま。"""
+        details = [("工具代", 100000, "高機能デスク"), ("工具代", 500, "ケーブル")]
+        rows, _reasons, _total = decompose_rows(details, self.mapping)
+        shomo = [(amt, biko) for (item, _a, _t), amt, biko in rows if item == "消耗品費"]
+        self.assertEqual(shomo, [(100500, "高機能デスク ほか1件")])
+
+    def test_rows_match_decompose_totals(self):
+        """分割しても合計は decompose と一致する（金額の取りこぼしなし）。"""
+        details = [("その他経費", 28506, "懇親会A"), ("その他経費", 74850, "懇親会B"),
+                   ("工具代", 150000, "大型モニタ"), ("郵便料金", 430, "")]
+        rows, _r1, total_r = decompose_rows(details, self.mapping)
+        by_item, _b, _r2, total_d = decompose(details, self.mapping)
+        self.assertEqual(total_r, total_d)
+        self.assertEqual(sum(amt for _k, amt, _b in rows), sum(by_item.values()))
 
 
 def _master(skipped_rows=(), active_n=38, total_n=185):

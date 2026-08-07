@@ -47,7 +47,7 @@ from services.keiri_api import (
     statement_flag,
     to_number,
 )
-from services.keiri_keihi_tenki import decompose as keihi_decompose
+from services.keiri_keihi_tenki import decompose_rows as keihi_decompose_rows
 from services.keiri_keihi_tenki import find_book as keihi_find_book
 from services.keiri_keihi_tenki import load_details as keihi_load_details
 from services.keiri_keihi_tenki import load_mapping as keihi_load_mapping
@@ -826,10 +826,11 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
                 det = keihi_details.get(emp, [])
                 det_total = sum(a for _u, a, _m in det)
                 if det and abs(det_total - v) < 0.5:
-                    by_item, biko, reasons, _t = keihi_decompose(det, keihi_mapping)
-                    for (item, account, tax), amt in sorted(by_item.items()):
-                        others.append(detail_row(account, tax, amt, item, bumon_p, name,
-                                                 biko.get((item, account, tax), "")))
+                    # 会議費は1明細=1行、消耗品費は10万円超の明細だけ独立行
+                    # （分割ルールは keiri_keihi_tenki.decompose_rows 参照）
+                    row_specs, reasons, _t = keihi_decompose_rows(det, keihi_mapping)
+                    for (item, account, tax), amt, biko in row_specs:
+                        others.append(detail_row(account, tax, amt, item, bumon_p, name, biko))
                     for d in reasons:
                         # 同額・同内訳の明細が複数あるので set にしない（合計が合わなくなる）
                         alerts["keihi_bunkai"].append((emp, name, d["内訳"], int(d["金額"]),
@@ -1343,7 +1344,9 @@ def build_yokakunin(month, alerts, master):
               "jinjer給与の「その他」(allowance52) を経費一覧表マクロの明細（集計ログの J:その他）から"
               "消耗品費／社員育成費／会議接待費／通信費／福利厚生費／雑費 に分解した。"
               "**品目の判定根拠を全件出すので目視で確認すること。**"
-              "備考はマクロ側の備考(明細)をそのまま入れているので、必要なら書き直すこと。", ""]
+              "備考はマクロ側の備考(明細)をそのまま入れているので、必要なら書き直すこと。"
+              "**会議費は申請（明細）ごとに1行**、**消耗品費は10万円を超える明細だけ独立行**にしている"
+              "（2026-08-07 経理担当の運用に合わせた）。", ""]
     if alerts["keihi_bunkai"]:
         lines += ["| 社員番号 | 氏名 | 内訳 | 金額 | 判定した品目 | 根拠 | 確度 |",
                   "|---|---|---|---|---|---|---|"]

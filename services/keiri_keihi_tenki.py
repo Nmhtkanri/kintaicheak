@@ -114,10 +114,58 @@ def load_details(book_path):
     return out
 
 
+# 1明細=1行で計上する勘定科目。会議費は懇親会ごとに参加者・件数が違い、合算すると
+# 経理が毎回手で行を割り直していた（2026-08-07 実例: 加藤2018012 の 103,356 を
+# 28,506＋74,850 の2行に手修正）。申請ごとに行を分けて備考も明細のものを残す。
+SPLIT_EACH_ACCOUNTS = ("会議費",)
+# 消耗品費はこの金額を**超える**明細だけ独立行にする。10万円超の消耗品は資産計上
+# （工具器具備品等）の検討対象になるため、合算に埋もれさせない。判定は明細1件ごと
+# （合計が10万円を超えても、1件ずつが下回るなら従来どおり合算する）。
+SHOMOHIN_ACCOUNT = "消耗品費"
+SHOMOHIN_SPLIT_OVER = 100000
+
+
+def decompose_rows(details, mapping):
+    """1人分の明細 → (行リスト, [判定根拠], 合計)。build_kyuyo が使う行の形。
+
+    行リスト: [((品目, 勘定科目, 税区分), 金額, 備考), ...]
+    基本は品目ごとに合算し、備考は代表1件＋件数。ただし
+      - 会議費は1明細=1行（SPLIT_EACH_ACCOUNTS）
+      - 消耗品費は10万円を超える明細だけ独立行（SHOMOHIN_SPLIT_OVER）
+    合算行（品目順）のあとに独立行（明細の並び順）が続く。
+    """
+    by_item = defaultdict(float)
+    memos = defaultdict(list)
+    singles = []
+    reasons = []
+    for uchiwake, amount, memo in details:
+        rule, why = classify(uchiwake, memo, mapping)
+        key = (rule["freee_item"], rule["freee_account"], rule["freee_tax"])
+        reasons.append({"内訳": uchiwake, "金額": amount, "備考": memo,
+                        "品目": rule["freee_item"], "根拠": why, "status": rule["status"]})
+        if (rule["freee_account"] in SPLIT_EACH_ACCOUNTS
+                or (rule["freee_account"] == SHOMOHIN_ACCOUNT
+                    and amount > SHOMOHIN_SPLIT_OVER)):
+            singles.append((key, amount, memo))
+            continue
+        by_item[key] += amount
+        if memo:
+            memos[key].append(memo)
+    rows = []
+    for key in sorted(by_item):
+        m = memos.get(key) or []
+        biko = m[0] if len(m) == 1 else (f"{m[0]} ほか{len(m) - 1}件" if m else "")
+        rows.append((key, by_item[key], biko))
+    rows.extend(singles)
+    return rows, reasons, sum(a for _u, a, _m in details)
+
+
 def decompose(details, mapping):
     """1人分の明細 → ({(品目, 勘定科目, 税区分): 金額}, [判定根拠], 合計)。
 
     備考は品目ごとに代表1件＋件数にまとめる（最終CSVの備考は経理が書き直す前提）。
+    経理エンジンは行分割に対応した decompose_rows を使う。こちらは合算のみで、
+    Z:\\API連携 のレビュー資料生成ツールが互換のまま使い続けるために残している。
     """
     by_item = defaultdict(float)
     memos = defaultdict(list)
