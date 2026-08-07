@@ -54,7 +54,7 @@ from services.kintai_import_runner import run_api_import
 from services.schedule_import_runner import run_schedule_api_import
 from services.batch_runner import run_batch_compare
 from services.expense_check import run_telework_export
-from services.keihi_summary import run_keihi_integration
+from services.keihi_summary import run_keihi_integration, run_keihi_route_preview
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1785,6 +1785,73 @@ def route_travel_expense_members_save():
     })
 
 
+@app.route("/expense_integration_preview", methods=["POST"])
+def route_expense_integration_preview():
+    """経路突合の要確認行を返す（統合一覧表を作る前の1段目）。
+
+    人が行ごとに「通勤費 / 移動交通費」を選ぶための表を返すだけで、
+    **ファイルは一切書かない**（SAP台帳にも触らない）。
+    選択は /expense_integration の route_choices に渡して確定する。
+
+    フォーム:
+      - jinjer_csv / estaffing_csv : 経路突合の対象（いずれか必須）
+      - sap_csv / freee_csv        : 存在チェックのみ（経路突合の対象外）
+      - keywords_file              : 任意。分類キーワード設定
+    """
+    sources = {
+        "jinjer_csv": _clean_path_input(request.form.get("jinjer_csv")),
+        "estaffing_csv": _clean_path_input(request.form.get("estaffing_csv")),
+        "sap_csv": _clean_path_input(request.form.get("sap_csv")),
+        "freee_csv": _clean_path_input(request.form.get("freee_csv")),
+    }
+    keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
+
+    errors = []
+    paths: dict = {}
+    for key, val in sources.items():
+        if not val:
+            paths[key] = None
+            continue
+        p = _Path(val)
+        if not p.exists():
+            errors.append(f"{key} が見つかりません: {p}")
+        paths[key] = p
+    keywords_file = _Path(keywords_file_str) if keywords_file_str else None
+    if keywords_file and not keywords_file.exists():
+        errors.append(f"キーワード設定ファイルが見つかりません: {keywords_file}")
+    if not paths["jinjer_csv"] and not paths["estaffing_csv"]:
+        errors.append("経路突合の対象（jinjer経費CSV / e-staffing立替金CSV）を指定してください。")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        result = run_keihi_route_preview(
+            jinjer_csv=paths["jinjer_csv"], estaffing_csv=paths["estaffing_csv"],
+            keywords_file=keywords_file, log_func=_log,
+        )
+    except Exception as e:
+        logger.exception("expense_integration_preview failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    if not result.ok:
+        return jsonify({
+            "success": False,
+            "errors": [result.error or "経路突合のプレビューに失敗しました"],
+            "console": log_lines,
+        }), 500
+    return jsonify({
+        "success": True,
+        "review_rows": result.review_rows,
+        "summary": result.summary,
+        "console": log_lines,
+    })
+
+
 @app.route("/expense_integration", methods=["POST"])
 def route_expense_integration():
     """経費統合一覧表の生成（経費マクロ移植 P1a）。
@@ -1797,6 +1864,9 @@ def route_expense_integration():
       - jinjer_csv / estaffing_csv / sap_csv / freee_csv : 各生CSVパス（いずれか1つ以上必須）
       - output_filename : 任意
       - route_check     : "1"/"0"（既定 "1"。通勤経路は jinjer API から取得）
+      - route_choices   : 任意。経路突合レビューで人が選んだ計上先の JSON
+                          [{"key": ..., "choice": "通勤費"|"移動交通費"}]。
+                          /expense_integration_preview が返したキーと食い違えばエラー停止する
     """
     sources = {
         "jinjer_csv": _clean_path_input(request.form.get("jinjer_csv")),
@@ -1823,6 +1893,26 @@ def route_expense_integration():
 
     errors = []
     manual_items: dict = {}
+
+    # 経路突合レビューの選択（未指定＝レビューを通していない。空配列＝要確認0件でレビュー済み）
+    route_choices = None
+    raw_choices = (request.form.get("route_choices") or "").strip()
+    if raw_choices:
+        try:
+            parsed = json.loads(raw_choices)
+        except ValueError:
+            parsed = None
+            errors.append("経路突合の選択を読み取れませんでした（もう一度実行してください）。")
+        if isinstance(parsed, list):
+            route_choices = []
+            for ent in parsed:
+                if not isinstance(ent, dict) or not str(ent.get("key") or ""):
+                    errors.append("経路突合の選択の形式が不正です（もう一度実行してください）。")
+                    break
+                route_choices.append({"key": str(ent.get("key")),
+                                      "choice": str(ent.get("choice") or "")})
+        elif parsed is not None:
+            errors.append("経路突合の選択の形式が不正です（もう一度実行してください）。")
 
     raw_items = (request.form.get("irregular_items") or "").strip()
     if raw_items:
@@ -1924,6 +2014,7 @@ def route_expense_integration():
             sap_import_month=sap_import_month or None,
             sap_record_ledger=sap_record_ledger,
             sap_record_skip_reason=sap_record_skip_reason,
+            route_choices=route_choices,
             log_func=_log,
         )
     except Exception as e:
@@ -1939,6 +2030,7 @@ def route_expense_integration():
         "import_preview": result.import_preview,
         "import_warnings": result.import_warnings,
         "commute_cuts": result.commute_cuts,
+        "route_moves": [m for m in result.route_moves if m.get("変更") != "変更なし"],
         "stats": {
             "integrated_rows": result.integrated_rows,
             "source_counts": result.source_counts,

@@ -967,6 +967,21 @@
             <button type="button" class="btn btn-primary btn-run-main" id="ki-run-btn">📋 統合一覧表を生成</button>
             <span id="ki-status" class="status-text"></span>
         </div>
+
+        <!-- ==== 経路突合レビュー（統合一覧表を作る前に計上先を決める）==== -->
+        <div id="ki-route-review-area" style="display:none; margin:8px 14px; border:2px solid #b8860b; border-radius:6px; padding:10px 14px">
+            <div style="font-weight:bold; margin-bottom:4px">🔀 経路突合の確認（生成前に計上先を選んでください）</div>
+            <div id="ki-route-review-note" class="field-sub" style="margin-bottom:8px"></div>
+            <div style="max-height:340px; overflow:auto; border:1px solid #ddd">
+                <table id="ki-route-review-table" style="border-collapse:collapse; font-size:11px; width:100%"></table>
+            </div>
+            <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+                <button type="button" class="btn btn-primary" id="ki-route-apply-btn">✅ 選択を反映して生成</button>
+                <button type="button" class="btn" id="ki-route-cancel-btn">やめる</button>
+                <span id="ki-route-review-status" class="status-text"></span>
+            </div>
+        </div>
+
         <div id="ki-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
                 <div class="summary-card"><div class="card-label">統合一覧表(行)</div><div class="card-value" id="ki-cnt-rows">0</div></div>
@@ -981,6 +996,7 @@
             <div id="ki-ledger-warn" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:13px"></div>
             <a id="ki-download-link" href="#" class="btn btn-download" style="display:none">📥 統合一覧表xlsxをダウンロード</a>
             <a id="ki-import-csv-link" href="#" class="btn btn-download" style="display:none; margin-left:8px">📥 jinjer給与インポートCSVをダウンロード</a>
+            <div id="ki-route-moves" style="display:none; margin-top:10px; padding:9px 12px; border-radius:6px; border:1px solid #b8860b; background:#fdf6e3; color:#7a5c00; font-size:12px"></div>
             <pre id="ki-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
 
             <!-- ==== jinjer給与インポート（人間チェック → API投入）==== -->
@@ -1647,98 +1663,235 @@
 
     // ----- 経費統合一覧表の生成（4ソース取込・マクロ移植 P1a）-----
     const kiRunBtn = document.getElementById('ki-run-btn');
+
+    function kiIntegrationFormData() {
+        const fd = new FormData();
+        fd.append('jinjer_csv', document.getElementById('ki-jinjer').value);
+        fd.append('estaffing_csv', document.getElementById('ki-estaffing').value);
+        fd.append('sap_csv', document.getElementById('ki-sap').value);
+        // 過去SAP CSVの指定は廃止（取込済み費用シート台帳と突合する）。
+        // 取込対象は「暫定」で台帳へ記録し、jinjer取込後に「台帳を確定」で確定させる。
+        fd.append('sap_record_ledger', '1');
+        fd.append('freee_csv', document.getElementById('ki-freee').value);
+        fd.append('output_filename', document.getElementById('ki-output-filename').value);
+        fd.append('route_check', document.getElementById('ki-route-check').checked ? '1' : '0');
+        fd.append('classify', document.getElementById('ki-classify').checked ? '1' : '0');
+        fd.append('keywords_file', document.getElementById('ki-keywords').value);
+        fd.append('import_template_csv', document.getElementById('ki-import-template-csv').value);
+        fd.append('irregular_items', JSON.stringify(kiIrregularItems));
+        fd.append('irregular_file', document.getElementById('ki-irregular-file').value);
+        return fd;
+    }
+
+    // routeChoices: null＝レビューを通していない / 配列＝レビュー済み（空配列＝要確認0件）
+    async function kiRunIntegration(routeChoices) {
+        if (!kiRunBtn) return;
+        hideError('ki-error-area');
+        document.getElementById('ki-result-area').style.display = 'none';
+        const routeCheck = document.getElementById('ki-route-check').checked;
+        document.getElementById('ki-status').textContent =
+            routeCheck ? '処理中...（通勤経路をjinjer APIから取得するため少し時間がかかります）' : '処理中...';
+        kiRunBtn.disabled = true;
+        const applyBtn = document.getElementById('ki-route-apply-btn');
+        if (applyBtn) applyBtn.disabled = true;
+
+        const fd = kiIntegrationFormData();
+        if (routeChoices) fd.append('route_choices', JSON.stringify(routeChoices));
+
+        try {
+            const res = await fetch('/expense_integration', {method:'POST', body: fd});
+            const data = await res.json();
+            if (!data.success){
+                showError('ki-error-area', data.errors || ['処理に失敗しました']);
+                document.getElementById('ki-status').textContent = '';
+                // 選択が食い違って落ちた場合は、古い表のまま押し直せないよう閉じる
+                if (routeChoices) kiHideRouteReview();
+                return;
+            }
+            const st = data.stats || {};
+            document.getElementById('ki-cnt-rows').textContent = st.integrated_rows || 0;
+            const sc = st.source_counts || {};
+            const fmt = (v) => (v === null || v === undefined) ? '未取込' : (v + '行');
+            document.getElementById('ki-cnt-sources').textContent =
+                fmt(sc.jinjer) + ' / ' + fmt(sc.estaffing) + ' / ' + fmt(sc.sap) + ' / ' + fmt(sc.freee);
+            const sd = st.sap_dedup || {};
+            document.getElementById('ki-cnt-sap-dedup').textContent =
+                (sd.excluded_rows !== undefined)
+                    ? ('除外 ' + sd.excluded_rows + '行 / ★要確認 ' + sd.review_rows + '行'
+                       + '（台帳' + sd.ledger_rows + '行と突合、取込 ' + sd.kept_rows + '行）'
+                       + (sd.recorded_month ? ' → ' + sd.recorded_month + 'を暫定登録' : ''))
+                    : '未実施';
+            if (sd.review_rows) {
+                document.getElementById('ki-cnt-sap-dedup').style.color = '#b8860b';
+            }
+            // 台帳へ記録しなかった場合は必ず知らせる。黙って進むと「台帳に入ったつもり」
+            // になり、確定が漏れて翌月の除外が効かず二重計上になる。
+            const warnEl = document.getElementById('ki-ledger-warn');
+            if (sd.record_skipped) {
+                warnEl.textContent = '⚠ 台帳には記録していません — ' + (sd.record_skip_reason || '');
+                warnEl.style.display = '';
+            } else {
+                warnEl.style.display = 'none';
+                warnEl.textContent = '';
+            }
+            // 台帳へ暫定登録された結果を画面に反映する
+            kiLoadLedger();
+            document.getElementById('ki-cnt-unmatched').textContent = st.unmatched_emp || 0;
+            const rs = st.route_summary || {};
+            document.getElementById('ki-cnt-flagged').textContent =
+                (rs.flagged_rows !== undefined)
+                    ? (rs.flagged_rows + '行 / ' + rs.flagged_emps + '名')
+                    : '—';
+            document.getElementById('ki-cnt-rev').textContent =
+                (rs.rev_rows !== undefined)
+                    ? (rs.rev_rows + '行 / ' + rs.rev_emps + '名')
+                    : '—';
+            const cs = st.classify_summary || {};
+            document.getElementById('ki-cnt-summary').textContent =
+                (cs.summary_employees !== undefined) ? (cs.summary_employees + '名') : '—';
+            document.getElementById('ki-cnt-diffng').textContent =
+                (cs.diff_ng !== undefined) ? (cs.diff_ng + '名') : '—';
+            const dl = document.getElementById('ki-download-link');
+            dl.href = data.download_url;
+            dl.style.display = 'inline-block';
+            const idl = document.getElementById('ki-import-csv-link');
+            if (data.import_csv_url) {
+                idl.href = data.import_csv_url;
+                idl.style.display = 'inline-block';
+            } else {
+                idl.style.display = 'none';
+            }
+            const consoleEl = document.getElementById('ki-console');
+            consoleEl.textContent = (data.console || []).join('\n');
+            consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+            kiRenderRouteMoves(data.route_moves || []);
+            renderImportPreview(data);
+            document.getElementById('ki-result-area').style.display = 'block';
+            document.getElementById('ki-status').textContent = '完了';
+            kiHideRouteReview();
+        } catch (e) {
+            showError('ki-error-area', ['通信エラー: ' + e.message]);
+            document.getElementById('ki-status').textContent = '';
+        } finally {
+            kiRunBtn.disabled = false;
+            if (applyBtn) applyBtn.disabled = false;
+        }
+    }
+
+    // ---- 経路突合レビュー（統合一覧表を作る前に計上先を決める二段階実行）----
+    function kiHideRouteReview() {
+        const area = document.getElementById('ki-route-review-area');
+        if (area) area.style.display = 'none';
+        document.getElementById('ki-route-review-status').textContent = '';
+    }
+
+    function kiRenderRouteMoves(moves) {
+        const el = document.getElementById('ki-route-moves');
+        if (!el) return;
+        if (!moves.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        const total = moves.reduce((s, m) => s + (m['金額'] || 0), 0);
+        const lines = moves.map(m =>
+            '<div>' + escapeHtml(m['社員番号'] + ' ' + m['氏名']) + '： '
+            + escapeHtml(m['変更']) + ' ' + (m['金額'] || 0).toLocaleString() + '円'
+            + '（' + escapeHtml(m['理由']) + '）</div>').join('');
+        el.innerHTML = '<div style="font-weight:bold; margin-bottom:4px">🔁 通勤費↔立替金の付け替え: '
+            + moves.length + '件 / 計 ' + total.toLocaleString() + '円</div>' + lines;
+        el.style.display = '';
+    }
+
+    function kiRenderRouteReview(rows, summary) {
+        const table = document.getElementById('ki-route-review-table');
+        const cols = ['判定', '社員番号', '氏名', '利用日', '交通機関', '内訳', '金額',
+                      '乗車場所', '降車場所', '一致', '計上先'];
+        let html = '<thead><tr>'
+            + cols.map(c => '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
+                          + ' padding:3px 5px; white-space:nowrap">' + escapeHtml(c) + '</th>').join('')
+            + '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
+            + ' padding:3px 5px; white-space:nowrap">この月の計上先</th></tr></thead><tbody>';
+        rows.forEach(r => {
+            const bg = String(r['判定'] || '').startsWith('★') ? '#FFC7CE'
+                     : String(r['判定'] || '').startsWith('△') ? '#FFEB9C' : '';
+            html += '<tr style="background:' + bg + '" title="' + escapeHtml(r['登録通勤経路'] || '') + '">';
+            cols.forEach(c => {
+                const align = (c === '金額') ? 'right' : 'left';
+                html += '<td style="border:1px solid #ddd; padding:2px 5px; text-align:' + align + '">'
+                      + escapeHtml(String(r[c] === undefined || r[c] === null ? '' : r[c])) + '</td>';
+            });
+            html += '<td style="border:1px solid #ddd; padding:2px 5px; white-space:nowrap">';
+            if (r['付替可']) {
+                html += '<select class="legend-template-select ki-route-choice" data-key="'
+                      + escapeHtml(r['key']) + '" style="width:auto; min-width:120px">'
+                      + ['通勤費', '移動交通費'].map(v =>
+                            '<option value="' + v + '"' + (v === r['既定選択'] ? ' selected' : '') + '>'
+                            + v + '</option>').join('')
+                      + '</select>';
+                if (r['移動額']) {
+                    html += '<span class="hint" style="margin-left:6px">'
+                          + Number(r['移動額']).toLocaleString() + '円</span>';
+                }
+            } else {
+                html += '<span class="ki-route-choice" data-key="' + escapeHtml(r['key'])
+                      + '" data-fixed="対象外" style="color:#888">対象外（動かせません）</span>';
+            }
+            html += '</td></tr>';
+        });
+        table.innerHTML = html + '</tbody>';
+        const movable = (summary.movable_rows !== undefined) ? summary.movable_rows
+                      : rows.filter(r => r['付替可']).length;
+        document.getElementById('ki-route-review-note').innerHTML =
+            '要確認 ' + rows.length + '行（★' + (summary.flagged_rows || 0)
+            + ' / △' + (summary.rev_rows || 0) + '）のうち、計上先を選べるのは ' + movable + '行です。'
+            + '<b>触らなければ今までどおり</b>の計上になります。'
+            + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金に計上するため、この表には出ません。';
+        document.getElementById('ki-route-review-area').style.display = '';
+    }
+
+    function kiCollectRouteChoices() {
+        const out = [];
+        document.querySelectorAll('#ki-route-review-table .ki-route-choice').forEach(el => {
+            out.push({key: el.dataset.key, choice: el.dataset.fixed || el.value});
+        });
+        return out;
+    }
+
     if (kiRunBtn) {
         kiRunBtn.addEventListener('click', async () => {
-            hideError('ki-error-area');
-            document.getElementById('ki-result-area').style.display = 'none';
             const routeCheck = document.getElementById('ki-route-check').checked;
+            const classify = document.getElementById('ki-classify').checked;
+            // 経路突合も分類もオンのときだけ、先に要確認行を出して人に選んでもらう
+            if (!routeCheck || !classify) { await kiRunIntegration(null); return; }
+
+            hideError('ki-error-area');
+            kiHideRouteReview();
+            document.getElementById('ki-result-area').style.display = 'none';
             document.getElementById('ki-status').textContent =
-                routeCheck ? '処理中...（通勤経路をjinjer APIから取得するため少し時間がかかります）' : '処理中...';
+                '経路突合を確認中...（通勤経路をjinjer APIから取得します）';
             kiRunBtn.disabled = true;
-
-            const fd = new FormData();
-            fd.append('jinjer_csv', document.getElementById('ki-jinjer').value);
-            fd.append('estaffing_csv', document.getElementById('ki-estaffing').value);
-            fd.append('sap_csv', document.getElementById('ki-sap').value);
-            // 過去SAP CSVの指定は廃止（取込済み費用シート台帳と突合する）。
-            // 取込対象は「暫定」で台帳へ記録し、jinjer取込後に「台帳を確定」で確定させる。
-            fd.append('sap_record_ledger', '1');
-            fd.append('freee_csv', document.getElementById('ki-freee').value);
-            fd.append('output_filename', document.getElementById('ki-output-filename').value);
-            fd.append('route_check', routeCheck ? '1' : '0');
-            fd.append('classify', document.getElementById('ki-classify').checked ? '1' : '0');
-            fd.append('keywords_file', document.getElementById('ki-keywords').value);
-            fd.append('import_template_csv', document.getElementById('ki-import-template-csv').value);
-            fd.append('irregular_items', JSON.stringify(kiIrregularItems));
-            fd.append('irregular_file', document.getElementById('ki-irregular-file').value);
-
             try {
-                const res = await fetch('/expense_integration', {method:'POST', body: fd});
+                const fd = new FormData();
+                fd.append('jinjer_csv', document.getElementById('ki-jinjer').value);
+                fd.append('estaffing_csv', document.getElementById('ki-estaffing').value);
+                fd.append('sap_csv', document.getElementById('ki-sap').value);
+                fd.append('freee_csv', document.getElementById('ki-freee').value);
+                fd.append('keywords_file', document.getElementById('ki-keywords').value);
+                const res = await fetch('/expense_integration_preview', {method:'POST', body: fd});
                 const data = await res.json();
                 if (!data.success){
-                    showError('ki-error-area', data.errors || ['処理に失敗しました']);
+                    showError('ki-error-area', data.errors || ['経路突合の確認に失敗しました']);
                     document.getElementById('ki-status').textContent = '';
                     return;
                 }
-                const st = data.stats || {};
-                document.getElementById('ki-cnt-rows').textContent = st.integrated_rows || 0;
-                const sc = st.source_counts || {};
-                const fmt = (v) => (v === null || v === undefined) ? '未取込' : (v + '行');
-                document.getElementById('ki-cnt-sources').textContent =
-                    fmt(sc.jinjer) + ' / ' + fmt(sc.estaffing) + ' / ' + fmt(sc.sap) + ' / ' + fmt(sc.freee);
-                const sd = st.sap_dedup || {};
-                document.getElementById('ki-cnt-sap-dedup').textContent =
-                    (sd.excluded_rows !== undefined)
-                        ? ('除外 ' + sd.excluded_rows + '行 / ★要確認 ' + sd.review_rows + '行'
-                           + '（台帳' + sd.ledger_rows + '行と突合、取込 ' + sd.kept_rows + '行）'
-                           + (sd.recorded_month ? ' → ' + sd.recorded_month + 'を暫定登録' : ''))
-                        : '未実施';
-                if (sd.review_rows) {
-                    document.getElementById('ki-cnt-sap-dedup').style.color = '#b8860b';
+                const rows = data.review_rows || [];
+                if (!rows.length){
+                    document.getElementById('ki-status').textContent =
+                        '経路突合の要確認は0件 → そのまま生成します';
+                    kiRunBtn.disabled = false;
+                    await kiRunIntegration([]);
+                    return;
                 }
-                // 台帳へ記録しなかった場合は必ず知らせる。黙って進むと「台帳に入ったつもり」
-                // になり、確定が漏れて翌月の除外が効かず二重計上になる。
-                const warnEl = document.getElementById('ki-ledger-warn');
-                if (sd.record_skipped) {
-                    warnEl.textContent = '⚠ 台帳には記録していません — ' + (sd.record_skip_reason || '');
-                    warnEl.style.display = '';
-                } else {
-                    warnEl.style.display = 'none';
-                    warnEl.textContent = '';
-                }
-                // 台帳へ暫定登録された結果を画面に反映する
-                kiLoadLedger();
-                document.getElementById('ki-cnt-unmatched').textContent = st.unmatched_emp || 0;
-                const rs = st.route_summary || {};
-                document.getElementById('ki-cnt-flagged').textContent =
-                    (rs.flagged_rows !== undefined)
-                        ? (rs.flagged_rows + '行 / ' + rs.flagged_emps + '名')
-                        : '—';
-                document.getElementById('ki-cnt-rev').textContent =
-                    (rs.rev_rows !== undefined)
-                        ? (rs.rev_rows + '行 / ' + rs.rev_emps + '名')
-                        : '—';
-                const cs = st.classify_summary || {};
-                document.getElementById('ki-cnt-summary').textContent =
-                    (cs.summary_employees !== undefined) ? (cs.summary_employees + '名') : '—';
-                document.getElementById('ki-cnt-diffng').textContent =
-                    (cs.diff_ng !== undefined) ? (cs.diff_ng + '名') : '—';
-                const dl = document.getElementById('ki-download-link');
-                dl.href = data.download_url;
-                dl.style.display = 'inline-block';
-                const idl = document.getElementById('ki-import-csv-link');
-                if (data.import_csv_url) {
-                    idl.href = data.import_csv_url;
-                    idl.style.display = 'inline-block';
-                } else {
-                    idl.style.display = 'none';
-                }
-                const consoleEl = document.getElementById('ki-console');
-                consoleEl.textContent = (data.console || []).join('\n');
-                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
-                renderImportPreview(data);
-                document.getElementById('ki-result-area').style.display = 'block';
-                document.getElementById('ki-status').textContent = '完了';
+                kiRenderRouteReview(rows, data.summary || {});
+                document.getElementById('ki-status').textContent =
+                    '経路突合 ' + rows.length + '件の確認待ち（下の表で選んでください）';
             } catch (e) {
                 showError('ki-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('ki-status').textContent = '';
@@ -1747,6 +1900,26 @@
             }
         });
     }
+
+    const kiRouteApplyBtn = document.getElementById('ki-route-apply-btn');
+    if (kiRouteApplyBtn) {
+        kiRouteApplyBtn.addEventListener('click', async () => {
+            await kiRunIntegration(kiCollectRouteChoices());
+        });
+    }
+    const kiRouteCancelBtn = document.getElementById('ki-route-cancel-btn');
+    if (kiRouteCancelBtn) {
+        kiRouteCancelBtn.addEventListener('click', () => {
+            kiHideRouteReview();
+            document.getElementById('ki-status').textContent = '';
+        });
+    }
+    // 入力を変えたら選択は無効。古い表のまま確定させない（最後の砦はサーバ側のキー突合）
+    ['ki-jinjer', 'ki-estaffing', 'ki-sap', 'ki-freee', 'ki-keywords',
+     'ki-route-check', 'ki-classify'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', kiHideRouteReview);
+    });
 
     // ----- jinjer給与インポート プレビュー表示＋API投入 -----
     let kiImportCsvName = '';

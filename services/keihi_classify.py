@@ -649,6 +649,60 @@ def commute_totals_from_log(cls_result: "ClassifyResult",
     return commute, other, months
 
 
+# 付け替えできる計上先。交通費(H)＝非課税通勤費 と 非課税精算(I)＝立替金 の2つだけで、
+# 夜間当番手当や顧客請求分は経路突合レビューの対象にしない（2026-08-07 谷津さん指定）。
+SIDE_TRANS = "通勤費"
+SIDE_TRAVEL = "移動交通費"
+MOVABLE_SIDES = (SIDE_TRANS, SIDE_TRAVEL)
+
+
+def main_entry_by_row(log: list) -> dict:
+    """行番号 → その行の主計上ログ（H:交通費 / I:非課税精算）を返す。
+
+    1行が複数のログを持つことがある（顧客請求分は別ログ）。金額を動かせるのは
+    交通費(H)と非課税精算(I)だけなので、その2つに絞って引けるようにする。
+    分類ループは1行につき1回しか break しないので、主計上ログは行に高々1件。
+    """
+    out: dict = {}
+    for e in log:
+        if str(e.result or "") in ("H:交通費", "I:非課税精算"):
+            out[e.row_no] = e
+    return out
+
+
+def entry_side(entry) -> str:
+    """主計上ログ → 計上先（通勤費 / 移動交通費）。None なら空文字。"""
+    if entry is None:
+        return ""
+    return SIDE_TRANS if str(entry.result) == "H:交通費" else SIDE_TRAVEL
+
+
+def side_by_row(log: list) -> dict:
+    """行番号 → 計上先。付け替え不可の行は理由つきの「対象外（…）」を返す。
+
+    経路突合レビューの表示（現在の計上先）と、確定時の整合検査で同じ値を使うための
+    単一の正。ここがズレると「画面では動かせたのにサーバで弾かれる」が起きる。
+    """
+    main = main_entry_by_row(log)
+    out = {rn: entry_side(e) for rn, e in main.items()}
+    for e in log:
+        if e.row_no in out:
+            continue
+        r = str(e.result or "")
+        if r.startswith("G:") or "顧客請求" in r:
+            reason = "対象外（顧客請求分）"
+        elif r.startswith("D:夜間当番"):
+            reason = "対象外（夜間当番手当）"
+        elif r.startswith("E:RINK"):
+            reason = "対象外（RINK手当）"
+        elif r.startswith("J:テレワーク"):
+            reason = "対象外（テレワーク手当）"
+        else:
+            reason = "対象外（その他計上）"
+        out.setdefault(e.row_no, reason)
+    return out
+
+
 def classify_and_summarize(
     integrated_rows: list[list[str]],
     wb: Workbook,
@@ -665,6 +719,7 @@ def classify_and_summarize(
     stats["log_rows"] = len(cls.log)
     stats["_agg"] = agg           # 後段（インポート行生成）用
     stats["_emp_names"] = cls.emp_names
+    stats["_log"] = cls.log       # 経路突合レビューの付け替えで行ごとの計上先を引くため
     (stats["_commute"], stats["_commute_other"],
      stats["_commute_months"]) = commute_totals_from_log(cls, integrated_rows)
     return stats

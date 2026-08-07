@@ -342,16 +342,15 @@ def test_commute_limit_leaves_amounts_within_the_limit_untouched():
     assert cuts == [] and warns == []
 
 
-def test_commute_limit_skips_exempt_members_and_travel_members():
-    """免除者と移動交通費対象者は切らない。ただし黙って通さず理由を出す。"""
-    for kwargs, kw in (({"limit_exempt": {"2014013": "個別許可"}}, "上限免除者"),
-                       ({"travel_members": {"2014013": "柴田 和浩"}}, "移動交通費")):
-        rows, warns, cuts = build_import_rows(
-            _by_id(35090), {"2014013": "柴田 和浩"},
-            commute_by_id={"2014013": 35090.0}, commute_limit=30000, **kwargs)
-        assert rows[0]["非課税通勤費"] == 35090
-        assert cuts == []
-        assert any(kw in w for w in warns), f"{kw} の理由が出ていません"
+def test_commute_limit_skips_exempt_members():
+    """免除者は切らない。ただし黙って通さず理由を出す。"""
+    rows, warns, cuts = build_import_rows(
+        _by_id(35090), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 35090.0}, commute_limit=30000,
+        limit_exempt={"2014013": "個別許可"})
+    assert rows[0]["非課税通勤費"] == 35090
+    assert cuts == []
+    assert any("上限免除者" in w for w in warns)
 
 
 def test_commute_limit_is_off_when_no_limit_given():
@@ -359,6 +358,166 @@ def test_commute_limit_is_off_when_no_limit_given():
     rows, _, cuts = build_import_rows(
         _by_id(35090), {"2014013": "柴田 和浩"}, commute_by_id={"2014013": 35090.0})
     assert rows[0]["非課税通勤費"] == 35090 and cuts == []
+
+
+# ----------------------------------------------------------------------
+# 移動交通費（立替精算）対象者の自動付け替え（2026-08-07）
+# ----------------------------------------------------------------------
+
+def _by_id_trans_nontax(trans, nontax=0.0):
+    """交通費(H)と非課税精算(I)だけ入った集計を作る。"""
+    return {"2014013": [0, 0, float(trans), 0, 0, 0, float(nontax)]}
+
+
+def test_travel_member_commute_is_moved_to_tatekae():
+    """対象者が通勤系で申請した分は非課税通勤費ではなく立替金に計上する。"""
+    moves: list = []
+    rows, warns, cuts = build_import_rows(
+        _by_id_trans_nontax(35090, 1000), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 35090.0}, commute_limit=30000,
+        travel_members={"2014013": "柴田 和浩"}, moves=moves)
+
+    assert rows[0]["非課税通勤費"] == 0
+    assert rows[0]["立替金"] == 36090            # 1,000 + 付け替えた 35,090
+    assert cuts == []                            # 付け替え済みなので上限は掛からない
+    assert [m["変更"] for m in moves] == ["非課税通勤費 → 立替金"]
+    assert moves[0]["理由"] == "移動交通費対象者（自動）"
+    assert any("付け替え" in w for w in warns)
+    assert not any("カットしていません" in w for w in warns)
+
+
+def test_travel_member_keeps_non_commute_part_in_trans():
+    """同じ交通費(H)でも通勤系と判定できない分（駐車場代など）は動かさない。"""
+    rows, _, _ = build_import_rows(
+        _by_id_trans_nontax(37660), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 35090.0}, commute_other_by_id={"2014013": 2570.0},
+        commute_limit=30000, travel_members={"2014013": "柴田 和浩"})
+    assert rows[0]["非課税通勤費"] == 2570
+    assert rows[0]["立替金"] == 35090
+
+
+def test_travel_member_move_works_without_commute_limit():
+    """上限が未設定でも付け替えは効く（以前は上限が無いと対象者リストを読んでいなかった）。"""
+    rows, _, _ = build_import_rows(
+        _by_id_trans_nontax(12000), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 12000.0}, travel_members={"2014013": "柴田 和浩"})
+    assert rows[0]["非課税通勤費"] == 0 and rows[0]["立替金"] == 12000
+
+
+# ----------------------------------------------------------------------
+# 経路突合レビューの選択をインポート行へ反映（2026-08-07）
+# ----------------------------------------------------------------------
+
+def _route_row(row_no, kikan, emp="2014013", use="2026/7/1"):
+    return {"社員番号": emp, "氏名": "柴田 和浩", "利用日": use,
+            "交通機関": kikan, "行番号": row_no}
+
+
+def _log(row_no, result, kw, amount=8000.0, emp="2014013"):
+    from services.keihi_classify import LogEntry
+    return LogEntry(row_no, emp, "柴田和浩", "", amount, result, kw)
+
+
+def test_plan_route_moves_both_directions_and_no_change():
+    from services.keihi_classify import LogEntry  # noqa: F401
+    from services.keihi_payroll_import import plan_route_moves
+    cls_log = [
+        _log(2, "H:交通費", "定期代", 8000.0),          # 通勤費 → 移動交通費 にする
+        _log(3, "I:非課税精算", "交通費（電車・バス）", 300.0),  # 移動交通費 → 通勤費 にする
+        _log(4, "H:交通費", "定期代", 500.0),           # 選び直さない
+    ]
+    matched = [(_route_row(2, "通勤定期代"), "移動交通費"),
+               (_route_row(3, "交通費（電車・バス）"), "通勤費"),
+               (_route_row(4, "通勤定期代"), "通勤費")]
+    plan, errors = plan_route_moves(matched, cls_log)
+
+    assert errors == []
+    assert plan.to_nontax == {"2014013": 8000}      # H→I
+    assert plan.to_trans == {"2014013": 300}        # I→H
+    # 上限判定の材料: 通勤系から8,000抜けて、人が通勤費と判定した300が入る
+    assert plan.commute_delta == {"2014013": -8000 + 300}
+    assert plan.months_add == {"2014013": {"2026-07"}}
+    assert plan.reviewed_emps == {"2014013"}
+    assert [d["変更"] for d in plan.details] == [
+        "非課税通勤費 → 立替金", "立替金 → 非課税通勤費", "変更なし"]
+
+
+def test_plan_route_moves_splits_commute_and_other():
+    """通勤系と判定できない分（駐車場代など）を動かしたときは上限対象外の側から引く。"""
+    from services.keihi_payroll_import import plan_route_moves
+    plan, errors = plan_route_moves(
+        [(_route_row(2, "交通費（電車・バス）"), "移動交通費")],
+        [_log(2, "H:交通費", "駐車場", 2570.0)])
+    assert errors == []
+    assert plan.commute_delta == {} and plan.other_delta == {"2014013": -2570}
+
+
+def test_plan_route_moves_rejects_unmovable_and_travel_rows():
+    """付け替えられない行への指定と、対象者の行の混入はエラー（古いプレビューの印）。"""
+    from services.keihi_payroll_import import plan_route_moves
+    # 顧客請求分の行に通勤費を指定
+    plan, errors = plan_route_moves(
+        [(_route_row(2, "交通費（電車・バス）"), "通勤費")],
+        [_log(2, "G:顧客請求分", "", 300.0)])
+    assert errors and "顧客請求分" in errors[0]
+    # 同じ行に「対象外」なら通る（画面では固定表示になっている）
+    plan, errors = plan_route_moves(
+        [(_route_row(2, "交通費（電車・バス）"), "対象外")],
+        [_log(2, "G:顧客請求分", "", 300.0)])
+    assert errors == [] and plan.to_nontax == {} and plan.to_trans == {}
+    # 付け替えられる行に「対象外」はエラー（選び忘れ）
+    _, errors = plan_route_moves(
+        [(_route_row(2, "通勤定期代"), "対象外")], [_log(2, "H:交通費", "定期代")])
+    assert errors and "選んでください" in errors[0]
+    # 移動交通費対象者の行はレビュー対象外
+    _, errors = plan_route_moves(
+        [(_route_row(2, "通勤定期代"), "移動交通費")], [_log(2, "H:交通費", "定期代")],
+        {"2014013": "柴田 和浩"})
+    assert errors and "自動" in errors[0]
+
+
+def test_build_import_rows_with_route_plan_keeps_total():
+    """付け替えても本人の合計は動かない（集計シートの判定に影響させない）。"""
+    from services.keihi_payroll_import import plan_route_moves
+    plan, _ = plan_route_moves(
+        [(_route_row(2, "通勤定期代"), "移動交通費")],
+        [_log(2, "H:交通費", "定期代", 8000.0)])
+    moves: list = []
+    rows, _warns, cuts = build_import_rows(
+        _by_id_trans_nontax(8000, 300), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 8000.0}, commute_limit=30000,
+        route_plan=plan, moves=moves)
+    assert (rows[0]["非課税通勤費"], rows[0]["立替金"]) == (0, 8300)
+    assert sum(v for k, v in rows[0].items() if isinstance(v, int)) == 8300
+    assert cuts == [] and [m["理由"] for m in moves] == ["人間判定"]
+
+
+def test_route_plan_choice_of_commute_is_subject_to_the_limit():
+    """人が『通勤費』と判定した分は上限3万円の判定に入れる（2026-08-07 谷津さん決定）。"""
+    from services.keihi_payroll_import import plan_route_moves
+    plan, _ = plan_route_moves(
+        [(_route_row(2, "交通費（電車・バス）"), "通勤費")],
+        [_log(2, "I:非課税精算", "交通費（電車・バス）", 6000.0)])
+    rows, _warns, cuts = build_import_rows(
+        _by_id_trans_nontax(28000, 6000), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 28000.0}, commute_limit=30000,
+        commute_months={"2014013": {"2026-07"}}, route_plan=plan, moves=[])
+    # 28,000 + 6,000 = 34,000 が通勤費 → 4,000 カット
+    assert cuts and cuts[0]["カット額"] == 4000
+    assert rows[0]["非課税通勤費"] == 30000
+
+
+def test_route_plan_wins_over_travel_member_auto_move():
+    """レビューで人が決めた社員は自動付け替えを重ねない。"""
+    from services.keihi_payroll_import import plan_route_moves
+    plan, _ = plan_route_moves(
+        [(_route_row(2, "通勤定期代"), "通勤費")],
+        [_log(2, "H:交通費", "定期代", 8000.0)])
+    rows, _warns, _cuts = build_import_rows(
+        _by_id_trans_nontax(8000), {"2014013": "柴田 和浩"},
+        commute_by_id={"2014013": 8000.0},
+        travel_members={"2014013": "柴田 和浩"}, route_plan=plan, moves=[])
+    assert rows[0]["非課税通勤費"] == 8000 and rows[0]["立替金"] == 0
 
 
 def test_commute_totals_from_log_splits_commute_and_other():

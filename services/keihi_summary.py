@@ -546,7 +546,7 @@ def evaluate_route_check(
     travel_members = travel_members or {}
     commute = build_commute_station_sets(commute_rows)
     results: list[dict] = []
-    for r in integrated_rows:
+    for _idx, r in enumerate(integrated_rows):
         kikan = _cell(r, C_TRANS)
         board = _norm_station(_cell(r, C_BOARD))
         alight = _norm_station(_cell(r, C_ALIGHT))
@@ -587,8 +587,111 @@ def evaluate_route_check(
             "降車場所": _cell(r, C_ALIGHT), "経路": _cell(r, C_ROUTE), "金額": amount,
             "往復": _cell(r, C_ROUNDTRIP), "備考(明細)": _cell(r, C_MEMO_LINE),
             "登録通勤経路": routes, "一致": match, "判定": verdict,
+            # 分類ログ（LogEntry.row_no）と突き合わせるための行番号。_ROUTE_COLS に無いので
+            # シートには出ない（付け替えで「この行はH/Iどちらに計上されたか」を引くのに使う）
+            "行番号": _idx + 2,
         })
     return results
+
+
+# ======================================================================
+# 経路突合レビュー（人間が行ごとに 通勤費 / 移動交通費 を選ぶ二段階実行）
+# ======================================================================
+
+# 「対象外」は顧客請求分・夜間当番手当など、要確認には出るが計上先を動かせない行のための値。
+# 選ばせずに黙って落とすと「表に出ていない行がある」ことに気づけないので、行は出して固定表示する。
+ROUTE_CHOICE_VALUES = ("通勤費", "移動交通費", "対象外")
+
+
+def _route_row_label(r: dict) -> str:
+    return (f"{r.get('社員番号', '')} {r.get('氏名', '')} "
+            f"{r.get('利用日', '')} {r.get('交通機関', '')}").strip()
+
+
+def build_route_choice_keys(route_results: list[dict],
+                            travel_members: "dict | None" = None) -> list[tuple[str, dict]]:
+    """レビュー対象の★/△行に決定的なキーを振り [(キー, 行)] を返す。
+
+    キーは 社員番号|利用日|交通機関|金額|乗車場所|降車場所|連番。
+    同じ内容の行が複数あっても連番（出現順＝統合一覧表の行順）で区別できる。
+    プレビューと確定で同じ入力・同じ関数を通す限り必ず一致するので、
+    突き合わせに失敗したら「入力CSVがプレビュー後に変わった」と判断できる。
+
+    移動交通費（立替精算）対象者の行は自動で立替金へ付け替えるため、
+    人間には選ばせない＝レビュー対象から外す（2026-08-07 谷津さん指定）。
+    """
+    travel_members = travel_members or {}
+    seen: dict = {}
+    out: list[tuple[str, dict]] = []
+    for r in route_results:
+        verdict = str(r.get("判定") or "")
+        if not (verdict.startswith("★") or verdict.startswith("△")):
+            continue
+        if str(r.get("社員番号") or "") in travel_members:
+            continue
+        base = "|".join(str(r.get(k) or "") for k in
+                        ("社員番号", "利用日", "交通機関", "金額", "乗車場所", "降車場所"))
+        seen[base] = seen.get(base, 0) + 1
+        out.append((f"{base}|{seen[base]}", r))
+    return out
+
+
+def match_route_choices(route_results: list[dict], choices: "list | None",
+                        travel_members: "dict | None" = None) -> tuple[list, list]:
+    """画面から来た選択をサーバ再計算のキーと突き合わせ、([(行, 選択)], エラー) を返す。
+
+    過不足が1件でもあればエラーにする。黙って一部だけ反映すると、
+    人が見ていない行の計上先が勝手に決まってしまう。
+    """
+    pairs = build_route_choice_keys(route_results, travel_members)
+    by_key = {k: r for k, r in pairs}
+    errors: list[str] = []
+    got: dict = {}
+    for c in choices or []:
+        key = str((c or {}).get("key") or "")
+        choice = str((c or {}).get("choice") or "")
+        if not key:
+            errors.append("選択にキーがありません。")
+        elif key in got:
+            errors.append(f"選択が重複しています: {key}")
+        elif choice not in ROUTE_CHOICE_VALUES:
+            errors.append(f"選べない計上先です（{choice}）: {key}")
+        else:
+            got[key] = choice
+
+    missing = [k for k in by_key if k not in got]
+    extra = [k for k in got if k not in by_key]
+    if missing:
+        sample = "、".join(_route_row_label(by_key[k]) for k in missing[:5])
+        errors.append(f"選択されていない要確認行が {len(missing)}件あります: {sample}"
+                      + ("…" if len(missing) > 5 else ""))
+    if extra:
+        sample = "、".join(k.rsplit("|", 4)[0] for k in extra[:5])
+        errors.append(f"要確認行に無い選択が {len(extra)}件あります: {sample}"
+                      + ("…" if len(extra) > 5 else ""))
+    if errors:
+        return [], errors
+    return [(by_key[k], got[k]) for k, _r in pairs], []
+
+
+def load_travel_members(log_func=print) -> dict:
+    """移動交通費（立替精算）対象者リストを読む。読めなくても空 dict で続行する。
+
+    経路突合の判定と、インポート行での自動付け替え（通勤系→立替金）の両方で使う。
+    """
+    try:
+        from services.expense_check import load_travel_expense_members
+        members = load_travel_expense_members()
+    except Exception as e:  # noqa: BLE001
+        log_func(f"[warn] 移動交通費対象者リストの読込に失敗（対象者判定なしで続行）: {e}")
+        return {}
+    if members:
+        log_func(f"[info] 移動交通費（立替精算）対象者: {len(members)} 名")
+    else:
+        from config import Config
+        log_func(f"[warn] 移動交通費対象者リストが見つかりません"
+                 f"（{Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV}）→ 対象者判定なしで続行")
+    return members
 
 
 # ======================================================================
@@ -661,14 +764,20 @@ _ROUTE_COLS = ["社員番号", "氏名", "利用日", "交通機関", "内訳", 
                "経路", "金額", "往復", "備考(明細)", "登録通勤経路", "一致", "判定"]
 
 
+_ROUTE_REVIEW_COLS = ["人間判定", "計上先変更"]
+
+
 def _write_route_sheet(ws, rows: list[dict]) -> None:
     red = PatternFill("solid", fgColor="FFC7CE")
     yellow = PatternFill("solid", fgColor="FFEB9C")
-    ws.append(_ROUTE_COLS)
+    # レビューを通した行があれば、人が何を選んだかを証跡として2列足す
+    reviewed = any(k in r for r in rows for k in _ROUTE_REVIEW_COLS)
+    cols = _ROUTE_COLS + (_ROUTE_REVIEW_COLS if reviewed else [])
+    ws.append(cols)
     for c in ws[1]:
         c.font = Font(name=FONT, bold=True)
     for r in rows:
-        ws.append([r.get(c, "") for c in _ROUTE_COLS])
+        ws.append([r.get(c, "") for c in cols])
         verdict = r.get("判定", "")
         if verdict.startswith("★"):
             for c in ws[ws.max_row]:
@@ -676,21 +785,28 @@ def _write_route_sheet(ws, rows: list[dict]) -> None:
         elif verdict.startswith("△"):
             for c in ws[ws.max_row]:
                 c.fill = yellow
-    widths = [9, 12, 10, 18, 14, 12, 12, 40, 8, 6, 20, 40, 12, 34]
-    for i, w in enumerate(widths, start=1):
+    widths = [9, 12, 10, 18, 14, 12, 12, 40, 8, 6, 20, 40, 12, 34, 22, 30]
+    for i, w in enumerate(widths[:len(cols)], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
     if ws.max_row >= 1:
         ws.auto_filter.ref = ws.dimensions
 
 
-def add_route_check_sheets(wb: Workbook, route_results: list[dict]) -> dict:
-    """「要確認」「全交通費行」シートを追加し、集計サマリを返す。"""
+def add_route_check_sheets(wb: Workbook, route_results: list[dict],
+                           index: "int | None" = None) -> dict:
+    """「要確認」「全交通費行」シートを追加し、集計サマリを返す。
+
+    index を渡すとその位置に差し込む。経路突合レビューの結果（人間判定）を
+    書くには分類より後に呼ぶ必要があるが、シートの並びは従来どおりにしたいため。
+    """
     flagged = [x for x in route_results if x["判定"].startswith("★")]
     rev_flagged = [x for x in route_results if x["判定"].startswith("△")]
-    ws1 = wb.create_sheet("要確認(経路突合)")
+    ws1 = wb.create_sheet("要確認(経路突合)") if index is None \
+        else wb.create_sheet("要確認(経路突合)", index)
     _write_route_sheet(ws1, flagged + rev_flagged)
-    ws2 = wb.create_sheet("全交通費行(経路突合)")
+    ws2 = wb.create_sheet("全交通費行(経路突合)") if index is None \
+        else wb.create_sheet("全交通費行(経路突合)", index + 1)
     _write_route_sheet(ws2, route_results)
 
     def _emp_count(rows):
@@ -728,6 +844,7 @@ class KeihiResult:
     import_preview: list = field(default_factory=list)     # インポート行プレビュー（人間チェック用）
     import_warnings: list = field(default_factory=list)
     commute_cuts: list = field(default_factory=list)        # 通勤費の上限カット明細（投入前確認用）
+    route_moves: list = field(default_factory=list)         # 通勤費↔立替金の付け替え明細
     import_csv_name: str = ""                               # 出力したインポートCSVのファイル名
     sap_dedup: dict = field(default_factory=dict)           # SAP台帳突合の統計（未実施なら空）
     error: str = ""
@@ -807,6 +924,129 @@ def build_integrated_rows(
     return rows, counts
 
 
+@dataclass
+class RoutePreviewResult:
+    ok: bool
+    review_rows: list = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+    error: str = ""
+    logs: list = field(default_factory=list)
+
+
+def fetch_roster_and_commute(client=None, route_check: bool = True, log_func=print):
+    """jinjer API から (ロスター, 社員番号→氏名, 通勤経路) を取る。API不通なら空で続行する。
+
+    経費は前月分を当月の給与計算で精算するため、前月1日以降の退職者も含める
+    （例: 8月給与計算＝7月経費の処理時は 7/31 退職者まで。2026-08-03 谷津さん依頼）。
+    """
+    roster: dict = {}
+    roster_id_to_name: dict = {}
+    commute_rows: list[dict] = []
+    try:
+        from datetime import date, timedelta
+        from services.expense_check import fetch_active_employees, fetch_commute_rows_via_api
+        from services.jinjer_api_client import JinjerClient
+        if client is None:
+            client = JinjerClient()
+            client.authenticate()
+        prev_month_start = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
+        employees = fetch_active_employees(client, include_retired_since=prev_month_start)
+        roster = build_roster_from_api(employees)
+        roster_id_to_name = {str(e["id"]): e["name"] for e in employees}
+        log_func(f"[info] jinjer ロスター: {len(employees)} 名"
+                 f"（在籍＋{prev_month_start:%Y-%m} 以降の退職者）")
+        if route_check:
+            commute_rows = fetch_commute_rows_via_api(client, roster_id_to_name)
+            log_func(f"[info] 通勤経路(API): {len(commute_rows)} 経路")
+    except Exception as e:  # noqa: BLE001 — API 不通でも jinjer CSV 由来のロスターで続行
+        log_func(f"[warn] jinjer API に接続できませんでした（CSV由来のロスターで続行）: {e}")
+    return roster, roster_id_to_name, commute_rows
+
+
+def run_keihi_route_preview(
+    jinjer_csv: "str | Path | None" = None,
+    estaffing_csv: "str | Path | None" = None,
+    keywords_file: "str | Path | None" = None,
+    log_func=print,
+    client=None,
+    commute_rows: "list | None" = None,
+    travel_members: "dict | None" = None,
+    roster: "dict | None" = None,
+) -> RoutePreviewResult:
+    """経路突合の要確認行を、人が選ぶための表として返す（**ファイルは一切書かない**）。
+
+    統合一覧表を作る前に画面で計上先を決めてもらうための1段目。確定は
+    run_keihi_integration(route_choices=...) 側で、同じ計算をやり直して突き合わせる。
+
+    SAP・freee の行は交通機関も乗降場所も持たず経路突合の対象外なので、ここでは読まない。
+    そのおかげで SAP台帳突合（ファイル書き込みを伴う）を通さずに済み、
+    確定時とまったく同じ要確認行が得られる。
+    """
+    result = RoutePreviewResult(ok=False)
+    if not jinjer_csv and not estaffing_csv:
+        result.error = "経路突合の対象（jinjer経費CSV / e-staffing立替金CSV）がありません。"
+        return result
+
+    if commute_rows is None or roster is None:
+        _roster, _id2name, _commute = fetch_roster_and_commute(client, True, log_func)
+        roster = roster if roster is not None else _roster
+        commute_rows = commute_rows if commute_rows is not None else _commute
+    if travel_members is None:
+        travel_members = load_travel_members(log_func)
+
+    try:
+        rows, _counts = build_integrated_rows(
+            jinjer_csv=jinjer_csv, estaffing_csv=estaffing_csv,
+            roster=roster, log_func=log_func)
+    except Exception as e:  # noqa: BLE001
+        result.error = f"統合一覧表の生成に失敗しました: {e}"
+        return result
+
+    from services.keihi_classify import (
+        MOVABLE_SIDES, classify_rows, load_keywords, main_entry_by_row, side_by_row,
+    )
+    keywords = load_keywords(keywords_file) if keywords_file else None
+    cls = classify_rows(rows, keywords)
+    main = main_entry_by_row(cls.log)
+    sides = side_by_row(cls.log)
+
+    route_results = evaluate_route_check(rows, commute_rows, travel_members)
+    review: list[dict] = []
+    for key, r in build_route_choice_keys(route_results, travel_members):
+        row_no = r.get("行番号")
+        side = sides.get(row_no, "対象外（金額なし）")
+        entry = main.get(row_no)
+        movable = side in MOVABLE_SIDES
+        review.append({
+            "key": key,
+            "判定": r.get("判定", ""),
+            "社員番号": r.get("社員番号", ""), "氏名": r.get("氏名", ""),
+            "利用日": r.get("利用日", ""), "交通機関": r.get("交通機関", ""),
+            "内訳": r.get("内訳", ""), "金額": r.get("金額", ""),
+            "乗車場所": r.get("乗車場所", ""), "降車場所": r.get("降車場所", ""),
+            "一致": r.get("一致", ""), "登録通勤経路": r.get("登録通勤経路", ""),
+            "計上先": side,
+            "付替可": movable,
+            "移動額": int(round(float(entry.amount or 0))) if entry else 0,
+            # 既定は現状維持（人が触らなければ今までと同じ結果になる）
+            "既定選択": side if movable else "対象外",
+        })
+    flagged = sum(1 for x in review if str(x["判定"]).startswith("★"))
+    result.review_rows = review
+    result.summary = {
+        "review_rows": len(review),
+        "flagged_rows": flagged,
+        "rev_rows": len(review) - flagged,
+        "movable_rows": sum(1 for x in review if x["付替可"]),
+        "travel_members": len(travel_members),
+        "total_rows": len(route_results),
+    }
+    log_func(f"[info] 経路突合レビュー対象: {len(review)}行"
+             f"（★{flagged} / △{len(review) - flagged}）")
+    result.ok = True
+    return result
+
+
 def run_keihi_integration(
     output_path: Path,
     jinjer_csv: "str | Path | None" = None,
@@ -822,6 +1062,7 @@ def run_keihi_integration(
     sap_import_month: "str | None" = None,
     sap_record_ledger: bool = False,
     sap_record_skip_reason: "str | None" = None,
+    route_choices: "list | None" = None,
     log_func=print,
     client=None,
 ) -> KeihiResult:
@@ -846,6 +1087,9 @@ def run_keihi_integration(
         sap_record_skip_reason: sap_record_ledger=False にした理由（画面に出す）。
                            黙って記録しないと「台帳に入ったつもり」で確定が漏れ、
                            翌月の除外が効かず二重計上になるため必ず伝える
+        route_choices: 経路突合レビューで人が選んだ計上先 [{key, choice}]。
+                       run_keihi_route_preview が返したキーと1件でも食い違えばエラー停止する
+                       （プレビュー後に入力CSVが変わった＝人が見ていない行が混ざるため）
         client: jinjer API クライアント（省略時は route_check/ロスターのため内部生成）
     """
     result = KeihiResult(ok=False, output_path=output_path)
@@ -948,26 +1192,8 @@ def run_keihi_integration(
     roster_id_to_name: dict = {}
     commute_rows: list[dict] = []
     if route_check or estaffing_csv or sap_csv or freee_csv:
-        try:
-            from datetime import date, timedelta
-            from services.expense_check import fetch_active_employees, fetch_commute_rows_via_api
-            from services.jinjer_api_client import JinjerClient
-            if client is None:
-                client = JinjerClient()
-                client.authenticate()
-            prev_month_start = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
-            employees = fetch_active_employees(client, include_retired_since=prev_month_start)
-            roster = build_roster_from_api(employees)
-            roster_id_to_name = {str(e["id"]): e["name"] for e in employees}
-            log_func(
-                f"[info] jinjer ロスター: {len(employees)} 名"
-                f"（在籍＋{prev_month_start:%Y-%m} 以降の退職者）"
-            )
-            if route_check:
-                commute_rows = fetch_commute_rows_via_api(client, roster_id_to_name)
-                log_func(f"[info] 通勤経路(API): {len(commute_rows)} 経路")
-        except Exception as e:  # noqa: BLE001 — API 不通でも jinjer CSV から最低限のロスターで続行
-            log_func(f"[warn] jinjer API に接続できませんでした（CSV由来のロスターで続行）: {e}")
+        roster, roster_id_to_name, commute_rows = fetch_roster_and_commute(
+            client, route_check, log_func)
 
     # --- 統合一覧表を組み立て ---
     try:
@@ -998,33 +1224,41 @@ def run_keihi_integration(
         add_sap_dedup_sheet(wb, sap_ledger_fieldnames, sap_review_rows,
                             title="SAP要確認", accent="B8860B",
                             empty_note="(要確認の行はありません)")
+    # 移動交通費（立替精算）対象者リスト（共有フォルダ）。読めなくても続行する。
+    # 経路突合の判定と、インポート行での自動付け替えの両方で使うので必ず1回だけ読む
+    # （以前は上限が設定されているときだけ読んでいて、上限0だと付け替えが効かなかった）。
+    travel_members: dict = load_travel_members(log_func)
+
+    # 経路突合シートは「人間判定」を書くため分類の後で作る。並び順は従来どおりにしたいので
+    # この位置（統合一覧表・SAPシートの直後）を覚えておいて、後から index 指定で差し込む。
+    route_sheet_anchor = len(wb.sheetnames)
+    route_results: list[dict] = []
     if route_check:
         try:
-            # 移動交通費（立替精算）対象者リスト（共有フォルダ）。読めなくても続行する
-            travel_members: dict = {}
-            try:
-                from services.expense_check import load_travel_expense_members
-                travel_members = load_travel_expense_members()
-                if travel_members:
-                    log_func(f"[info] 移動交通費（立替精算）対象者: {len(travel_members)} 名")
-                else:
-                    from config import Config
-                    log_func(
-                        f"[warn] 移動交通費対象者リストが見つかりません"
-                        f"（{Config.KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV}）→ 対象者判定なしで続行"
-                    )
-            except Exception as e:  # noqa: BLE001
-                log_func(f"[warn] 移動交通費対象者リストの読込に失敗（対象者判定なしで続行）: {e}")
-
             route_results = evaluate_route_check(rows, commute_rows, travel_members)
-            result.route_summary = add_route_check_sheets(wb, route_results)
-            log_func(
-                f"[info] 経路突合: ★要確認 {result.route_summary['flagged_rows']}行/"
-                f"{result.route_summary['flagged_emps']}名（約{result.route_summary['flagged_amount']:,}円）・"
-                f"△逆要確認 {result.route_summary['rev_rows']}行/{result.route_summary['rev_emps']}名"
-            )
         except Exception as e:  # noqa: BLE001 — 経路突合が失敗しても統合一覧表は出す
             log_func(f"[warn] 経路突合チェックの作成に失敗（スキップ）: {e}")
+
+    # --- 経路突合レビューの選択を検証（分類・ファイル出力より前に落とす）---
+    matched_choices: list = []
+    if route_choices is not None:
+        if not route_check:
+            result.error = "経路突合がオフのため、レビューの選択を反映できません。"
+            log_func(f"[error] {result.error}")
+            return result
+        if route_choices and not classify:
+            result.error = "分類・集計がオフのため、レビューの選択を反映できません。"
+            log_func(f"[error] {result.error}")
+            return result
+        matched_choices, choice_errors = match_route_choices(
+            route_results, route_choices, travel_members)
+        if choice_errors:
+            result.error = ("経路突合の内容がプレビュー時と一致しません"
+                            "（入力CSVが変わった可能性があります）。"
+                            "もう一度実行してプレビューからやり直してください。\n"
+                            + "\n".join(choice_errors))
+            log_func(f"[error] {result.error}")
+            return result
 
     # --- 分類・集計（P1b）＋ jinjer給与インポートのプレビュー ---
     if classify:
@@ -1042,6 +1276,7 @@ def run_keihi_integration(
             commute_by_id = stats.pop("_commute", {})
             commute_other_by_id = stats.pop("_commute_other", {})
             commute_months = stats.pop("_commute_months", {})
+            cls_log = stats.pop("_log", [])   # 付け替えで行ごとの計上先を引くため
             result.classify_summary = stats
             log_func(
                 f"[info] 分類・集計: 処理 {stats['classified_hits']} 件 / 集計 {stats['summary_employees']} 名 / "
@@ -1054,30 +1289,42 @@ def run_keihi_integration(
             # 通勤費の月額上限は集計ではなくここで掛ける。集計シートはマクロとの
             # 全行一致検証に使うので値を動かさない（2026-08-06 谷津さん指定）。
             from config import Config as _Cfg
-            from services.expense_check import load_travel_expense_members as _load_travel
             from services.kotsuhi_seisa import load_limit_exempt_members as _load_exempt
             _limit = int(getattr(_Cfg, "KOTSUHI_MONTHLY_LIMIT", 0) or 0)
             _exempt: dict = {}
-            _travel: dict = {}
             if _limit:
                 from pathlib import Path as _P
                 try:
                     _exempt = _load_exempt(_P(getattr(_Cfg, "KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV", "")))
                 except Exception as _e:  # noqa: BLE001
                     log_func(f"[warn] 上限免除者リストを読めませんでした（免除なしで続行）: {_e}")
-                try:
-                    _travel = _load_travel()
-                except Exception as _e:  # noqa: BLE001
-                    log_func(f"[warn] 移動交通費対象者リストを読めませんでした（免除なしで続行）: {_e}")
                 log_func(f"[info] 通勤費の上限 {_limit:,}円 を適用（免除 {len(_exempt)}名 / "
-                         f"移動交通費対象者 {len(_travel)}名）")
+                         f"移動交通費対象者 {len(travel_members)}名）")
+
+            # 経路突合レビューで人が選んだ計上先を、インポート行の付け替え差分にする
+            _plan = None
+            if matched_choices:
+                from services.keihi_payroll_import import plan_route_moves
+                _plan, _plan_errors = plan_route_moves(
+                    matched_choices, cls_log, travel_members)
+                if _plan_errors:
+                    result.error = ("経路突合の選択を反映できませんでした。\n"
+                                    + "\n".join(_plan_errors))
+                    log_func(f"[error] {result.error}")
+                    return result
+
             import_rows, warnings, commute_cuts = build_import_rows(
                 agg.by_id, emp_names, roster_id_to_name, manual=manual_items,
                 commute_by_id=commute_by_id, commute_other_by_id=commute_other_by_id,
-                commute_limit=_limit or None, limit_exempt=_exempt, travel_members=_travel,
-                commute_months=commute_months)
+                commute_limit=_limit or None, limit_exempt=_exempt,
+                travel_members=travel_members, commute_months=commute_months,
+                route_plan=_plan, moves=result.route_moves)
             result.import_preview = import_rows
             result.commute_cuts = commute_cuts
+            for m in result.route_moves:
+                if m.get("変更") != "変更なし":
+                    log_func(f"[info] 付け替え {m['社員番号']} {m['氏名']}: "
+                             f"{m['変更']} {m['金額']:,}円（{m['理由']}）")
             for c in commute_cuts:
                 log_func(f"[info] 上限カット {c['社員番号']} {c['氏名']}: "
                          f"{c['交通費(H)']:,}円 → {c['カット後']:,}円（-{c['カット額']:,}円）")
@@ -1109,6 +1356,24 @@ def run_keihi_integration(
                 log_func(f"[warn] {w}")
         except Exception as e:  # noqa: BLE001 — 分類が失敗しても統合一覧表は出す
             log_func(f"[warn] 分類・集計の作成に失敗（スキップ）: {e}")
+
+    # 経路突合シート（人間判定を書くため分類の後。並びは route_sheet_anchor で従来どおり）
+    if route_check and route_results:
+        try:
+            if route_choices is not None:
+                # 対象者の行は人に選ばせず自動で立替金に寄せる。何もしていないように
+                # 見えないよう、シート上は「自動」と分かるようにしておく
+                for _r in route_results:
+                    if str(_r.get("社員番号") or "") in travel_members:
+                        _r.setdefault("人間判定", "自動（移動交通費対象者）")
+            result.route_summary = add_route_check_sheets(wb, route_results, route_sheet_anchor)
+            log_func(
+                f"[info] 経路突合: ★要確認 {result.route_summary['flagged_rows']}行/"
+                f"{result.route_summary['flagged_emps']}名（約{result.route_summary['flagged_amount']:,}円）・"
+                f"△逆要確認 {result.route_summary['rev_rows']}行/{result.route_summary['rev_emps']}名"
+            )
+        except Exception as e:  # noqa: BLE001 — 経路突合が失敗しても統合一覧表は出す
+            log_func(f"[warn] 経路突合シートの作成に失敗（スキップ）: {e}")
 
     try:
         wb.calculation.fullCalcOnLoad = True

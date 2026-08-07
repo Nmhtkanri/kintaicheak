@@ -259,6 +259,108 @@ def load_irregular_file(path: "str | Path", label: str = "イレギュラー経�
     return out, errors
 
 
+@dataclass
+class RouteMovePlan:
+    """経路突合レビューの選択を、インポート行に反映するための差分。
+
+    集計シート（マクロとの全行一致検証に使う）は動かさず、インポート行の
+    非課税通勤費／立替金だけを付け替える（2026-08-06 の上限カットと同じ方針）。
+    """
+    to_nontax: dict = field(default_factory=dict)      # 社員番号 → 非課税通勤費→立替金 へ移す額
+    to_trans: dict = field(default_factory=dict)       # 社員番号 → 立替金→非課税通勤費 へ移す額
+    commute_delta: dict = field(default_factory=dict)  # commute_by_id への加算（±・上限判定の材料）
+    other_delta: dict = field(default_factory=dict)    # commute_other_by_id への加算（±）
+    months_add: dict = field(default_factory=dict)     # 社員番号 → 追加する利用月の集合
+    reviewed_emps: set = field(default_factory=set)    # 選択が確定した社員（自動付替を抑止）
+    details: list = field(default_factory=list)        # 明細（console・画面表示用）
+
+
+def plan_route_moves(matched: list, cls_log: list,
+                     travel_members: "dict | None" = None) -> tuple[RouteMovePlan, list]:
+    """経路突合レビューの [(行, 選択)] から付け替えの差分を組み立てる。
+
+    人間が「通勤費」と判定した金額は、上限3万円の判定にも入れる
+    （利用月も複数月警告の材料に加える。2026-08-07 谷津さん決定）。
+
+    整合が取れない選択（付け替えできない行への指定・対象者の行の混入）は
+    エラーにして呼び出し側で停止させる。プレビューが古いまま確定された印なので、
+    黙って無視すると人が見ていない状態で計上先が決まってしまう。
+    """
+    from services.keihi_classify import (
+        COMMUTE_LIMIT_KEYWORDS, MOVABLE_SIDES, SIDE_TRANS, SIDE_TRAVEL,
+        _use_month, entry_side, main_entry_by_row, side_by_row,
+    )
+    travel_members = travel_members or {}
+    plan = RouteMovePlan()
+    errors: list[str] = []
+    main = main_entry_by_row(cls_log)
+    sides = side_by_row(cls_log)
+
+    for r, choice in matched:
+        emp = str(r.get("社員番号") or "")
+        name = str(r.get("氏名") or "")
+        label = f"{emp} {name} {r.get('利用日', '')} {r.get('交通機関', '')}".strip()
+        if emp in travel_members:
+            errors.append(f"{label}: 移動交通費対象者の行は自動で立替金に計上します"
+                          f"（レビュー対象外）。もう一度実行してやり直してください。")
+            continue
+        row_no = r.get("行番号")
+        entry = main.get(row_no)
+        side = entry_side(entry)
+        why = sides.get(row_no, "対象外（計上なし）")
+        if side not in MOVABLE_SIDES:
+            # 顧客請求分・夜間当番手当など。画面では固定表示（対象外）にしてあるので、
+            # 通勤費/移動交通費 が選ばれていたらプレビューが古い＝突合が壊れている印
+            if choice != "対象外":
+                errors.append(f"{label}: この行は{why}のため計上先を変えられません。"
+                              f"もう一度実行してやり直してください。")
+            else:
+                r["人間判定"] = why
+                r["計上先変更"] = "変更なし"
+            continue
+        if choice == "対象外":
+            errors.append(f"{label}: 計上先（通勤費 / 移動交通費）を選んでください。")
+            continue
+
+        plan.reviewed_emps.add(emp)
+        amt = int(round(float(entry.amount or 0)))
+        if choice == side or amt == 0:
+            plan.details.append({
+                "社員番号": emp, "氏名": name, "利用日": r.get("利用日", ""),
+                "交通機関": r.get("交通機関", ""), "金額": amt,
+                "変更": "変更なし", "理由": "人間判定",
+            })
+            r["人間判定"] = choice
+            r["計上先変更"] = "変更なし"
+            continue
+
+        if side == SIDE_TRANS:      # 通勤費 → 移動交通費（非課税通勤費 → 立替金）
+            plan.to_nontax[emp] = plan.to_nontax.get(emp, 0) + amt
+            tgt = (plan.commute_delta if str(entry.matched_kw or "") in COMMUTE_LIMIT_KEYWORDS
+                   else plan.other_delta)
+            tgt[emp] = tgt.get(emp, 0) - amt
+            change = "非課税通勤費 → 立替金"
+        else:                       # 移動交通費 → 通勤費（立替金 → 非課税通勤費）
+            plan.to_trans[emp] = plan.to_trans.get(emp, 0) + amt
+            plan.commute_delta[emp] = plan.commute_delta.get(emp, 0) + amt
+            ym = _use_month(r.get("利用日"))
+            if ym:
+                plan.months_add.setdefault(emp, set()).add(ym)
+            change = "立替金 → 非課税通勤費"
+
+        plan.details.append({
+            "社員番号": emp, "氏名": name, "利用日": r.get("利用日", ""),
+            "交通機関": r.get("交通機関", ""), "金額": amt,
+            "変更": change, "理由": "人間判定",
+        })
+        r["人間判定"] = choice
+        r["計上先変更"] = f"{change} {amt:,}円"
+
+    if errors:
+        return RouteMovePlan(), errors
+    return plan, []
+
+
 def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" = None,
                       manual: "dict | None" = None,
                       commute_by_id: "dict | None" = None,
@@ -267,6 +369,8 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
                       limit_exempt: "dict | None" = None,
                       travel_members: "dict | None" = None,
                       commute_months: "dict | None" = None,
+                      route_plan: "RouteMovePlan | None" = None,
+                      moves: "list | None" = None,
                       ) -> tuple[list[dict], list[str], list[dict]]:
     """集計（数字ID→7バケット）＋イレギュラー経費からインポート行・警告・上限カット明細を返す。
 
@@ -278,17 +382,32 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
     commute_limit を渡すと**非課税通勤費に月額上限を適用する**（2026-08-06 谷津さん指定）。
     切るのは交通費(H)のうち通勤系と確信できる分（commute_by_id）だけで、同じHに入る
     駐車場代など（commute_other_by_id）は上限の対象外として素通しする。
-    上限が掛からないのは limit_exempt（個別許可）と travel_members（移動交通費＝立替精算）。
+    上限が掛からないのは limit_exempt（個別許可）。
     カットは黙って行わず、必ず warnings と cuts の両方に出して投入前に人が見られるようにする。
+
+    travel_members（移動交通費＝立替精算の対象者）の通勤系申請分は、非課税通勤費ではなく
+    立替金に計上する（2026-08-07 谷津さん指定）。付け替え後は通勤費0になるので上限も掛からない。
+    route_plan（経路突合レビューで人が選んだ結果）がある社員はそちらを正とし、二重に動かさない。
+    付け替えも黙って行わず warnings と moves に出す。
     """
     from services.keihi_summary import in_company_scope
     roster_names = roster_names or {}
     manual = manual or {}
-    commute_by_id = commute_by_id or {}
-    commute_other_by_id = commute_other_by_id or {}
     limit_exempt = limit_exempt or {}
     travel_members = travel_members or {}
-    commute_months = commute_months or {}
+    # 付け替えで上限判定の材料（通勤費分・利用月）も動く。呼び出し元の dict は壊さずコピーで扱う
+    commute_by_id = dict(commute_by_id or {})
+    commute_other_by_id = dict(commute_other_by_id or {})
+    commute_months = {k: set(v) for k, v in (commute_months or {}).items()}
+    if route_plan:
+        for _emp, _d in route_plan.commute_delta.items():
+            commute_by_id[_emp] = commute_by_id.get(_emp, 0.0) + _d
+        for _emp, _d in route_plan.other_delta.items():
+            commute_other_by_id[_emp] = commute_other_by_id.get(_emp, 0.0) + _d
+        for _emp, _ms in route_plan.months_add.items():
+            commute_months.setdefault(_emp, set()).update(_ms)
+        if moves is not None:
+            moves.extend(route_plan.details)
     manual_ids: set = set()
     for _d in manual.values():
         manual_ids |= set(_d or {})
@@ -302,6 +421,28 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
         v = by_id.get(emp_id) or [0.0] * 7
         name = emp_names.get(emp_id) or roster_names.get(emp_id, "")
         trans = int(v[B_TRANS])
+        nontax = int(v[B_NONTAX])
+        if route_plan:
+            # 人間が選んだ分を付け替える（合計は不変＝集計シートの判定列に影響しない）
+            _out = route_plan.to_nontax.get(emp_id, 0)
+            _in = route_plan.to_trans.get(emp_id, 0)
+            trans += _in - _out
+            nontax += _out - _in
+        if emp_id in travel_members and not (route_plan and emp_id in route_plan.reviewed_emps):
+            auto = int(round(commute_by_id.get(emp_id, 0)))
+            if auto:
+                trans -= auto
+                nontax += auto
+                commute_by_id[emp_id] = 0.0     # 付け替え済み＝上限判定の対象から外す
+                if moves is not None:
+                    moves.append({
+                        "社員番号": emp_id, "氏名": name, "利用日": "", "交通機関": "",
+                        "金額": auto, "変更": "非課税通勤費 → 立替金",
+                        "理由": "移動交通費対象者（自動）",
+                    })
+                warnings.append(
+                    f"ℹ️ {emp_id} {name}: 通勤費 {auto:,}円 を立替金（移動交通費）へ"
+                    f"付け替えました（移動交通費（立替精算）対象者）。")
         if commute_limit:
             trans = _apply_commute_limit(
                 emp_id, name, trans, commute_by_id, commute_other_by_id,
@@ -313,7 +454,7 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
             "夜間当番手当": int(v[B_YAKAN] + v[B_RINK]),   # F列相当（夜間＋RINK）
             "非課税通勤費": trans,
             "立替金（顧客請求分）": int(v[B_BILL]),
-            "立替金": int(v[B_NONTAX]),
+            "立替金": nontax,
             "その他": int(v[B_ETC]),
             "テレワーク手当": int(v[B_TW]),
         }
@@ -330,6 +471,12 @@ def build_import_rows(by_id: dict, emp_names: dict, roster_names: "dict | None" 
         total = sum(c["カット額"] for c in cuts)
         warnings.insert(0, f"✂️ 通勤費の上限カット: {len(cuts)}名 / 計 {total:,}円 を減額しました。"
                            f"投入前に下の明細を必ず確認してください。")
+    moved = [m for m in (moves or []) if m.get("変更") != "変更なし"]
+    if moved:
+        total = sum(m["金額"] for m in moved)
+        warnings.insert(0, f"🔁 通勤費↔立替金の付け替え: {len(moved)}件 / 計 {total:,}円。"
+                           f"人件費区分が本社の方は経理仕訳で立替金が計上されない仕様なので、"
+                           f"該当者がいれば経理モードの警告も確認してください。")
     return rows, warnings, cuts
 
 

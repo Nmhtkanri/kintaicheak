@@ -352,6 +352,102 @@ def test_route_check_travel_member_overrides_on_route_flag():
 
 
 # ----------------------------------------------------------------------
+# 経路突合レビュー（人が行ごとに計上先を選ぶ二段階実行・2026-08-07）
+# ----------------------------------------------------------------------
+
+def _review_rows():
+    """★1行・△1行・OK1行・対象者の△1行 の経路突合結果を作る。"""
+    commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "電車"}]
+    rows = [
+        _integrated_transit("2020001", "東京", "品川", "交通費（電車・バス）"),  # ★
+        _integrated_transit("2020001", "東京", "品川", "通勤定期代"),            # OK
+        _integrated_transit("2020001", "渋谷", "新宿", "通勤定期代"),            # △
+        _integrated_transit("2018017", "東京", "品川", "通勤定期代"),            # △（対象者）
+    ]
+    return evaluate_route_check(rows, commute, {"2018017": "中村 淳一"})
+
+
+def test_route_choice_keys_cover_only_reviewable_rows():
+    """★△だけにキーを振り、移動交通費対象者の行は人に選ばせない（自動計上のため）。"""
+    from services.keihi_summary import build_route_choice_keys
+    pairs = build_route_choice_keys(_review_rows(), {"2018017": "中村 淳一"})
+    assert [r["判定"][0] for _k, r in pairs] == ["★", "△"]
+    assert all("2018017" not in k for k, _r in pairs)
+
+
+def test_route_choice_keys_number_duplicate_rows():
+    """同じ内容の行が並んでも連番で区別でき、何度呼んでも同じキーになる。"""
+    from services.keihi_summary import build_route_choice_keys
+    rows = [_integrated_transit("2020001", "渋谷", "新宿", "通勤定期代")] * 2
+    res = evaluate_route_check(rows, [])
+    keys1 = [k for k, _r in build_route_choice_keys(res)]
+    keys2 = [k for k, _r in build_route_choice_keys(res)]
+    assert keys1 == keys2
+    assert keys1[0].endswith("|1") and keys1[1].endswith("|2")
+    assert len(set(keys1)) == 2
+
+
+def test_match_route_choices_accepts_exact_set():
+    from services.keihi_summary import build_route_choice_keys, match_route_choices
+    res = _review_rows()
+    pairs = build_route_choice_keys(res, {"2018017": "中村 淳一"})
+    choices = [{"key": k, "choice": "通勤費"} for k, _r in pairs]
+    matched, errors = match_route_choices(res, choices, {"2018017": "中村 淳一"})
+    assert errors == []
+    assert [c for _r, c in matched] == ["通勤費", "通勤費"]
+
+
+def test_match_route_choices_rejects_any_mismatch():
+    """過不足・不正な選択・重複はすべてエラー。黙って一部だけ反映しない。"""
+    from services.keihi_summary import build_route_choice_keys, match_route_choices
+    res = _review_rows()
+    travel = {"2018017": "中村 淳一"}
+    pairs = build_route_choice_keys(res, travel)
+    full = [{"key": k, "choice": "通勤費"} for k, _r in pairs]
+
+    for label, choices in (
+        ("不足", full[:1]),
+        ("過剰", full + [{"key": "9999999|2026/6/1|通勤定期代|300||　|1", "choice": "通勤費"}]),
+        ("不正な値", [{"key": c["key"], "choice": "その他"} for c in full]),
+        ("重複", full + [full[0]]),
+    ):
+        matched, errors = match_route_choices(res, choices, travel)
+        assert errors, f"{label} がエラーになっていません"
+        assert matched == []
+
+
+def test_route_preview_defaults_and_writes_no_file(tmp_path):
+    """プレビューは既定＝現状維持で返し、ファイルを1つも作らない。"""
+    import csv
+    from services.keihi_summary import run_keihi_route_preview
+    jcsv = tmp_path / "jinjer.csv"
+    with open(jcsv, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(31)])
+        # ★経路内なのに通勤系以外 → 分類は「I:非課税精算」＝移動交通費側
+        w.writerow(_jinjer_row(emp="2020001", trans="交通費（電車・バス）", total="300"))
+        # △通勤系だが経路外 → 分類は「H:交通費」＝通勤費側
+        w.writerow(_jinjer_row(emp="2020001", trans="通勤定期代", total="8000",
+                               use="2026/07/01"))
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "電車"}]
+    # 乗降場所は CSV に無いので経路突合は「通勤経路登録なし」→ △ になる行だけ拾う
+    res = run_keihi_route_preview(jinjer_csv=jcsv, log_func=lambda m: None,
+                                  commute_rows=commute, travel_members={}, roster={})
+    assert res.ok is True
+    assert sorted(p.name for p in tmp_path.iterdir()) == before   # ファイルを作らない
+
+    by_kikan = {r["交通機関"]: r for r in res.review_rows}
+    assert by_kikan["通勤定期代"]["計上先"] == "通勤費"
+    assert by_kikan["通勤定期代"]["付替可"] is True
+    assert by_kikan["通勤定期代"]["既定選択"] == "通勤費"      # 触らなければ現状維持
+    assert by_kikan["通勤定期代"]["移動額"] == 8000
+
+
+# ----------------------------------------------------------------------
 # Excel 出力・統合
 # ----------------------------------------------------------------------
 
@@ -383,6 +479,98 @@ def test_build_integrated_rows_order_and_counts(tmp_path):
     assert counts["jinjer"] == 1
     assert counts["estaffing"] is None      # 未取込
     assert rows[0][C_EMP] == "2026013"
+
+
+def _route_choice_csv(tmp_path):
+    """★（経路内なのに立替系）と △（通勤系だが経路外）が1行ずつ出る jinjer CSV。"""
+    import csv
+    star = _jinjer_row(emp="2020001", trans="交通費（電車・バス）", total="300")
+    star[C_BOARD], star[C_ALIGHT] = "東京", "品川"
+    rev = _jinjer_row(emp="2020001", trans="通勤定期代", total="8000", use="2026/07/01")
+    rev[C_BOARD], rev[C_ALIGHT] = "渋谷", "新宿"
+    jcsv = tmp_path / "jinjer.csv"
+    with open(jcsv, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(31)])
+        w.writerow(star)
+        w.writerow(rev)
+    commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "電車"}]
+    return jcsv, commute
+
+
+def _offline_route_check(monkeypatch, commute):
+    """jinjer API を叩かずに経路突合を回す（通勤経路だけ差し込む）。"""
+    import services.keihi_summary as ks
+    monkeypatch.setattr(ks, "fetch_roster_and_commute",
+                        lambda client, route_check, log_func: ({}, {}, commute))
+    monkeypatch.setattr(ks, "load_travel_members", lambda log_func=print: {})
+
+
+def test_run_keihi_integration_applies_route_choices(tmp_path, monkeypatch):
+    """人が選んだ計上先どおりに非課税通勤費と立替金を入れ替え、証跡を残す。"""
+    from openpyxl import load_workbook
+    from services.keihi_summary import run_keihi_route_preview
+    jcsv, commute = _route_choice_csv(tmp_path)
+    _offline_route_check(monkeypatch, commute)
+
+    pre = run_keihi_route_preview(jinjer_csv=jcsv, log_func=lambda m: None,
+                                  commute_rows=commute, travel_members={}, roster={})
+    assert {r["交通機関"]: r["計上先"] for r in pre.review_rows} == {
+        "交通費（電車・バス）": "移動交通費", "通勤定期代": "通勤費"}
+    # ★は通勤費へ、△は移動交通費へ（＝両者を入れ替える）
+    choices = [{"key": r["key"],
+                "choice": "移動交通費" if r["交通機関"] == "通勤定期代" else "通勤費"}
+               for r in pre.review_rows]
+
+    out = tmp_path / "integrated.xlsx"
+    res = run_keihi_integration(output_path=out, jinjer_csv=jcsv, route_check=True,
+                                classify=True, route_choices=choices,
+                                log_func=lambda m: None)
+    assert res.ok is True
+    row = res.import_preview[0]
+    assert (row["非課税通勤費"], row["立替金"]) == (300, 8000)   # 8000 と 300 が入れ替わる
+    assert sum(v for k, v in row.items() if isinstance(v, int)) == 8300   # 合計は不変
+    assert sorted(m["変更"] for m in res.route_moves) == [
+        "立替金 → 非課税通勤費", "非課税通勤費 → 立替金"]
+
+    wb = load_workbook(out)
+    # シートの並びは従来どおり（経路突合は分類より後に書くが位置は変えない）
+    assert wb.sheetnames == ["経費統合一覧表", "要確認(経路突合)", "全交通費行(経路突合)",
+                             "集計", "集計ログ"]
+    ws = wb["要確認(経路突合)"]
+    header = [c.value for c in ws[1]]
+    assert header[-2:] == ["人間判定", "計上先変更"]
+    judged = {ws.cell(row=r, column=4).value: ws.cell(row=r, column=len(header)).value
+              for r in (2, 3)}
+    assert judged["交通費（電車・バス）"] == "立替金 → 非課税通勤費 300円"
+    assert judged["通勤定期代"] == "非課税通勤費 → 立替金 8,000円"
+    wb.close()
+
+
+def test_run_keihi_integration_stops_when_choices_do_not_match(tmp_path, monkeypatch):
+    """プレビュー後に入力が変わった場合は生成せず止める（人が見ていない行を通さない）。"""
+    jcsv, commute = _route_choice_csv(tmp_path)
+    _offline_route_check(monkeypatch, commute)
+    out = tmp_path / "integrated.xlsx"
+    res = run_keihi_integration(
+        output_path=out, jinjer_csv=jcsv, route_check=True, classify=True,
+        route_choices=[{"key": "9999999|2026/6/1|通勤定期代|300|||1", "choice": "通勤費"}],
+        log_func=lambda m: None)
+    assert res.ok is False
+    assert "プレビュー" in res.error
+    assert not out.exists()
+    assert not list(tmp_path.glob("*インポート.csv"))
+
+
+def test_run_keihi_integration_requires_classify_for_choices(tmp_path, monkeypatch):
+    jcsv, commute = _route_choice_csv(tmp_path)
+    _offline_route_check(monkeypatch, commute)
+    res = run_keihi_integration(
+        output_path=tmp_path / "x.xlsx", jinjer_csv=jcsv, route_check=True,
+        classify=False, route_choices=[{"key": "a", "choice": "通勤費"}],
+        log_func=lambda m: None)
+    assert res.ok is False and "分類・集計" in res.error
 
 
 def test_run_keihi_integration_jinjer_only(tmp_path):
