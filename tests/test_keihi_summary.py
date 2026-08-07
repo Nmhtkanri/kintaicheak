@@ -418,7 +418,7 @@ def test_match_route_choices_rejects_any_mismatch():
 
 
 def test_route_preview_defaults_and_writes_no_file(tmp_path):
-    """プレビューは既定＝現状維持で返し、ファイルを1つも作らない。"""
+    """プレビューは既定＝システムの判定結果で返し、ファイルを1つも作らない。"""
     import csv
     from services.keihi_summary import run_keihi_route_preview
     jcsv = tmp_path / "jinjer.csv"
@@ -443,8 +443,25 @@ def test_route_preview_defaults_and_writes_no_file(tmp_path):
     by_kikan = {r["交通機関"]: r for r in res.review_rows}
     assert by_kikan["通勤定期代"]["計上先"] == "通勤費"
     assert by_kikan["通勤定期代"]["付替可"] is True
-    assert by_kikan["通勤定期代"]["既定選択"] == "通勤費"      # 触らなければ現状維持
+    # △（通勤系なのに登録経路と不一致）＝システムは通勤でないとみている → 移動交通費
+    assert by_kikan["通勤定期代"]["判定"].startswith("△")
+    assert by_kikan["通勤定期代"]["既定選択"] == "移動交通費"
     assert by_kikan["通勤定期代"]["移動額"] == 8000
+
+
+def test_default_route_choice_follows_system_verdict():
+    """プルダウンの初期値はシステム判定に合わせる（2026-08-07 谷津さん要望）。
+
+    ★は毎回135行あり、現状維持を初期値にすると全部選び直しになっていた。
+    """
+    from services.keihi_summary import default_route_choice
+    # ★経路内なのに通勤系以外 → 通勤費が妥当（現状の計上先が移動交通費でも通勤費を既定に）
+    assert default_route_choice("★要確認（経路内なのに通勤系以外を選択）", "移動交通費", True) == "通勤費"
+    # △通勤系なのに登録経路と不一致 → 通勤ではなさそう（現状が通勤費でも移動交通費を既定に）
+    assert default_route_choice("△逆要確認（通勤系なのに登録経路と不一致）", "通勤費", True) == "移動交通費"
+    # 計上先を動かせない行は対象外で固定
+    assert default_route_choice("★要確認（経路内なのに通勤系以外を選択）",
+                                "対象外（顧客請求分）", False) == "対象外"
 
 
 # ----------------------------------------------------------------------

@@ -603,6 +603,30 @@ def evaluate_route_check(
 ROUTE_CHOICE_VALUES = ("通勤費", "移動交通費", "対象外")
 
 
+def default_route_choice(verdict: str, side: str, movable: bool) -> str:
+    """レビュー表のプルダウンの初期値を返す。**システムの判定結果に合わせる**。
+
+    以前は「現状維持（jinjerで申請された費目のまま）」を初期値にしていたが、
+    それだと★行は毎回すべて選び直しになる。7月は★が135行あり、統合一覧表を
+    作り直すたびに選び直す手間が出た（2026-08-07 谷津さん要望で変更）。
+
+    ★要確認（登録経路内なのに通勤系以外を選択）
+        → システムは通勤費とみている。初期値は「通勤費」。
+    △逆要確認（通勤系なのに登録経路と不一致）
+        → システムは通勤ではないとみている。初期値は「移動交通費」。
+
+    どちらもシステムの推測なので、人が違うと思えばプルダウンで変えられる。
+    計上先を動かせない行（顧客請求分など）は「対象外」で固定。
+    """
+    if not movable:
+        return "対象外"
+    if verdict.startswith("★"):
+        return "通勤費"
+    if verdict.startswith("△"):
+        return "移動交通費"
+    return side
+
+
 def _route_row_label(r: dict) -> str:
     return (f"{r.get('社員番号', '')} {r.get('氏名', '')} "
             f"{r.get('利用日', '')} {r.get('交通機関', '')}").strip()
@@ -1028,8 +1052,7 @@ def run_keihi_route_preview(
             "計上先": side,
             "付替可": movable,
             "移動額": int(round(float(entry.amount or 0))) if entry else 0,
-            # 既定は現状維持（人が触らなければ今までと同じ結果になる）
-            "既定選択": side if movable else "対象外",
+            "既定選択": default_route_choice(r.get("判定", ""), side, movable),
         })
     flagged = sum(1 for x in review if str(x["判定"]).startswith("★"))
     result.review_rows = review

@@ -1841,7 +1841,8 @@
         document.getElementById('ki-route-review-note').innerHTML =
             '要確認 ' + rows.length + '行（★' + (summary.flagged_rows || 0)
             + ' / △' + (summary.rev_rows || 0) + '）のうち、計上先を選べるのは ' + movable + '行です。'
-            + '<b>触らなければ今までどおり</b>の計上になります。'
+            + '<b>初期値はシステムの判定</b>（★＝経路内なので通勤費 / △＝経路と不一致なので移動交通費）'
+            + 'が入っています。違うと思う行だけ変えてください。'
             + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金に計上するため、この表には出ません。';
         document.getElementById('ki-route-review-area').style.display = '';
     }
