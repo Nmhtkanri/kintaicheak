@@ -1750,15 +1750,78 @@ document.querySelectorAll('.keiri-tab').forEach(btn => {
     });
 });
 
+/** 「その他」の保留者を入力フォームで描く（無ければ枠ごと隠す）。 */
+function keiriRenderSonota(data) {
+    const area = document.getElementById('keiri-sonota-area');
+    const rows = document.getElementById('keiri-sonota-rows');
+    if (!area || !rows) return;
+    const pending = data.sonota_pending || [];
+    if (!pending.length) { area.style.display = 'none'; rows.innerHTML = ''; return; }
+
+    const choices = data.sonota_choices || [];
+    const dl = document.getElementById('keiri-sonota-choices');
+    if (dl) {
+        // 「勘定科目｜品目｜税区分」の1本の候補にする（3つセットで選べば取り違えが起きない）
+        dl.innerHTML = choices.map(c =>
+            '<option value="' + mailEsc(c['勘定科目'] + '｜' + c['品目'] + '｜' + c['税区分']) + '">').join('');
+    }
+    const pathEl = document.getElementById('keiri-sonota-path');
+    if (pathEl) pathEl.textContent = '台帳: ' + (data.sonota_manual_csv || '');
+
+    let html = '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th><th>金額</th>'
+             + '<th>部門</th><th>勘定科目｜品目｜税区分</th><th>備考</th></tr>';
+    pending.forEach((p, i) => {
+        html += '<tr data-emp="' + mailEsc(p['社員番号']) + '">'
+              + '<td>' + mailEsc(p['社員番号']) + '</td>'
+              + '<td>' + mailEsc(p['氏名']) + '</td>'
+              + '<td style="text-align:right">' + Number(p['金額']).toLocaleString() + '</td>'
+              + '<td>' + mailEsc(p['部門']) + '</td>'
+              + '<td><input type="text" class="keiri-sonota-combo" list="keiri-sonota-choices"'
+              + ' data-idx="' + i + '" placeholder="選ぶか直接入力" style="width:280px"></td>'
+              + '<td><input type="text" class="keiri-sonota-biko" data-idx="' + i + '"'
+              + ' placeholder="例: 有給残6日買取分" style="width:240px"></td></tr>';
+    });
+    html += '</table>';
+    rows.innerHTML = html;
+    rows.dataset.pending = JSON.stringify(pending);
+    area.style.display = 'block';
+}
+
+/** 入力欄 → 台帳へ送る行。空欄の人は送らない（＝これまでどおり保留のまま）。 */
+function keiriCollectSonota() {
+    const rows = document.getElementById('keiri-sonota-rows');
+    if (!rows || !rows.dataset.pending) return { entries: [], errors: [] };
+    const pending = JSON.parse(rows.dataset.pending);
+    const entries = [], errors = [];
+    rows.querySelectorAll('.keiri-sonota-combo').forEach(inp => {
+        const combo = (inp.value || '').trim();
+        if (!combo) return;
+        const p = pending[Number(inp.dataset.idx)];
+        const parts = combo.split(/[｜|]/).map(s => s.trim());
+        if (parts.length !== 3 || parts.some(s => !s)) {
+            errors.push(p['社員番号'] + ' ' + p['氏名']
+                + '：「勘定科目｜品目｜税区分」の3つを ｜ 区切りで入れてください（入力: ' + combo + '）');
+            return;
+        }
+        const biko = rows.querySelector('.keiri-sonota-biko[data-idx="' + inp.dataset.idx + '"]');
+        entries.push({
+            '社員番号': p['社員番号'], '氏名': p['氏名'], '金額': p['金額'],
+            '勘定科目': parts[0], '品目': parts[1], '税区分': parts[2],
+            '備考': biko ? (biko.value || '').trim() : '',
+        });
+    });
+    return { entries, errors };
+}
+
 const keiriRunBtn = document.getElementById('keiri-run-btn');
 if (keiriRunBtn) {
-    keiriRunBtn.addEventListener('click', async () => {
+    const keiriRun = async () => {
         const status = document.getElementById('keiri-status');
         const month = (document.getElementById('keiri-month').value || '').trim();
         keiriShowError([]);
         if (!/^\d{4}-\d{2}$/.test(month)) {
             keiriShowError('支給月は YYYY-MM 形式で入力してください（例: 2026-08）');
-            return;
+            return false;
         }
         const fd = new FormData();
         fd.append('month', month);
@@ -1779,7 +1842,7 @@ if (keiriRunBtn) {
             if (!data.success) {
                 keiriShowError(data.errors || ['生成に失敗しました']);
                 status.textContent = '';
-                return;
+                return false;
             }
             document.getElementById('keiri-cnt-emp').textContent = data.employees;
             document.getElementById('keiri-paid-on').textContent = data.paid_on || '—';
@@ -1790,18 +1853,61 @@ if (keiriRunBtn) {
             document.getElementById('keiri-cnt-keihi').textContent = alerts['経費転記の分解'] || 0;
             keiriRenderFiles(data);
             keiriRenderDiff(data);
+            keiriRenderSonota(data);
             document.getElementById('keiri-pane-yokakunin').innerHTML = keiriRenderMarkdown(data.yokakunin_md);
             document.getElementById('keiri-pane-kensan').innerHTML = keiriRenderMarkdown(data.kensan_md);
             document.getElementById('keiri-pane-diff').innerHTML = keiriRenderMarkdown(data.diff_md);
             document.getElementById('keiri-result-area').style.display = 'block';
             status.textContent = '完了（' + data.month + '）';
+            return true;
         } catch (e) {
             keiriShowError('通信に失敗しました: ' + e);
             status.textContent = '';
+            return false;
         } finally {
             keiriRunBtn.disabled = false;
         }
-    });
+    };
+    keiriRunBtn.addEventListener('click', keiriRun);
+
+    const sonotaSaveBtn = document.getElementById('keiri-sonota-save-btn');
+    if (sonotaSaveBtn) {
+        sonotaSaveBtn.addEventListener('click', async () => {
+            const status = document.getElementById('keiri-sonota-status');
+            const month = (document.getElementById('keiri-month').value || '').trim();
+            keiriShowError([]);
+            const { entries, errors } = keiriCollectSonota();
+            if (errors.length) { keiriShowError(errors); return; }
+            if (!entries.length) {
+                keiriShowError('科目が1件も入力されていません');
+                return;
+            }
+            sonotaSaveBtn.disabled = true;
+            status.textContent = '台帳に保存中…';
+            try {
+                const res = await fetch('/keiri_sonota_save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ month, entries }),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    keiriShowError(data.errors || ['台帳の保存に失敗しました']);
+                    status.textContent = '';
+                    return;
+                }
+                status.textContent = data.saved + '件を台帳に保存しました。仕訳を作り直しています…';
+                // 台帳を読み直させるため、同じ条件でそのまま再生成する
+                const ok = await keiriRun();
+                status.textContent = ok ? data.saved + '件を反映しました' : '';
+            } catch (e) {
+                keiriShowError('通信に失敗しました: ' + e);
+                status.textContent = '';
+            } finally {
+                sonotaSaveBtn.disabled = false;
+            }
+        });
+    }
 }
 
 // =============================================================================

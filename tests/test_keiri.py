@@ -5,12 +5,16 @@
 """
 
 import os
+import shutil
+import tempfile
 import unittest
 from collections import defaultdict
 
-from services.keiri_engine import (GENBUTSU_KEY, KYUSHOKU_BIKO, Resolver, YAKUIN_LOAN,
-                                   build_kensan, build_kyuyo, jp_date, master_skipped_report,
-                                   split_halves, split_shaho_chosei, ym_add)
+from services.keiri_engine import (GENBUTSU_KEY, KEIHI_TENKI_KEY, KYUSHOKU_BIKO, Resolver,
+                                   YAKUIN_LOAN, build_kensan, build_kyuyo, is_shaho_menjo,
+                                   is_shaho_menjo_prev, jp_date, load_sonota_manual,
+                                   master_skipped_report, save_sonota_manual, split_halves,
+                                   split_shaho_chosei, ym_add)
 from services.keiri_keihi_tenki import MAPPING_CSV, classify, decompose, load_mapping
 
 
@@ -46,6 +50,53 @@ class SplitShahoChoseiTests(unittest.TestCase):
         pi = _pi(kenpo=1000, kounen=2000, kodomo=1000)
         parts = dict(split_shaho_chosei(400, pi))       # 400 × 各/4000 → 100/200/100
         self.assertEqual(sorted(parts.values()), [100, 100, 200])
+
+
+def _shaho_pi(kenpo_honnin=0, kounen_honnin=0, kenpo_kaisha=0, kounen_kaisha=0):
+    """本人控除と会社負担を持つ payroll_info を組み立てる。"""
+    return {"salary_deduction_items": [{"id": "deduction29", "value": kenpo_honnin},
+                                       {"id": "deduction31", "value": kounen_honnin}],
+            "salary_other_items": [{"id": "other15", "value": kenpo_kaisha},
+                                   {"id": "other17", "value": kounen_kaisha}]}
+
+
+class ShahoMenjoTests(unittest.TestCase):
+    """①主取引（前月分の会社負担）に載せるかの免除判定。
+
+    jinjer は会社負担＝その月の分／本人控除＝前月分（翌月控除）で1か月ずれる。
+    """
+
+    KAISHA = {"kenpo_kaisha": 20394, "kounen_kaisha": 40260}
+    HONNIN = {"kenpo_honnin": 20394, "kounen_honnin": 40260}
+
+    def test_returning_from_leave_is_not_exempt(self):
+        """有田2018001（6月まで育休・7月復職）: 7月明細は本人ゼロでも7月分は発生している。"""
+        prev = _shaho_pi(**self.KAISHA)                      # 7月明細（本人ゼロ＝6月分が免除）
+        cur = _shaho_pi(**self.KAISHA, **self.HONNIN)        # 8月明細で7月分を控除している
+        self.assertFalse(is_shaho_menjo_prev(prev, cur))
+        self.assertTrue(is_shaho_menjo(prev))                # 同月内で見ると免除に見えてしまう
+
+    def test_still_on_leave_is_exempt(self):
+        """井料2017037: 当月明細でも本人控除ゼロ＝育休継続中なので前月分も計上しない。"""
+        prev = _shaho_pi(**self.KAISHA)
+        cur = _shaho_pi(**self.KAISHA)
+        self.assertTrue(is_shaho_menjo_prev(prev, cur))
+
+    def test_entering_leave_is_exempt_for_prev_month(self):
+        """前月から育休に入った人は、前月明細に本人控除があっても前月分は免除。"""
+        prev = _shaho_pi(**self.KAISHA, **self.HONNIN)       # 本人控除は前々月分
+        cur = _shaho_pi(**self.KAISHA)
+        self.assertTrue(is_shaho_menjo_prev(prev, cur))
+        self.assertFalse(is_shaho_menjo(prev))
+
+    def test_normal_employee_is_not_exempt(self):
+        prev = _shaho_pi(**self.KAISHA, **self.HONNIN)
+        cur = _shaho_pi(**self.KAISHA, **self.HONNIN)
+        self.assertFalse(is_shaho_menjo_prev(prev, cur))
+
+    def test_no_company_burden_is_not_exempt(self):
+        """社保に入っていない人（会社負担ゼロ）は免除ではない＝そもそも計上対象外。"""
+        self.assertFalse(is_shaho_menjo_prev(_shaho_pi(), _shaho_pi()))
 
 
 class KeihiTenkiTests(unittest.TestCase):
@@ -256,6 +307,98 @@ class KyuyoLayoutTests(unittest.TestCase):
         jisseki = [t for t in tx if t["発生日"] == "2026/6/30"][0]
         self.assertEqual([r["勘定科目"] for r in jisseki["rows"]],
                          ["給料手当", "仮払金", "給料手当", "仮払金"])
+
+
+class SonotaManualTests(unittest.TestCase):
+    """「その他」の手入力台帳（画面入力 → 台帳CSV → 仕訳の行）。"""
+
+    MASTER = {
+        "z_jinkenhi": [{"source_key": "salary_items:allowance1",
+                        "freee_item": "人件費（{人件費区分}）"}],
+        "z_deduction": [], "z_by_key": {},
+        "j_items": [{"source_key": KEIHI_TENKI_KEY, "freee_account": "給料手当",
+                     "freee_tax": "対象外", "freee_item": "人件費（{人件費区分}）",
+                     "amount_sign": "1"}],
+    }
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.ledger = os.path.join(self.dir, "その他手入力.csv")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    @staticmethod
+    def _pi(sonota):
+        return {"salary_items": [{"id": "allowance1", "value": 300000, "label": "基本給"},
+                                 {"id": KEIHI_TENKI_KEY.split(":")[1], "value": sonota,
+                                  "label": "その他"}],
+                "salary_payment_items": [{"id": "payment1", "value": 250000}]}
+
+    def _run(self, sonota, manual=None):
+        alerts = defaultdict(set)
+        resolver = Resolver({}, alerts, {})
+        st_m = {"2024047": self._pi(sonota)}
+        tx = build_kyuyo("2026-08", "2026-07", st_m, {}, {"2024047": {"name": "能美 龍郎"}},
+                         resolver, self.MASTER, "2026-08-25", alerts,
+                         sonota_manual=manual)
+        return tx, alerts
+
+    def _entry(self, amount=33000):
+        return {"支給月": "2026-08", "社員番号": "2024047", "氏名": "能美 龍郎",
+                "金額": amount, "勘定科目": "支払手数料", "品目": "雑費",
+                "税区分": "課対仕入10%", "備考": "保証委託契約時事務手数料"}
+
+    def test_save_then_load_round_trip(self):
+        save_sonota_manual([self._entry()], self.ledger)
+        loaded = load_sonota_manual(self.ledger)
+        self.assertEqual(loaded[("2026-08", "2024047")]["勘定科目"], "支払手数料")
+        self.assertEqual(loaded[("2026-08", "2024047")]["金額"], "33000")
+
+    def test_same_month_and_employee_is_replaced_not_duplicated(self):
+        save_sonota_manual([self._entry()], self.ledger)
+        updated = dict(self._entry(), 勘定科目="雑費", 備考="直した")
+        save_sonota_manual([updated], self.ledger)
+        loaded = load_sonota_manual(self.ledger)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[("2026-08", "2024047")]["備考"], "直した")
+
+    def test_missing_required_column_writes_nothing(self):
+        """勘定科目・品目・税区分のどれかが空なら1行も書かない（必須ガード）。"""
+        with self.assertRaises(ValueError):
+            save_sonota_manual([dict(self._entry(), 品目="")], self.ledger)
+        self.assertFalse(os.path.exists(self.ledger))
+
+    def test_ledger_row_becomes_a_journal_row(self):
+        manual = {("2026-08", "2024047"): self._entry()}
+        tx, alerts = self._run(33000, manual)
+        jisseki = [t for t in tx if t["発生日"] == "2026/7/31"][0]
+        row = [r for r in jisseki["rows"] if r["勘定科目"] == "支払手数料"][0]
+        self.assertEqual((row["品目"], row["税区分"], row["金額"]), ("雑費", "課対仕入10%", 33000))
+        self.assertEqual(row["備考"], "保証委託契約時事務手数料")
+        self.assertEqual({e for e, *_ in alerts["keihi_manual"]}, {"2024047"})
+        self.assertFalse(alerts["keihi_tenki"])
+
+    def test_amount_change_falls_back_to_pending(self):
+        """台帳の金額と jinjer がズレたら計上せず要確認へ戻す（中身が別物の可能性）。"""
+        manual = {("2026-08", "2024047"): self._entry(33000)}
+        tx, alerts = self._run(46860, manual)
+        rows = [r for t in tx for r in t["rows"]]
+        self.assertEqual([r for r in rows if r["勘定科目"] == "支払手数料"], [])
+        self.assertEqual({e for e, *_ in alerts["keihi_tenki"]}, {"2024047"})
+        self.assertEqual({(e, a, le) for e, _n, a, le in alerts["keihi_manual_mismatch"]},
+                         {("2024047", 46860, 33000)})
+
+    def test_other_month_entry_is_not_used(self):
+        """台帳は支給月ごと。前月の入力が当月に勝手に効かない。"""
+        manual = {("2026-07", "2024047"): self._entry()}
+        _tx, alerts = self._run(33000, manual)
+        self.assertEqual({e for e, *_ in alerts["keihi_tenki"]}, {"2024047"})
+        self.assertFalse(alerts["keihi_manual"])
+
+    def test_no_ledger_keeps_previous_behaviour(self):
+        _tx, alerts = self._run(33000, None)
+        self.assertEqual({e for e, *_ in alerts["keihi_tenki"]}, {"2024047"})
 
 
 class DateHelperTests(unittest.TestCase):

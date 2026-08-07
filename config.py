@@ -119,6 +119,12 @@ class Config:
     # 直したら再ビルドなしで次回実行から効く。画面のパス欄で 1回限りの上書きもできる。
     KEIRI_MASTER_CSV = os.environ.get(
         "KEIRI_MASTER_CSV", r"Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv")
+    # 給与の「その他」(allowance52) のうち経費一覧表マクロに明細が無いもの（jinjer へ手入力
+    # された有給買取・事務手数料など）を、画面で入力して仕訳に載せるための台帳。
+    # 列: 支給月, 社員番号, 氏名, 金額, 勘定科目, 品目, 税区分, 備考
+    # 画面から追記するが、共有フォルダに置くので Excel で直接直しても次回実行から効く。
+    KEIRI_SONOTA_MANUAL_CSV = os.environ.get(
+        "KEIRI_SONOTA_MANUAL_CSV", r"Z:\API連携\docs\経理モード_その他手入力.csv")
     KEIRI_KEIHI_MAPPING_CSV = os.environ.get(
         "KEIRI_KEIHI_MAPPING_CSV", r"Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv")
     # C-4 の分解材料（経費利用履歴 RevN.xlsm）と、突合先の経理最終CSV。どちらも {M}月 フォルダ配下

@@ -2281,6 +2281,10 @@ def route_keiri_run():
                   for k, v in result["files"].items()],
         "kensan_md": _read_text(result["kensan_path"]),
         "yokakunin_md": _read_text(result["yokakunin_path"]),
+        # 「その他」で科目が決まらず保留になった人（画面で手入力して作り直せる）
+        "sonota_pending": result["sonota_pending"],
+        "sonota_choices": result["sonota_choices"],
+        "sonota_manual_csv": result["sonota_manual_csv"],
     }
 
     if (request.form.get("run_diff") or "1") == "1":
@@ -2293,6 +2297,44 @@ def route_keiri_run():
             logger.exception("keiri diff failed")
             payload["diff_error"] = f"最終CSVとの突合に失敗しました: {e}"
     return jsonify(payload)
+
+
+@app.route("/keiri_sonota_save", methods=["POST"])
+def route_keiri_sonota_save():
+    """「その他」の手入力を台帳CSVへ保存する（同じ支給月・社員番号は置き換え）。
+
+    保存するだけで仕訳は作らない。画面はこの後で /keiri_run をもう一度呼ぶ。
+    台帳は共有フォルダなので、Excel で開いたままだと書けずにエラーになる。
+
+    JSON: {"month": "2026-08",
+           "entries": [{"社員番号","氏名","金額","勘定科目","品目","税区分","備考"}, ...]}
+    """
+    from services.keiri_engine import save_sonota_manual
+
+    data = request.get_json(silent=True) or {}
+    month = str(data.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["支給月は YYYY-MM 形式で指定してください"]}), 400
+    entries = [dict(e, 支給月=month) for e in (data.get("entries") or [])
+               if str(e.get("勘定科目") or "").strip()
+               or str(e.get("品目") or "").strip()
+               or str(e.get("税区分") or "").strip()]
+    if not entries:
+        return jsonify({"success": False,
+                        "errors": ["保存する行がありません（科目を1件以上入力してください）"]}), 400
+    try:
+        path = save_sonota_manual(entries)
+    except ValueError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except OSError as e:
+        return jsonify({"success": False,
+                        "errors": [f"台帳に書き込めませんでした（Excel で開いていませんか）: {e}"]}), 500
+    except Exception as e:
+        logger.exception("keiri_sonota_save failed")
+        return jsonify({"success": False, "errors": [f"保存に失敗しました: {e}"]}), 500
+    logger.info("keiri sonota manual saved: %s 件=%d 月=%s", path, len(entries), month)
+    return jsonify({"success": True, "saved": len(entries), "path": path})
 
 
 @app.route("/keiri_download/<ym>/<path:filename>")

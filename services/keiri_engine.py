@@ -190,6 +190,24 @@ SEISAN_KEYS = ("salary_items:allowance3", "salary_items:allowance4",
 #   分解は keiri_keihi_tenki.py が担当し、合計が合わない人は行を作らず要確認へ回す。
 KEIHI_TENKI_KEY = "salary_items:allowance52"
 
+# 「その他」の手入力台帳（Config.KEIRI_SONOTA_MANUAL_CSV）。マクロに明細が無い＝jinjer へ
+#   手入力された分（有給買取・事務手数料など）を、画面で入れた勘定科目／品目／税区分で計上する。
+#   金額は jinjer の allowance52 と一致したときだけ使う（ズレたら計上せず要確認へ戻す）。
+SONOTA_MANUAL_COLS = ["支給月", "社員番号", "氏名", "金額",
+                      "勘定科目", "品目", "税区分", "備考"]
+
+# 台帳の入力候補（画面のプルダウン）。マッピング表に無い科目も実在するので自由入力も許す
+#   （2026-08 実例: 能美2024047 の 支払手数料／雑費、山田2025xxx の 新聞図書費／雑費）。
+SONOTA_MANUAL_EXTRA_CHOICES = [
+    ("給料手当", "人件費（本社）", "対象外"),
+    ("給料手当", "人件費（本社以外）", "対象外"),
+    ("給料手当", "人件費（育成）", "対象外"),
+    ("支払手数料", "雑費", "課対仕入10%"),
+    ("新聞図書費", "雑費", "課対仕入10%"),
+]
+# 台帳の選択肢に出さない勘定科目（自動生成の行が担当していて手入力の出番が無いもの）
+SONOTA_MANUAL_HIDDEN_ACCOUNTS = {"預り金", "法定福利費", "役員貸付金", "受取利息", "仮払金"}
+
 # 対象外にしたが値が出たら知らせてほしい項目（マスタの判断が正しいかを毎月見張る）
 WATCH_KEYS = {
     "salary_items:allowance8":
@@ -564,17 +582,41 @@ def loan_split(month):
 
 
 def is_shaho_menjo(pi):
-    """社会保険料が免除されている人か（育児休業・産前産後休業）。
+    """その月に控除した社会保険料が免除されている人か（育児休業・産前産後休業）。
 
     jinjer の basic_info.parental_leave_classification は当テナントでは全員「未選択」で
     使えないため、**本人負担がゼロなのに会社負担だけ計上されている**形で判定する
     （労使折半なので本人ゼロ＝会社もゼロが正しい。2026-07-24 谷津さん確認:
       井料2017037・有田2018001 は育休中で社保は発生しない）。
+
+    見ているのは「その明細で控除した分」＝**前月分**の保険料。②預り金の取り崩し
+    （当月給与から控除した分）の対象者判定はこれでよい。前月分の費用を計上する
+    ①主取引には is_shaho_menjo_prev を使うこと。
     """
     honnin = sum(pi_value(pi, k) for k in SHAHO_KEYS)
     kaisha = sum(pi_value(pi, k) for k in ("salary_other_items:other15",
                                            "salary_other_items:other17"))
     return kaisha > 0 and honnin == 0
+
+
+def is_shaho_menjo_prev(pi_prev, pi_m):
+    """**前月分**の社会保険料が免除されていたか（①主取引に載せるかの判定）。
+
+    jinjer の明細は会社負担と本人負担で1か月ずれている:
+      - 会社負担 other15/17 … その月の分（免除されていても金額が出たままになる）
+      - 本人控除 deduction29/31 … 前月分（社保は翌月控除）
+    したがって前月分が免除かどうかは **当月明細の本人負担** を見ないと分からない。
+    同じ月の中で突き合わせると、復職の翌月に前月分を落としてしまう
+    （2026-08-07 実例: 有田2018001 は6月まで育休・7月復職。7月明細は会社負担あり／
+      本人ゼロ＝6月分が免除なだけで、7月分は8月明細で 20,394／40,260 を控除している。
+      これを免除とみなして 8月実行の健保・厚年CSVから 60,654円 が抜けた）。
+    逆に前月から育休に入った人を「前月分は発生」と誤って計上することも防ぐ。
+    """
+    kaisha = sum(pi_value(pi_prev, k) for k in ("salary_other_items:other15",
+                                                "salary_other_items:other17"))
+    if not kaisha:
+        return False
+    return sum(pi_value(pi_m, k) for k in SHAHO_KEYS) == 0
 
 
 def is_kyushoku(pi):
@@ -586,8 +628,96 @@ def is_kyushoku(pi):
     return net <= 0 and shaho
 
 
+def _txt(v):
+    return str(v if v is not None else "").strip()
+
+
+def load_sonota_manual(path=None):
+    """「その他」の手入力台帳を {(支給月, 社員番号): 行dict} で読む。
+
+    同じ支給月・社員番号の行が複数あるときは**最後の行**を採る（画面からは追記するため、
+    後ろの行ほど新しい）。ファイルが無ければ空を返す＝台帳を使わなくても従来どおり動く。
+    """
+    path = path or Config.KEIRI_SONOTA_MANUAL_CSV
+    if not path or not os.path.exists(path):
+        return {}
+    raw = open(path, "rb").read()
+    for enc in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            rows = list(csv.DictReader(io.StringIO(raw.decode(enc))))
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return {}
+    out = {}
+    for r in rows:
+        ym, emp = _txt(r.get("支給月")), _txt(r.get("社員番号"))
+        if ym and emp:
+            out[(ym, emp)] = {c: _txt(r.get(c)) for c in SONOTA_MANUAL_COLS}
+    return out
+
+
+def save_sonota_manual(entries, path=None):
+    """画面で入力した行を台帳へ書く（同じ支給月・社員番号は置き換え）。
+
+    勘定科目・品目・税区分のどれかが空、または金額が数値でない行があるときは
+    **1行も書かずに ValueError** にする（中途半端な台帳から変な仕訳が出るのを防ぐ）。
+    Returns: 書き込んだ台帳のパス
+    """
+    path = path or Config.KEIRI_SONOTA_MANUAL_CSV
+    cleaned = []
+    for e in entries:
+        row = {c: _txt(e.get(c)) for c in SONOTA_MANUAL_COLS}
+        if not row["支給月"] or not row["社員番号"]:
+            raise ValueError("支給月と社員番号は必須です")
+        missing = [c for c in ("勘定科目", "品目", "税区分") if not row[c]]
+        if missing:
+            raise ValueError(f"{row['社員番号']} {row['氏名']}: "
+                             f"{'・'.join(missing)} が空欄です（3つとも埋めてください）")
+        if to_number(row["金額"]) is None:
+            raise ValueError(f"{row['社員番号']} {row['氏名']}: 金額が数値ではありません")
+        cleaned.append(row)
+    if not cleaned:
+        return path
+    ledger = load_sonota_manual(path)
+    for row in cleaned:
+        ledger[(row["支給月"], row["社員番号"])] = row
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=SONOTA_MANUAL_COLS)
+        w.writeheader()
+        for key in sorted(ledger):
+            w.writerow(ledger[key])
+    return path
+
+
+def sonota_manual_choices(master, keihi_mapping=None):
+    """台帳のプルダウンに出す (勘定科目, 品目, 税区分) の候補を作る。
+
+    マッピング表2枚に実在する組み合わせ＋よく使う手入力分。自動生成の行が担当している
+    勘定科目（預り金・法定福利費など）は出さない。ここに無い科目も自由入力で入れられる。
+    """
+    combos = {}
+    for rows in (master.get("by_key") or {}).values():
+        for r in rows:
+            combos[(_txt(r.get("freee_account")), _txt(r.get("freee_item")),
+                    _txt(r.get("freee_tax")))] = True
+    for group in (keihi_mapping or ()):
+        for r in (group if isinstance(group, list) else [group]):
+            if isinstance(r, dict):
+                combos[(_txt(r.get("freee_account")), _txt(r.get("freee_item")),
+                        _txt(r.get("freee_tax")))] = True
+    for c in SONOTA_MANUAL_EXTRA_CHOICES:
+        combos[c] = True
+    out = [c for c in combos
+           if all(c) and c[0] not in SONOTA_MANUAL_HIDDEN_ACCOUNTS and "{" not in c[1]]
+    return [{"勘定科目": a, "品目": i, "税区分": t} for a, i, t in sorted(out)]
+
+
 def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, alerts,
-                split_midmonth=True, keihi_details=None, keihi_mapping=None):
+                split_midmonth=True, keihi_details=None, keihi_mapping=None,
+                sonota_manual=None):
     """給与ファイル: 当月の給与明細を「実績差分（発生日=前月末）」と「暫定支給（当月15日）」に割る。
 
     ③で確定した構造。st_prev は使わない（社保ファイルのみ前月分を使う）。
@@ -704,9 +834,25 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
                         # 同額・同内訳の明細が複数あるので set にしない（合計が合わなくなる）
                         alerts["keihi_bunkai"].append((emp, name, d["内訳"], int(d["金額"]),
                                                        d["品目"], d["根拠"], d["status"]))
-                else:
-                    alerts["keihi_tenki"].add((emp, name, int(v), bumon_p,
-                                               int(det_total) if det else None))
+                    continue
+                # マクロに明細が無い（＝jinjer へ手入力された分）は台帳を見る。
+                # 金額が変わっていたら台帳を信用せず要確認へ戻す（前月の入力が残っていても
+                # 中身が別物のことがあるため。2026-08 柳場2026010 の 46,860 が実例）。
+                manual = (sonota_manual or {}).get((month, emp))
+                if manual:
+                    ledger_amt = to_number(manual.get("金額"))
+                    if ledger_amt is not None and abs(ledger_amt - v) < 0.5:
+                        others.append(detail_row(manual["勘定科目"], manual["税区分"], v,
+                                                 manual["品目"], bumon_p, name,
+                                                 manual.get("備考", "")))
+                        alerts["keihi_manual"].add((emp, name, int(v), manual["勘定科目"],
+                                                    manual["品目"], manual["税区分"],
+                                                    manual.get("備考", "")))
+                        continue
+                    alerts["keihi_manual_mismatch"].add(
+                        (emp, name, int(v), int(ledger_amt) if ledger_amt is not None else None))
+                alerts["keihi_tenki"].add((emp, name, int(v), bumon_p,
+                                           int(det_total) if det else None))
                 continue
             # B3 現物支給: 仮払金の取り崩し行は必ず1人1行（部門=本社・その他本社経費）。
             # 経理の最終CSVでは**その人の現物支給行の直下**に入る（2026-07 実測 行310→311 ほか6組）。
@@ -914,7 +1060,7 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
         retired = str(ridx.get(emp, {}).get("retired_on") or "")
         if retired and retired <= prev_end:
             continue          # 前月末までに退職＝前月CSVの③④で処理済み
-        if is_shaho_menjo(st_prev[emp]):
+        if is_shaho_menjo_prev(st_prev[emp], st_m[emp]):
             alerts["shaho_menjo"].add((emp, ridx.get(emp, {}).get("name", emp), prev))
             continue          # 育休等で社保免除＝計上しない
         pi_src, ratio = source_pi(emp)
@@ -1208,10 +1354,25 @@ def build_yokakunin(month, alerts, master):
         lines.append(f"| **合計** | | | **{total:,}** | | | |")
     else:
         lines.append("- なし")
+    lines += ["", "## 「その他」を手入力の台帳から計上した人（実施済み）", "",
+              "マクロに明細が無い分（jinjer へ直接入力された有給買取・事務手数料など）を、"
+              f"画面で入れた科目で計上した。台帳は `{Config.KEIRI_SONOTA_MANUAL_CSV}`。"
+              "**科目と備考が今月の内容として正しいか確認すること**"
+              "（台帳は支給月ごとに持つので前月の入力が勝手に効くことはない）。", ""]
+    if alerts["keihi_manual"]:
+        lines += ["| 社員番号 | 氏名 | 金額 | 勘定科目 | 品目 | 税区分 | 備考 |",
+                  "|---|---|---|---|---|---|---|"]
+        for emp, name, amt, acc, item, tax, biko in sorted(alerts["keihi_manual"]):
+            lines.append(f"| {emp} | {name} | {amt:,} | {acc} | {item} | {tax} | {biko} |")
+        total = sum(a for _e, _n, a, _ac, _i, _t, _b in alerts["keihi_manual"])
+        lines.append(f"| **合計** | | **{total:,}** | | | | |")
+    else:
+        lines.append("- なし")
     lines += ["", "## ⚠️ 経費転記で分解できず計上しなかった人（手で追加が必要）", "",
               "明細の合計が jinjer の「その他」と一致しないため、行を作っていない。"
               "前月分をまとめて計上した／マクロ側に重複行がある／経費申請ではなく手入力した、"
-              "などの理由がある。金額と品目を確認して手で追加すること。", ""]
+              "などの理由がある。**画面の「その他の手入力」で科目を入れて作り直すと、"
+              "次からはこの表ではなく上の「台帳から計上した人」に出る。**", ""]
     if alerts["keihi_tenki"]:
         lines += ["| 社員番号 | 氏名 | jinjerの「その他」 | 明細の合計 | 部門 |", "|---|---|---|---|---|"]
         for emp, name, amt, bumon, det_total in sorted(alerts["keihi_tenki"],
@@ -1222,6 +1383,14 @@ def build_yokakunin(month, alerts, master):
         lines.append(f"| **合計** | | **{total:,}** | | |")
     else:
         lines.append("- なし")
+    if alerts["keihi_manual_mismatch"]:
+        lines += ["", "### ⚠️ 台帳に行はあるが金額が変わっている（計上していない）", "",
+                  "同じ支給月・同じ人の台帳の金額と、jinjer の「その他」が一致しない。"
+                  "中身が別物になっている可能性があるため計上せず上の表に戻している。"
+                  "内容を確かめて画面から入れ直すこと。", ""]
+        for emp, name, amt, ledger_amt in sorted(alerts["keihi_manual_mismatch"]):
+            shown = f"{ledger_amt:,}" if ledger_amt is not None else "（金額が空欄）"
+            lines.append(f"- {emp} {name}: jinjer {amt:,}円 / 台帳 {shown}円")
     if alerts["keihi_book_missing"]:
         lines += ["", "### ⚠️ 経費一覧表マクロのブックが見つからない", "",
                   "経費転記の分解ができないため、上の表に全員が並ぶ。ブックの場所を確認すること。", ""]
@@ -1299,9 +1468,13 @@ def build_yokakunin(month, alerts, master):
     if not alerts["juminzei_shokai"]:
         lines.append("- なし")
     lines += ["", "## 社保免除で社保ファイルに載せなかった人（育休・産休）", "",
-              "本人負担がゼロなのに会社負担だけ jinjer に計上されている人＝育児休業等で"
-              "社会保険料が免除されている人（谷津さん確認 2026-07-24）。労使折半の原則から"
-              "会社負担も計上しない。**jinjer 側の会社負担額が残っている点は要確認**。", ""]
+              "育児休業等で社会保険料が免除されている人（谷津さん確認 2026-07-24）。"
+              "労使折半の原則から会社負担も計上しない。"
+              "**jinjer 側の会社負担額が残っている点は要確認**。", "",
+              "判定は「前月分の会社負担が出ているのに、**当月明細の本人控除がゼロ**」で見る。"
+              "社保は翌月控除なので、前月分が免除だったかは当月明細でしか分からない"
+              "（同じ月の中で突き合わせると復職の翌月に前月分を落とす。"
+              "2026-08-07 有田2018001 で 60,654円 の計上漏れ）。", ""]
     if alerts["shaho_menjo"]:
         for emp, name, ym in sorted(alerts["shaho_menjo"]):
             lines.append(f"- {emp} {name}（{ym}分）")
@@ -1383,7 +1556,8 @@ def build_yokakunin(month, alerts, master):
 # ---------------------------------------------------------------------------
 def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
              keihi_book=None, final_csv_dir=None, min_status="確定",
-             refresh_statements=False, refresh_custom=False, client=None):
+             refresh_statements=False, refresh_custom=False, client=None,
+             sonota_manual_csv=None):
     """支給月ぶんの4CSV＋検算＋要確認を作る。
 
     Args:
@@ -1422,6 +1596,7 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
               "new_usage": set(), "mishunyukin": set(), "biko_needed": set(),
               "genbutsu": set(), "kyushoku": set(), "loan_mismatch": set(),
               "keihi_tenki": set(), "keihi_bunkai": [], "keihi_book_missing": set(),
+              "keihi_manual": set(), "keihi_manual_mismatch": set(),
               "tatekae_skip": set(), "split_done": set(),
               "retiree": set(), "shaho_menjo": set(), "juminzei_shokai": set(),
               "juminzei_soosai": set(), "karibarai": set(),
@@ -1445,11 +1620,15 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
     else:
         alerts["keihi_book_missing"].add(book or f"{int(month[5:7])}月フォルダに見つからず")
 
+    # 「その他」のうちマクロに明細が無い分を画面で入れた台帳（無ければ従来どおり要確認へ）
+    sonota_manual = load_sonota_manual(sonota_manual_csv)
+
     detect_juminzei_shokai(st_m, st_prev, ridx, alerts)
     prev_juminzei = load_prev_juminzei(prev, out_base, final_dir=final_csv_dir)
     files = {
         "給与": build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, alerts,
-                          keihi_details=keihi_details, keihi_mapping=keihi_mapping),
+                          keihi_details=keihi_details, keihi_mapping=keihi_mapping,
+                          sonota_manual=sonota_manual),
         "住民税": build_juminzei(month, st_m, ridx, resolver, master, prev_juminzei, alerts),
         "健康保険": build_shaho(month, prev, st_prev, st_m, ridx, resolver, master["kenpo"],
                             "KEMPO", "関東ＩＴソフトウェア健康保険組合", KENPO_AZUKARI, alerts),
@@ -1493,6 +1672,14 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
         "paid_on": paid_on, "employees": len(st_m),
         "keihi_book": book if book and os.path.exists(book) else "",
         "master_csv": master_csv or MASTER_CSV,
+        # 画面の「その他の手入力」用: 保留になった人・入力候補・台帳の場所
+        "sonota_manual_csv": sonota_manual_csv or Config.KEIRI_SONOTA_MANUAL_CSV,
+        "sonota_pending": [
+            {"社員番号": emp, "氏名": name, "金額": amt, "部門": bumon,
+             "明細の合計": det_total}
+            for emp, name, amt, bumon, det_total in sorted(alerts["keihi_tenki"],
+                                                           key=lambda x: (x[0], x[1]))],
+        "sonota_choices": sonota_manual_choices(master, keihi_mapping),
         "alerts": {
             "月中異動検知": len(alerts["midmonth"]),
             "部門未解決": len(alerts["bumon_missing"]),
@@ -1500,6 +1687,7 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
             "対象外項目の新規使用": len(alerts["new_usage"]),
             "経費転記の分解": len(alerts["keihi_bunkai"]),
             "経費転記で保留": len(alerts["keihi_tenki"]),
+            "その他を台帳から計上": len(alerts["keihi_manual"]),
             "未収入金の候補": len(alerts["mishunyukin"]),
             "備考の手入力が必要": len(alerts["biko_needed"]),
             "育成かもしれない人": len(alerts["ikusei_maybe"]),

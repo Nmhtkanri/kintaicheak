@@ -524,6 +524,23 @@
                 <div style="font-weight:bold; margin-bottom:4px">最終CSVとの差分</div>
                 <div id="keiri-diff-summary"></div>
             </div>
+            <!-- 「その他」の内訳が分からず保留になった人を、画面で科目を入れて計上する -->
+            <div id="keiri-sonota-area" style="display:none; margin-bottom:10px; padding:10px;
+                 border:1px solid #e0b0b0; border-radius:4px; background:#fff8f8">
+                <div style="font-weight:bold; margin-bottom:4px">⚠️ 「その他」の内訳が分からず保留にした人</div>
+                <div class="hint" style="margin-bottom:6px">
+                    経費一覧表マクロに明細が無い分（jinjer へ直接入力された有給買取・事務手数料など）です。
+                    勘定科目・品目・税区分を入れて「台帳に保存して作り直す」を押すと、その科目で仕訳に入ります。
+                    入力は支給月ごとに台帳へ残るので、同じ月をやり直しても入れ直しは不要です。
+                    <span id="keiri-sonota-path" style="display:block; margin-top:2px; opacity:.8"></span>
+                </div>
+                <div id="keiri-sonota-rows"></div>
+                <datalist id="keiri-sonota-choices"></datalist>
+                <div style="margin-top:8px; display:flex; align-items:center; gap:10px">
+                    <button type="button" class="btn btn-primary" id="keiri-sonota-save-btn">💾 台帳に保存して作り直す</button>
+                    <span id="keiri-sonota-status" class="status-text"></span>
+                </div>
+            </div>
             <div class="keiri-tabs" style="display:flex; gap:6px; margin:10px 0 0; border-bottom:2px solid #7030a0">
                 <button type="button" class="keiri-tab btn active" data-target="keiri-pane-yokakunin">要確認リスト</button>
                 <button type="button" class="keiri-tab btn" data-target="keiri-pane-kensan">検算</button>
