@@ -162,11 +162,16 @@ EMP_OVERRIDES = {"7777777": {"bumon": HONSHA_BUMON, "jinkenhi": HONSHA_ITEM}}
 # id が体系によらず同じ意味の項目は id で判定する
 #   （allowance15=調整手当 は月給制だと体系別名まで汎用名「給与支給項目15」になるため、
 #     体系別名だけで判定すると暫定から漏れる。2026-07 実測: 小山2011012・岡野2024011）
+# ⚠ 調整手当は jinjer 側で 2026-08 支給分から allowance15 → allowance12 へ移設された
+#   （設定エクスポート 20260730: 項目ID12=調整手当[有効]／項目ID15=給与支給項目15[無効]）。
+#   実測 2026-07 は allowance15 に 104名 2,676,290円、2026-08 は allowance12 に 105名
+#   2,753,290円。過去月をそのまま再生成できるよう **両方とも暫定に残す**（片方は必ずゼロ）。
 ZANTEI_FIXED_KEYS = {
     "salary_items:allowance1",    # 基本給
     "salary_items:allowance10",   # 役職手当
     "salary_items:allowance11",   # リーダー手当
-    "salary_items:allowance15",   # 調整手当
+    "salary_items:allowance12",   # 調整手当（2026-08 支給分〜）
+    "salary_items:allowance15",   # 調整手当（〜2026-07 支給分。以降は jinjer 側で無効）
 }
 # allowance2 だけは体系で意味が変わるので体系別名で判定する
 ZANTEI_LABELS = {"当月みなし時間外手当", "みなし手当", "当月みなし深夜手当"}

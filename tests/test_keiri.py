@@ -10,11 +10,11 @@ import tempfile
 import unittest
 from collections import defaultdict
 
-from services.keiri_engine import (GENBUTSU_KEY, KEIHI_TENKI_KEY, KYUSHOKU_BIKO, Resolver,
-                                   YAKUIN_LOAN, build_kensan, build_kyuyo, is_shaho_menjo,
-                                   is_shaho_menjo_prev, jp_date, load_sonota_manual,
-                                   master_skipped_report, save_sonota_manual, split_halves,
-                                   split_shaho_chosei, ym_add)
+from services.keiri_engine import (GENBUTSU_KEY, KEIHI_TENKI_KEY, KYUSHOKU_BIKO, MASTER_CSV,
+                                   Resolver, YAKUIN_LOAN, build_kensan, build_kyuyo, calc_zantei,
+                                   is_shaho_menjo, is_shaho_menjo_prev, jp_date, load_master,
+                                   load_sonota_manual, master_skipped_report, save_sonota_manual,
+                                   split_halves, split_shaho_chosei, ym_add)
 from services.keiri_keihi_tenki import (MAPPING_CSV, classify, decompose, decompose_rows,
                                         load_mapping)
 
@@ -275,6 +275,47 @@ class MasterSkippedReportTests(unittest.TestCase):
                                         {YAKUIN_LOAN["employee_id"]: {"name": "三谷 一志"}})
             self.assertNotIn("⚠️", rep[0]["impact"], key)
             self.assertIn("特別ルールで計上済み", rep[0]["impact"])
+
+
+class ChoseiTeateMoveTests(unittest.TestCase):
+    """調整手当が jinjer 側で allowance15 → allowance12 へ移設された件（2026-08 支給分〜）。
+
+    移設に気づかず allowance12 が『対象外(全期間ゼロ)』のままだったため、2026-08 の給与CSV
+    から 105名 2,753,290円 が丸ごと落ちた（暫定側の人件費 82,258,800 ＝ 調整手当ぬきの額に
+    1円まで一致）。過去月の再生成も壊さないよう **どちらの id でも暫定に入る** ことを見る。
+    """
+
+    def _pi(self, source_key, value, label="調整手当"):
+        return {"salary_items": [{"id": source_key.split(":")[1], "value": value,
+                                  "salary_system_label": label}]}
+
+    def _master(self, source_key):
+        return {"z_jinkenhi": [{"source_key": source_key}]}
+
+    def test_both_ids_count_into_zantei(self):
+        for key in ("salary_items:allowance12", "salary_items:allowance15"):
+            self.assertEqual(calc_zantei(self._pi(key, 25000), self._master(key)), 25000, key)
+
+    def test_generic_system_label_still_counts(self):
+        """体系別名が汎用名に戻っても id で拾えていれば落ちない（移設の実際の壊れ方）。"""
+        key = "salary_items:allowance12"
+        pi = self._pi(key, 25000, label="給与支給項目12")
+        self.assertEqual(calc_zantei(pi, self._master(key)), 25000)
+
+
+class MasterChoseiTeateRowTests(unittest.TestCase):
+    """マッピングマスタ側も両方の id を暫定・人件費へ向けておく（落ちた原因はマスタ側）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(MASTER_CSV):
+            raise unittest.SkipTest(f"マッピングマスタが参照できません: {MASTER_CSV}")
+        cls.master = load_master(MASTER_CSV, "確定")
+
+    def test_chosei_teate_is_mapped_on_both_ids(self):
+        keys = {r["source_key"] for r in self.master["z_jinkenhi"]}
+        for key in ("salary_items:allowance12", "salary_items:allowance15"):
+            self.assertIn(key, keys, f"{key}（調整手当）が暫定側の人件費に入っていない")
 
 
 class KyuyoLayoutTests(unittest.TestCase):
