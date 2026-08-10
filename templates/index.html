@@ -26,6 +26,10 @@
             <input type="radio" name="mode" value="csv_export">
             <span class="mode-tab-face">スケジュールアップロード</span>
         </label>
+        <label class="mode-tab" title="健診結果ExcelからHPM取込用CSVを作る（HPMへの取込は手動）">
+            <input type="radio" name="mode" value="health_hpm">
+            <span class="mode-tab-face">健康診断HPM</span>
+        </label>
         <span class="mode-tabs-hint" id="mode-bar-hint"></span>
     </div>
 
@@ -689,6 +693,89 @@
         <div id="mail-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
     {% endraw %}
+
+    <div class="workflow-card mode-accent acc-health" id="health-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-health">🩺</span>
+            <div>
+                <div class="card-title">
+                    健診結果Excel から HPM取込用CSV を作る
+                    <span class="tag tag-safe">CSVを作るだけ・HPMへの取込は手動</span>
+                </div>
+                <p class="card-lead">整形済みExcel（スキーマ2.0）を読み込み、jinjer と照合してから302列CSVを作ります。</p>
+            </div>
+        </div>
+
+        <div class="alert alert-warning" style="margin:10px 0">
+            <b>このモードの約束事</b>
+            <ul style="margin:6px 0 0; padding-left:20px">
+                <li>血圧の<b>平均値は作成しません</b>。1回目と2回目を原票どおり別々の欄に出します（1回分しかなければ2回目は空欄）。</li>
+                <li><code>(-)</code> は<b>陰性として出力します</b>。空欄や単独のハイフンを勝手に <code>(-)</code> にはしません。</li>
+                <li>原票の判定（A〜G）は HPM へ<b>転記しません</b>（判定列は空欄のまま）。</li>
+            </ul>
+        </div>
+
+        <div class="upload-section">
+            <div class="section-title">整形済み健診Excel（スキーマ2.0） <span class="tag tag-req">必須</span></div>
+            <div class="drop-zone" id="hh-drop-zone">
+                <div class="drop-zone-inner">
+                    <div class="drop-icon">🩺</div>
+                    <p>ファイルをドラッグ&amp;ドロップ、または</p>
+                    <label class="btn btn-secondary">ファイルを選択
+                        <input type="file" id="hh-file-input" accept=".xlsx" style="display:none">
+                    </label>
+                    <p class="hint">health-check-pdf-to-excel スキルが作った .xlsx を選んでください。</p>
+                </div>
+                <div class="selected-files" id="hh-selected"></div>
+            </div>
+        </div>
+
+        <details class="more">
+            <summary>詳細設定（ふだんは触らなくて大丈夫です）</summary>
+            <div class="more-body">
+                <label class="field">
+                    <span class="field-label">変換マスタ <span class="tag tag-opt">任意</span></span>
+                    <input type="text" id="hh-master-path" placeholder="Z:\NMHT総務関係\健康診断\健康診断HPM変換マスタ.xlsx">
+                    <span class="field-sub">空欄なら共有フォルダの既定。機関コード・健診種別・項目の対応表はこのファイルで直せます（exe の作り直しは不要）。</span>
+                </label>
+                <label class="field">
+                    <span class="field-label">出力ファイル名 <span class="tag tag-opt">任意</span></span>
+                    <input type="text" id="hh-output-filename" placeholder="HPM取込用_同友会_20260701-0703_6名.csv">
+                    <span class="field-sub">空欄なら自動で付けます。同名のファイルがある場合は上書きせずエラーになります。</span>
+                </label>
+            </div>
+        </details>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="hh-preview-btn">📖 読み込み・照合（まだ何も作りません）</button>
+            <span id="hh-status" class="status-text"></span>
+        </div>
+
+        <div id="hh-preview-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card"><div class="card-label">受診者</div><div class="card-value" id="hh-cnt-persons">0</div></div>
+                <div class="summary-card card-ng"><div class="card-label">エラー（作成できません）</div><div class="card-value" id="hh-cnt-errors">0</div></div>
+                <div class="summary-card card-caution"><div class="card-label">警告（作成できます）</div><div class="card-value" id="hh-cnt-warnings">0</div></div>
+            </div>
+            <div id="hh-workbook-issues"></div>
+            <div id="hh-persons" style="max-height:520px; overflow:auto"></div>
+
+            <div style="margin-top:12px; padding:11px 13px; border:1px solid #d7dee5; border-radius:6px; background:#fafcfe">
+                <label style="display:flex; gap:8px; align-items:flex-start; cursor:pointer">
+                    <input type="checkbox" id="hh-genpyo-confirmed" style="margin-top:3px">
+                    <span>原票（PDF・画像）と見比べて、<b>血圧の1回目・2回目と定性検査が原票どおり</b>であることを確認しました。</span>
+                </label>
+            </div>
+
+            <div class="actions" style="margin-top:11px">
+                <button type="button" class="btn btn-danger" id="hh-generate-btn" disabled>📄 HPM取込用CSVを作成</button>
+                <span id="hh-generate-status" class="status-text"></span>
+            </div>
+            <div id="hh-generate-result" style="display:none; margin-top:8px; font-size:13px"></div>
+            <pre id="hh-console" style="display:none; margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; white-space:pre-wrap"></pre>
+        </div>
+        <div id="hh-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
 
     <div class="workflow-card mode-accent acc-expense" id="expense-card" style="display:none">
         <div class="card-head">

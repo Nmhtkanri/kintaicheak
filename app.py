@@ -122,6 +122,80 @@ def _drop_session(session_id: str):
     _safe_remove(path)
 
 
+# =============================================================================
+# 健診モードのセッション（要配慮個人情報なので共有フォルダには置かない）
+# =============================================================================
+# launcher.py が起動時に作業フォルダを共有NASへ chdir するため、上の
+# _save_session（uploads/sessions）を流用すると健診結果が6人の読める場所に残る。
+# 健診分だけは各PCのローカル（既定 %LOCALAPPDATA%）に隔離し、時間で自動削除する。
+
+_HEALTH_SESSION_ID_RE = re.compile(r"health_[0-9a-f]{32}")
+
+
+def _health_session_dir() -> str:
+    path = Config.HEALTH_HPM_SESSION_DIR
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _health_session_path(session_id: str) -> str | None:
+    """セッションIDを検証してからパスにする（../ などを弾く）。"""
+    if not _HEALTH_SESSION_ID_RE.fullmatch(str(session_id or "")):
+        return None
+    return os.path.join(_health_session_dir(), f"{session_id}.pkl")
+
+
+def _save_health_session(session_id: str, payload: dict) -> None:
+    path = _health_session_path(session_id)
+    if path is None:
+        raise ValueError("セッションIDが不正です")
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
+
+
+def _load_health_session(session_id: str) -> dict | None:
+    path = _health_session_path(session_id)
+    if path is None or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        logger.exception("健診セッションを読めません: %s", session_id)
+        return None
+
+
+def _drop_health_session(session_id: str) -> None:
+    path = _health_session_path(session_id)
+    if path:
+        _safe_remove(path)
+
+
+def _cleanup_health_sessions() -> int:
+    """古い健診の一時ファイルを消す。プレビューのたびに呼ぶ。"""
+    import time
+
+    directory = _health_session_dir()
+    limit = Config.HEALTH_HPM_SESSION_MAX_AGE_HOURS * 3600
+    now = time.time()
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith("health_"):
+            continue  # 健診モードが作ったものだけ触る
+        path = os.path.join(directory, name)
+        try:
+            if now - os.path.getmtime(path) > limit:
+                _safe_remove(path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _sheet_sources_from_session(session) -> dict[str, str]:
     """セッションの code_sheets から {filename: source} を作る
 
@@ -2532,6 +2606,314 @@ def route_mail_ledger_apply():
                "requested_delete": len(retiree_ids)}
     payload.update(result)
     return jsonify(payload)
+
+
+# =============================================================================
+# 健康診断HPMモード（整形済Excel → HPM取込用302列CSV。HPMへの取込は手動）
+# =============================================================================
+
+def _health_issue_dicts(issues):
+    return [{"level": i.level, "code": i.code, "message": i.message} for i in issues]
+
+
+def _health_master_payload(master):
+    """画面のプルダウン用に機関と種別を渡す。"""
+    from services.health_hpm_master import courses_of
+
+    institutions = []
+    for name in sorted(master.institutions):
+        institution = master.institutions[name]
+        institutions.append({
+            "name": institution.name,
+            "location_code": institution.location_code,
+            "hpm_confirmed": institution.hpm_confirmed,
+            "note": institution.note,
+            "courses": [{"display_name": c.display_name, "hpm_value": c.hpm_value}
+                        for c in courses_of(master, institution.name)],
+        })
+    return {"path": master.path, "settings": dict(master.settings),
+            "institutions": institutions}
+
+
+def _health_person_payload(person, match_result, master):
+    """1名分のプレビュー。血圧は1回目・2回目の枠しか持たない（平均欄を作らない）。"""
+    bp = person.blood_pressure()
+    qualitative = []
+    for m in person.qualitative():
+        rules = master.rules_for(m.category, m.item, m.occurrence)
+        col = rules[0].hpm_col if len(rules) == 1 else None
+        qualitative.append({
+            "category": m.category, "item": m.item, "value": m.value,
+            "occurrence": m.occurrence,
+            "hpm_col": col,
+            "col_name": master.header[col] if col is not None else "",
+            "note": "" if col is not None else (
+                "検査方式が特定できないため出力しません" if rules else "変換マスタに無い項目です"),
+        })
+    unmapped = [{"category": m.category, "item": m.item, "value": m.value}
+                for m in person.metrics
+                if not master.rules_for(m.category, m.item, m.occurrence)]
+
+    return {
+        "key": person.key,
+        "name": person.name,
+        "age": person.age,
+        "gender": person.gender,
+        "exam_date": person.exam_date.isoformat() if person.exam_date else "",
+        "exam_no": person.exam_no,
+        "sheet": person.sheet,
+        "jinjer": {
+            "status": match_result.status,
+            "employee_id": match_result.employee_id,
+            "employee": next(
+                (c.as_dict() for c in match_result.candidates
+                 if c.employee_id == match_result.employee_id), None),
+            "candidates": [c.as_dict() for c in match_result.candidates],
+            "reasons": list(match_result.reasons),
+        },
+        "blood_pressure": {
+            "r1": {"sys": bp.get(1, {}).get("sys", ""), "dia": bp.get(1, {}).get("dia", "")},
+            "r2": {"sys": bp.get(2, {}).get("sys", ""), "dia": bp.get(2, {}).get("dia", "")},
+            "r3_present": any(o >= 3 for o in bp),
+        },
+        "qualitative": qualitative,
+        "numeric_count": len(person.numeric()),
+        "qualitative_count": len(person.qualitative()),
+        "unmapped_items": unmapped,
+        "issues": _health_issue_dicts(person.issues),
+    }
+
+
+@app.route("/health_hpm_preview", methods=["POST"])
+def route_health_hpm_preview():
+    """健診の整形済Excelを解析し、jinjer・変換マスタと突き合わせて一覧を返す。
+
+    この時点ではCSVを一切作らない。指摘があっても200で返し、画面に全部見せる。
+    """
+    from services.health_hpm_excel import parse_health_workbook
+    from services.health_hpm_master import MasterError, load_master
+    from services.health_hpm_match import build_candidates, match_person
+
+    upload = request.files.get("health_excel")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False,
+                        "errors": ["整形済みの健診Excel（.xlsx）を選んでください"]}), 400
+    if not upload.filename.lower().endswith(".xlsx"):
+        return jsonify({"success": False,
+                        "errors": [f"xlsx を選んでください: {upload.filename}"]}), 400
+
+    master_path = _clean_path_input(request.form.get("master_path")) or \
+        Config.HEALTH_HPM_MASTER_XLSX
+    try:
+        master = load_master(master_path)
+    except MasterError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+
+    _cleanup_health_sessions()
+
+    # 健診データが共有フォルダに落ちないよう、一時ファイルもローカルへ置く
+    session_id = "health_" + uuid.uuid4().hex
+    temp_path = os.path.join(_health_session_dir(), f"{session_id}.xlsx")
+    try:
+        upload.save(temp_path)
+        try:
+            parsed = parse_health_workbook(temp_path, upload.filename)
+        except ValueError as e:
+            return jsonify({"success": False, "errors": [str(e)]}), 400
+    finally:
+        _safe_remove(temp_path)
+
+    try:
+        employees = build_candidates(fetch_employees_for_health())
+    except JinjerAPIError as e:
+        return jsonify({"success": False,
+                        "errors": [f"jinjer API エラー: {e}"]}), 500
+
+    matches = {}
+    for person in parsed.persons:
+        matches[person.key] = match_person(
+            person.name, person.gender, person.age, person.exam_date, employees)
+
+    _save_health_session(session_id, {
+        "kind": "health_hpm",
+        "created_at": _now_iso(),
+        "source_filename": upload.filename,
+        "master_path": master_path,
+        "parse": parsed,
+        "employees": employees,
+        "match": matches,
+    })
+
+    errors = parsed.errors()
+    warnings = parsed.warnings()
+    return jsonify({
+        "success": True,
+        "session_id": session_id,
+        "source_filename": upload.filename,
+        "schema_version": parsed.schema_version,
+        "can_generate": not errors,
+        "counts": {"persons": len(parsed.persons),
+                   "errors": len(errors), "warnings": len(warnings)},
+        "workbook_issues": _health_issue_dicts(parsed.issues),
+        "master": _health_master_payload(master),
+        "roster": [c.as_dict() for c in employees],
+        "persons": [_health_person_payload(p, matches[p.key], master)
+                    for p in parsed.persons],
+    })
+
+
+def fetch_employees_for_health():
+    """jinjer の在籍者一覧（生dict）。テストで差し替えやすいよう関数に切る。"""
+    from services.jinjer_api_client import JinjerClient
+
+    return JinjerClient().get_employees(only_active=True)
+
+
+def _now_iso():
+    from datetime import datetime
+
+    return datetime.now().isoformat(timespec="seconds")
+
+
+@app.route("/health_hpm_generate", methods=["POST"])
+def route_health_hpm_generate():
+    """確定した選択でHPM取込用302列CSVを作る。欠けているものがあれば作らない。"""
+    from services.health_hpm_csv import (
+        OutputExistsError,
+        build_csv_rows,
+        check_cp932,
+        default_output_dir,
+        default_output_filename,
+        mixed_fiscal_years,
+        verify_written_csv,
+        write_hpm_csv,
+    )
+    from services.health_hpm_master import MasterError, find_course, load_master, \
+        resolve_institution
+    from services.health_hpm_match import validate_selection
+
+    log_lines = []
+
+    def _log(message):
+        log_lines.append(message)
+
+    body = request.get_json(silent=True) or {}
+    session = _load_health_session(body.get("session_id"))
+    if not session or session.get("kind") != "health_hpm":
+        return jsonify({"success": False,
+                        "errors": ["読み込み結果が見つかりません。"
+                                   "もう一度「読み込み・照合」からやり直してください"]}), 400
+
+    if not body.get("genpyo_confirmed"):
+        return jsonify({"success": False,
+                        "errors": ["「原票どおりであることを確認しました」に"
+                                   "チェックを入れてください"]}), 400
+
+    parsed = session["parse"]
+    employees = session["employees"]
+
+    # 解析結果と指摘はサーバー側を正とし、画面からは選択値だけ受ける
+    errors = [f"{i.message}" for i in parsed.errors()]
+    if errors:
+        return jsonify({"success": False, "errors": errors, "console": log_lines}), 400
+    _log(f"読み込み: {session.get('source_filename')} / {len(parsed.persons)}名")
+
+    try:
+        master = load_master(session["master_path"])
+    except MasterError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    _log(f"変換マスタ: {session['master_path']}（{len(master.header)}列）")
+
+    selections = {str(p.get("key")): p for p in (body.get("persons") or [])}
+    resolved = []
+    problems = []
+    for person in parsed.persons:
+        choice = selections.get(person.key) or {}
+        institution = resolve_institution(master, choice.get("institution", ""))
+        if institution is None:
+            problems.append(f"{person.name}: 健診機関を選んでください")
+            continue
+        if not institution.hpm_confirmed:
+            problems.append(
+                f"{person.name}: {institution.name} はHPMで未確認の機関です。"
+                "コードを確認して変換マスタの「HPM確認済み」をTRUEにしてください")
+            continue
+        course = find_course(master, institution.name, choice.get("course", ""))
+        if course is None:
+            problems.append(f"{person.name}: 健診種別を選んでください")
+            continue
+        try:
+            employee = validate_selection(choice.get("employee_id", ""), employees)
+        except ValueError as e:
+            problems.append(f"{person.name}: {e}")
+            continue
+        resolved.append((person, employee, course, institution))
+
+    if problems:
+        return jsonify({"success": False, "errors": problems, "console": log_lines}), 400
+    _log(f"jinjer照合: {len(resolved)}/{len(parsed.persons)}名 確定")
+
+    exam_dates = [p.exam_date for p, _, _, _ in resolved if p.exam_date]
+    years = mixed_fiscal_years(exam_dates)
+    if len(years) > 1:
+        return jsonify({"success": False, "console": log_lines, "errors": [
+            f"受診日の年度が {years[0]}年度 と {years[-1]}年度 に分かれています。"
+            "保存先が変わるので年度ごとに分けて作成してください"]}), 400
+
+    try:
+        rows, warnings = build_csv_rows(resolved, master)
+    except AssertionError as e:
+        logger.exception("health_hpm_generate: 行の検算に失敗")
+        return jsonify({"success": False, "console": log_lines,
+                        "errors": [f"行の組み立てで矛盾が見つかりました: {e}"]}), 500
+    _log(f"CSV組み立て: {len(rows) - 1}行 × {len(rows[0])}列")
+
+    encoding_issues = check_cp932(rows, master.header)
+    if encoding_issues:
+        return jsonify({"success": False, "console": log_lines,
+                        "errors": [i.message for i in encoding_issues]}), 400
+
+    out_dir = default_output_dir(exam_dates, Config.HEALTH_HPM_OUTPUT_BASE)
+    filename = _clean_path_input(body.get("output_filename")) or default_output_filename(
+        master, [i for _, _, _, i in resolved], exam_dates, len(resolved))
+    filename = _ensure_extension(os.path.basename(filename), ".csv")
+    out_path = os.path.join(out_dir, filename)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        return jsonify({"success": False, "console": log_lines,
+                        "errors": [f"保存先を作れません: {out_dir}（{e}）"]}), 500
+
+    try:
+        size = write_hpm_csv(out_path, rows)
+    except OutputExistsError:
+        return jsonify({"success": False, "console": log_lines, "errors": [
+            f"同名のファイルがあります（上書きはしません）: {out_path}"]}), 400
+    except UnicodeEncodeError as e:
+        return jsonify({"success": False, "console": log_lines,
+                        "errors": [f"CP932に変換できない文字があります: {e}"]}), 400
+    except OSError as e:
+        return jsonify({"success": False, "console": log_lines,
+                        "errors": [f"書き出しに失敗しました: {e}"]}), 500
+    _log(f"書き出し: {out_path}（{size:,}バイト）")
+
+    problems = verify_written_csv(out_path, rows)
+    if problems:
+        _safe_remove(out_path)  # 壊れたCSVを共有フォルダに残さない
+        return jsonify({"success": False, "console": log_lines, "errors": [
+            "書き出したCSVの検証に失敗したため削除しました。", *problems]}), 500
+    _log("検証: 行数・列数・全セル一致 OK")
+
+    _drop_health_session(body.get("session_id"))
+    return jsonify({
+        "success": True,
+        "output_path": out_path,
+        "row_count": len(rows) - 1,
+        "column_count": len(rows[0]),
+        "verified": True,
+        "warnings": _health_issue_dicts(list(parsed.warnings()) + list(warnings)),
+        "console": log_lines,
+    })
 
 
 def _read_text(path):

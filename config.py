@@ -1,5 +1,6 @@
 import glob
 import os
+import tempfile
 
 
 DEFAULT_JINJER_TEMPLATE_DIRS = (
@@ -170,6 +171,29 @@ class Config:
     # 下書き作成ログ（宛先を含むのでローカル）
     MAIL_OUTPUT_DIR = os.environ.get("MAIL_OUTPUT_DIR", "outputs/mail")
 
+    # ------------------------------------------------------------------
+    # 健康診断HPMモード（整形済ExcelからHPM取込用CSVを作る。取込は手動のまま）
+    # ------------------------------------------------------------------
+    # 機関コード・健診コース・302列ヘッダー・項目マッピングは共有フォルダの
+    # 変換マスタで持つ。HPM側で列や機関が増えても再ビルドなしで反映できる。
+    HEALTH_HPM_MASTER_XLSX = os.environ.get(
+        "HEALTH_HPM_MASTER_XLSX", r"Z:\NMHT総務関係\健康診断\健康診断HPM変換マスタ.xlsx")
+    # 出力先のベース。実際は {年度}\{年度}年度健康診断受診者結果\CSV格納 へ書く。
+    HEALTH_HPM_OUTPUT_BASE = os.environ.get(
+        "HEALTH_HPM_OUTPUT_BASE", r"Z:\NMHT総務関係\健康診断")
+    # 健診結果は要配慮個人情報。launcher.py が作業フォルダを共有NASへ chdir するため、
+    # 既定の uploads/sessions に置くと6人が読める場所にpklが残る。各PCのローカルに隔離する。
+    HEALTH_HPM_SESSION_DIR = os.environ.get(
+        "HEALTH_HPM_SESSION_DIR",
+        os.path.join(
+            os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(),
+            "KintaiChecker", "health_sessions",
+        ),
+    )
+    # 上記フォルダに残った一時ファイルを消すまでの時間（プレビューのたびに掃除する）
+    HEALTH_HPM_SESSION_MAX_AGE_HOURS = int(
+        os.environ.get("HEALTH_HPM_SESSION_MAX_AGE_HOURS", "8"))
+
     # jinjer CSV カラムマッピング候補
     # ※先頭に置くほど優先度が高い（完全一致を試みたあと部分一致）
     JINJER_COLUMN_MAPPING = {
@@ -189,4 +213,5 @@ class Config:
     ALLOWED_EXTENSIONS = {
         "jinjer": {"csv"},
         "timesheet": {"xlsx", "xls", "xlsb", "csv", "txt", "pdf", "png", "jpg", "jpeg"},
+        "health_excel": {"xlsx"},
     }

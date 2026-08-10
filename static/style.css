@@ -1126,12 +1126,49 @@ body {
 .acc-expense  { border-left-color: #548235; }
 .acc-mail     { border-left-color: #0070c0; }
 .acc-keihi    { border-left-color: #2f5597; }
+.acc-health   { border-left-color: #0e7c66; }
 .icon-match    { background: #2E75B6; }
 .icon-schedule { background: #2E75B6; }
 .icon-keiri    { background: #7030a0; }
 .icon-expense  { background: #548235; }
 .icon-mail     { background: #0070c0; }
 .icon-keihi    { background: #2f5597; }
+.icon-health   { background: #0e7c66; }
+
+/* --- 健康診断HPMモード: 1人1ブロックの一覧 --- */
+.hh-person {
+    border: 1px solid #d7dee5;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: #fff;
+}
+.hh-person.has-error { border-color: #e29aa2; background: #fffafa; }
+.hh-person-head {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    margin-bottom: 7px;
+}
+.hh-person-name { font-weight: 600; font-size: 14px; }
+.hh-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 9px;
+}
+.hh-box { border: 1px solid #e6ebef; border-radius: 5px; padding: 7px 9px; }
+.hh-box-title { font-size: 11px; color: #62707c; margin-bottom: 4px; }
+.hh-bp { border-collapse: collapse; font-size: 13px; }
+.hh-bp th, .hh-bp td { border: 1px solid #e0e6ea; padding: 2px 9px; text-align: center; }
+.hh-bp th { background: #f4f7f9; font-weight: 600; font-size: 11px; }
+.hh-bp .hh-blank { color: #9aa5ad; }
+.hh-qual { font-size: 12px; margin: 0; padding-left: 17px; }
+.hh-issue { font-size: 12px; margin-top: 5px; padding: 3px 7px; border-radius: 4px; }
+.hh-issue-error { background: #f8d7da; color: #721c24; }
+.hh-issue-warning { background: #fff3cd; color: #856404; }
+.hh-select { padding: 4px 7px; max-width: 100%; font-size: 12px; }
+.hh-reason { font-size: 11px; color: #a05a00; margin-top: 3px; }
 
 /* --- 結果ブロックの見出し（どのモードの結果かを明示） --- */
 .result-head {

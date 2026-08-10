@@ -65,6 +65,7 @@ function updateSelected(files, container) {
 setupDropZone('jinjer-drop-zone', 'jinjer-input', 'jinjer-selected', false);
 setupDropZone('timesheet-drop-zone', 'timesheet-input', 'timesheet-selected', true);
 setupDropZone('shift-files-drop-zone', 'shift-files-input', 'shift-files-selected', true);
+setupDropZone('hh-drop-zone', 'hh-file-input', 'hh-selected', false);
 
 // =============================================================================
 // グローバル状態
@@ -109,6 +110,7 @@ const MODE_HINTS = {
     keiri:      'freee 取引インポート用の4CSVを作る',
     expense:    'テレワーク・出社日数と経費を集計する',
     mail:       '下書きのみ作成・送信はしません',
+    health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
 };
 
 // 進捗バー／エラー表示がどのモードのものかを覚えておく。
@@ -139,12 +141,14 @@ function applyModeUI(mode) {
     const kiCard = document.getElementById('ki-card');
     const keiriCard = document.getElementById('keiri-card');
     const mailCard = document.getElementById('mail-card');
+    const healthCard = document.getElementById('health-card');
 
     const isSchedule = mode === 'csv_export';
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
     const isMail = mode === 'mail';
-    const isMatch = !isSchedule && !isExpense && !isKeiri && !isMail;
+    const isHealthHpm = mode === 'health_hpm';
+    const isMatch = !isSchedule && !isExpense && !isKeiri && !isMail && !isHealthHpm;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -183,6 +187,8 @@ function applyModeUI(mode) {
         mailCard.style.display = isMail ? '' : 'none';
         if (isMail) loadMailTemplates();
     }
+    // 健康診断HPMモード: 健診カードのみ表示
+    if (healthCard) healthCard.style.display = isHealthHpm ? '' : 'none';
 
     // アップロードフォーム（＝スケジュールモードの入力カード）はスケジュールモードのみ表示
     if (form) form.style.display = isSchedule ? '' : 'none';
@@ -2265,3 +2271,333 @@ if (mailLedgerApplyBtn) {
         }
     });
 }
+
+
+// =============================================================================
+// 健康診断HPMモード（整形済Excel → HPM取込用302列CSV）
+// =============================================================================
+// 画面に平均血圧の欄は作らない。1回目・2回目の枠しか持たせないことで、
+// 「平均を出しておいて」と言われても構造的に出せないようにしておく。
+
+let hhPreview = null;
+
+function hhShowError(messages) {
+    const el = document.getElementById('hh-error-area');
+    if (!el) return;
+    const list = Array.isArray(messages) ? messages : [messages];
+    el.innerHTML = list.map(escapeHtml).join('<br>');
+    el.style.display = list.length ? 'block' : 'none';
+}
+
+function hhClearError() {
+    const el = document.getElementById('hh-error-area');
+    if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+}
+
+function hhIssueHtml(issue) {
+    const cls = issue.level === 'error' ? 'hh-issue-error' : 'hh-issue-warning';
+    const mark = issue.level === 'error' ? '⛔' : '⚠️';
+    return '<div class="hh-issue ' + cls + '">' + mark + ' ' + escapeHtml(issue.message) + '</div>';
+}
+
+function hhBpCell(value) {
+    return value ? escapeHtml(value) : '<span class="hh-blank">—</span>';
+}
+
+function hhInstitutionOptions(master, selected) {
+    let html = '<option value="">（選んでください）</option>';
+    (master.institutions || []).forEach(inst => {
+        const label = inst.name + (inst.hpm_confirmed ? '' : '（HPM未確認・使えません）');
+        html += '<option value="' + escapeHtml(inst.name) + '"'
+            + (inst.name === selected ? ' selected' : '')
+            + (inst.hpm_confirmed ? '' : ' disabled')
+            + '>' + escapeHtml(label) + '</option>';
+    });
+    return html;
+}
+
+function hhCourseOptions(master, institutionName, selected) {
+    const inst = (master.institutions || []).find(i => i.name === institutionName);
+    let html = '<option value="">（選んでください）</option>';
+    if (!inst) return html;
+    (inst.courses || []).forEach(c => {
+        html += '<option value="' + escapeHtml(c.hpm_value) + '"'
+            + (c.hpm_value === selected ? ' selected' : '')
+            + '>' + escapeHtml(c.display_name) + '</option>';
+    });
+    return html;
+}
+
+function hhJinjerBlock(person, roster) {
+    const j = person.jinjer || {};
+    if (j.status === 'ok' && j.employee) {
+        const e = j.employee;
+        return '<div class="hh-box"><div class="hh-box-title">jinjer 社員（自動一致）</div>'
+            + '<div style="font-size:13px">' + escapeHtml(e.employee_id) + '　' + escapeHtml(e.name) + '</div>'
+            + '<div style="font-size:11px; color:#62707c">' + escapeHtml(e.kana)
+            + '／' + escapeHtml(e.birth_date) + '／' + escapeHtml(e.gender) + '</div>'
+            + '<input type="hidden" class="hh-emp" data-key="' + escapeHtml(person.key) + '" value="'
+            + escapeHtml(e.employee_id) + '"></div>';
+    }
+    // 候補 → 全員 の順で並べ、人に選んでもらう（同姓同名を自動で決めない）
+    const seen = {};
+    const list = [];
+    (j.candidates || []).forEach(c => { if (!seen[c.employee_id]) { seen[c.employee_id] = 1; list.push(c); } });
+    (roster || []).forEach(c => { if (!seen[c.employee_id]) { seen[c.employee_id] = 1; list.push(c); } });
+    let options = '<option value="">（社員を選んでください）</option>';
+    list.forEach(c => {
+        options += '<option value="' + escapeHtml(c.employee_id) + '">'
+            + escapeHtml(c.employee_id + '　' + c.name + '（' + (c.birth_date || '生年月日なし')
+            + '・' + (c.gender || '性別なし') + '）') + '</option>';
+    });
+    const reasons = (j.reasons || []).map(r => '<div class="hh-reason">' + escapeHtml(r) + '</div>').join('');
+    return '<div class="hh-box"><div class="hh-box-title">jinjer 社員（要選択）</div>'
+        + '<select class="hh-select hh-emp" data-key="' + escapeHtml(person.key) + '">' + options + '</select>'
+        + reasons + '</div>';
+}
+
+function hhRenderPerson(person, master, roster) {
+    const bp = person.blood_pressure || { r1: {}, r2: {} };
+    const hasError = (person.issues || []).some(i => i.level === 'error');
+
+    let html = '<div class="hh-person' + (hasError ? ' has-error' : '') + '">';
+    html += '<div class="hh-person-head">'
+        + '<span class="hh-person-name">' + escapeHtml(person.name) + '</span>'
+        + '<span style="font-size:12px; color:#62707c">受診日 ' + escapeHtml(person.exam_date)
+        + '／受診No. ' + escapeHtml(person.exam_no)
+        + '／数値 ' + person.numeric_count + '項目・定性 ' + person.qualitative_count + '項目</span>'
+        + '</div>';
+
+    html += '<div class="hh-grid">';
+    html += hhJinjerBlock(person, roster);
+
+    html += '<div class="hh-box"><div class="hh-box-title">健診機関・健診種別</div>'
+        + '<select class="hh-select hh-inst" data-key="' + escapeHtml(person.key) + '" style="width:100%; margin-bottom:4px">'
+        + hhInstitutionOptions(master, '') + '</select>'
+        + '<select class="hh-select hh-course" data-key="' + escapeHtml(person.key) + '" style="width:100%">'
+        + hhCourseOptions(master, '', '') + '</select></div>';
+
+    html += '<div class="hh-box"><div class="hh-box-title">血圧（原票どおり・平均は作りません）</div>'
+        + '<table class="hh-bp"><tr><th></th><th>収縮期</th><th>拡張期</th></tr>'
+        + '<tr><th>1回目</th><td>' + hhBpCell(bp.r1 && bp.r1.sys) + '</td><td>' + hhBpCell(bp.r1 && bp.r1.dia) + '</td></tr>'
+        + '<tr><th>2回目</th><td>' + hhBpCell(bp.r2 && bp.r2.sys) + '</td><td>' + hhBpCell(bp.r2 && bp.r2.dia) + '</td></tr>'
+        + '</table>'
+        + (bp.r3_present ? '<div class="hh-reason">3回目以降がありますがHPMには出力しません</div>' : '')
+        + '</div>';
+
+    if ((person.qualitative || []).length) {
+        const items = person.qualitative.map(q => {
+            const where = q.hpm_col !== null && q.hpm_col !== undefined
+                ? '→ 列' + q.hpm_col + '（' + escapeHtml(q.col_name) + '）'
+                : '<span style="color:#a05a00">' + escapeHtml(q.note || '') + '</span>';
+            return '<li>' + escapeHtml(q.item) + '： <b>' + escapeHtml(q.value) + '</b> ' + where + '</li>';
+        }).join('');
+        html += '<div class="hh-box"><div class="hh-box-title">定性検査</div>'
+            + '<ul class="hh-qual">' + items + '</ul></div>';
+    }
+    html += '</div>';
+
+    if ((person.unmapped_items || []).length) {
+        const names = person.unmapped_items.map(u => u.category + '/' + u.item).join('、');
+        html += '<div class="hh-issue hh-issue-warning">⚠️ 変換マスタに無いため出力しない項目: '
+            + escapeHtml(names) + '</div>';
+    }
+    (person.issues || []).forEach(i => { html += hhIssueHtml(i); });
+    html += '</div>';
+    return html;
+}
+
+function hhRenderPreview(data) {
+    hhPreview = data;
+    document.getElementById('hh-cnt-persons').textContent = data.counts.persons;
+    document.getElementById('hh-cnt-errors').textContent = data.counts.errors;
+    document.getElementById('hh-cnt-warnings').textContent = data.counts.warnings;
+
+    const issuesEl = document.getElementById('hh-workbook-issues');
+    issuesEl.innerHTML = (data.workbook_issues || []).map(hhIssueHtml).join('');
+
+    let html = '';
+    if ((data.master.institutions || []).length && data.persons.length > 1) {
+        html += '<div class="hh-box" style="margin-bottom:9px; background:#fafcfe">'
+            + '<div class="hh-box-title">全員に同じ健診機関・種別を設定する</div>'
+            + '<select class="hh-select" id="hh-bulk-inst" style="min-width:240px">'
+            + hhInstitutionOptions(data.master, '') + '</select> '
+            + '<select class="hh-select" id="hh-bulk-course" style="min-width:220px">'
+            + hhCourseOptions(data.master, '', '') + '</select> '
+            + '<button type="button" class="btn btn-secondary" id="hh-bulk-apply">全員に適用</button>'
+            + '</div>';
+    }
+    html += data.persons.map(p => hhRenderPerson(p, data.master, data.roster)).join('');
+    document.getElementById('hh-persons').innerHTML = html;
+
+    document.getElementById('hh-genpyo-confirmed').checked = false;
+    document.getElementById('hh-generate-result').style.display = 'none';
+    document.getElementById('hh-console').style.display = 'none';
+    document.getElementById('hh-preview-area').style.display = 'block';
+    hhUpdateGenerateButton();
+}
+
+function hhCollectSelections() {
+    if (!hhPreview) return [];
+    return hhPreview.persons.map(p => {
+        const pick = (cls) => {
+            const el = document.querySelector('.' + cls + '[data-key="' + p.key + '"]');
+            return el ? (el.value || '') : '';
+        };
+        return {
+            key: p.key,
+            employee_id: pick('hh-emp'),
+            institution: pick('hh-inst'),
+            course: pick('hh-course'),
+        };
+    });
+}
+
+function hhUpdateGenerateButton() {
+    const btn = document.getElementById('hh-generate-btn');
+    if (!btn || !hhPreview) return;
+    const confirmed = document.getElementById('hh-genpyo-confirmed').checked;
+    const picks = hhCollectSelections();
+    const allPicked = picks.length > 0
+        && picks.every(p => p.employee_id && p.institution && p.course);
+    const ready = hhPreview.counts.errors === 0 && allPicked && confirmed;
+    btn.disabled = !ready;
+    btn.title = ready ? ''
+        : (hhPreview.counts.errors > 0
+            ? 'エラーが残っているため作成できません'
+            : (!allPicked ? '社員・健診機関・健診種別を全員分選んでください'
+                : '「原票どおり」のチェックを入れてください'));
+}
+
+function hhRenderGenerateResult(data) {
+    const el = document.getElementById('hh-generate-result');
+    const warnings = (data.warnings || []).map(hhIssueHtml).join('');
+    el.innerHTML = '<div class="alert alert-success" style="margin:0 0 6px">'
+        + '✅ ' + data.row_count + '名分・' + data.column_count + '列のCSVを作成しました'
+        + '<br>保存先: <code>' + escapeHtml(data.output_path) + '</code>'
+        + '<br>書き出したファイルを読み直して、行数・列数・全セルの一致を確認済みです。'
+        + '<br><b>このCSVをExcelで開いて保存し直さないでください</b>'
+        + '（受診番号の先頭ゼロが落ち、行が消えることがあります）。'
+        + '<br>HPMへの取り込み・チェック・更新は、これまでどおり手作業でお願いします。'
+        + '</div>' + warnings;
+    el.style.display = 'block';
+
+    const consoleEl = document.getElementById('hh-console');
+    consoleEl.textContent = (data.console || []).join('\n');
+    consoleEl.style.display = (data.console || []).length ? 'block' : 'none';
+}
+
+function setupHealthHpmMode() {
+    const previewBtn = document.getElementById('hh-preview-btn');
+    const generateBtn = document.getElementById('hh-generate-btn');
+    if (!previewBtn || !generateBtn) return;
+
+    const personsEl = document.getElementById('hh-persons');
+
+    // 機関を変えたら、その機関の健診種別だけに選択肢を差し替える
+    personsEl.addEventListener('change', (e) => {
+        if (e.target.classList.contains('hh-inst')) {
+            const key = e.target.dataset.key;
+            const courseEl = document.querySelector('.hh-course[data-key="' + key + '"]');
+            if (courseEl) courseEl.innerHTML = hhCourseOptions(hhPreview.master, e.target.value, '');
+        }
+        if (e.target.id === 'hh-bulk-inst') {
+            const bulkCourse = document.getElementById('hh-bulk-course');
+            if (bulkCourse) bulkCourse.innerHTML = hhCourseOptions(hhPreview.master, e.target.value, '');
+        }
+        hhUpdateGenerateButton();
+    });
+
+    personsEl.addEventListener('click', (e) => {
+        if (e.target.id !== 'hh-bulk-apply') return;
+        const inst = document.getElementById('hh-bulk-inst').value;
+        const course = document.getElementById('hh-bulk-course').value;
+        if (!inst) { alert('健診機関を選んでください'); return; }
+        document.querySelectorAll('.hh-inst').forEach(sel => {
+            sel.value = inst;
+            const courseEl = document.querySelector('.hh-course[data-key="' + sel.dataset.key + '"]');
+            if (courseEl) {
+                courseEl.innerHTML = hhCourseOptions(hhPreview.master, inst, course);
+                courseEl.value = course;
+            }
+        });
+        hhUpdateGenerateButton();
+    });
+
+    document.getElementById('hh-genpyo-confirmed')
+        .addEventListener('change', hhUpdateGenerateButton);
+
+    previewBtn.addEventListener('click', async () => {
+        const input = document.getElementById('hh-file-input');
+        const status = document.getElementById('hh-status');
+        hhClearError();
+        if (!input.files || !input.files.length) {
+            hhShowError('整形済みの健診Excel（.xlsx）を選んでください');
+            return;
+        }
+        const form = new FormData();
+        form.append('health_excel', input.files[0]);
+        form.append('master_path', document.getElementById('hh-master-path').value || '');
+
+        previewBtn.disabled = true;
+        status.textContent = '読み込み中…';
+        try {
+            const res = await fetch('/health_hpm_preview', { method: 'POST', body: form });
+            const data = await res.json();
+            if (!data.success) {
+                hhShowError(data.errors || ['読み込みに失敗しました']);
+                document.getElementById('hh-preview-area').style.display = 'none';
+                return;
+            }
+            hhRenderPreview(data);
+            status.textContent = data.counts.persons + '名を読み込みました';
+        } catch (e) {
+            hhShowError('通信に失敗しました: ' + e);
+        } finally {
+            previewBtn.disabled = false;
+        }
+    });
+
+    generateBtn.addEventListener('click', async () => {
+        const status = document.getElementById('hh-generate-status');
+        hhClearError();
+        if (!confirm('HPM取込用CSVを作成します。\n\n'
+            + '・血圧は1回目と2回目を原票どおり別々に出します（平均は作りません）\n'
+            + '・(-) は陰性として出力します\n'
+            + '・HPMへの取り込み・チェック・更新は手作業で行ってください\n\n'
+            + 'よろしいですか？')) return;
+
+        generateBtn.disabled = true;
+        status.textContent = '作成中…';
+        try {
+            const res = await fetch('/health_hpm_generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: hhPreview.session_id,
+                    genpyo_confirmed: document.getElementById('hh-genpyo-confirmed').checked,
+                    persons: hhCollectSelections(),
+                    output_filename: document.getElementById('hh-output-filename').value || '',
+                }),
+            });
+            const data = await res.json();
+            if (!data.success) {
+                hhShowError(data.errors || ['作成に失敗しました']);
+                const consoleEl = document.getElementById('hh-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = (data.console || []).length ? 'block' : 'none';
+                status.textContent = '';
+                return;
+            }
+            hhRenderGenerateResult(data);
+            status.textContent = '完了';
+        } catch (e) {
+            hhShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            hhUpdateGenerateButton();
+        }
+    });
+}
+
+setupHealthHpmMode();
