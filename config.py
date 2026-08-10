@@ -193,6 +193,10 @@ class Config:
     # 上記フォルダに残った一時ファイルを消すまでの時間（プレビューのたびに掃除する）
     HEALTH_HPM_SESSION_MAX_AGE_HOURS = int(
         os.environ.get("HEALTH_HPM_SESSION_MAX_AGE_HOURS", "8"))
+    # PDFを直接読むときのページ数上限。1ページ＝Claude API 1回（10〜20秒）なので、
+    # 間違って分厚いPDFを入れたときに時間と課金が伸び続けるのを止める。
+    # 実績: 同友会の1回分は3〜7ページ。増やすなら環境変数で。
+    HEALTH_HPM_PDF_MAX_PAGES = int(os.environ.get("HEALTH_HPM_PDF_MAX_PAGES", "20"))
 
     # jinjer CSV カラムマッピング候補
     # ※先頭に置くほど優先度が高い（完全一致を試みたあと部分一致）

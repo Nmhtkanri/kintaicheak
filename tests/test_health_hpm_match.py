@@ -165,6 +165,39 @@ class TestMatchPerson:
         assert any("年齢" in r for r in result.reasons)
 
 
+class TestItaiji:
+    """原票の異体字（髙橋）と jinjer の常用字体（高橋）を同じ人として扱う。"""
+
+    def test_takahashi_matches(self, candidates):
+        result = match_person("髙橋 和紀", "男性", 47, date(2026, 7, 1), candidates)
+
+        assert result.status == STATUS_OK
+        assert result.employee_id == "2019022"
+
+    @pytest.mark.parametrize("raw,folded", [
+        ("髙橋", "高橋"), ("川﨑", "川崎"), ("濵田", "浜田"),
+        ("渡邊", "渡辺"), ("渡邉", "渡辺"), ("齋藤", "斎藤"),
+        ("高橋", "高橋"),
+    ])
+    def test_fold_itaiji(self, raw, folded):
+        from services.health_hpm_match import fold_itaiji
+        assert fold_itaiji(raw) == folded
+
+    def test_display_name_stays_as_registered(self, candidates):
+        """照合だけ寄せる。候補に出る氏名は jinjer の登録どおり。"""
+        result = match_person("髙橋 和紀", "男性", 47, date(2026, 7, 1), candidates)
+        assert result.candidates[0].name == "高橋　和紀"
+
+    def test_unrelated_names_not_merged(self, candidates):
+        result = match_person("友納 英彦", "男性", 58, date(2026, 7, 1), candidates)
+        assert result.employee_id == "2018013", "無関係な氏名まで畳まない"
+
+    def test_itaiji_still_checks_gender_and_age(self, candidates):
+        result = match_person("髙橋 和紀", "女性", 47, date(2026, 7, 1), candidates)
+        assert result.status == STATUS_SELECT
+        assert any("性別" in r for r in result.reasons)
+
+
 class TestValidateSelection:
     def test_accepts_known_employee(self, candidates):
         got = validate_selection("2018013", candidates)

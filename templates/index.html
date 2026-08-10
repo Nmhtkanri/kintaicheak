@@ -712,19 +712,24 @@
                 <li>血圧の<b>平均値は作成しません</b>。1回目と2回目を原票どおり別々の欄に出します（1回分しかなければ2回目は空欄）。</li>
                 <li><code>(-)</code> は<b>陰性として出力します</b>。空欄や単独のハイフンを勝手に <code>(-)</code> にはしません。</li>
                 <li>原票の判定（A〜G）は HPM へ<b>転記しません</b>（判定列は空欄のまま）。</li>
+                <li>PDFを選んだ場合は Claude が原票画像を読み取ります（勤務表のAI読み取りと同じ扱い）。<b>読めない値は推測せず</b>、要確認として表示します。</li>
             </ul>
         </div>
 
         <div class="upload-section">
-            <div class="section-title">整形済み健診Excel（スキーマ2.0） <span class="tag tag-req">必須</span></div>
+            <div class="section-title">健診結果のPDF、または整形済みExcel（スキーマ2.0） <span class="tag tag-req">必須</span></div>
             <div class="drop-zone" id="hh-drop-zone">
                 <div class="drop-zone-inner">
                     <div class="drop-icon">🩺</div>
                     <p>ファイルをドラッグ&amp;ドロップ、または</p>
                     <label class="btn btn-secondary">ファイルを選択
-                        <input type="file" id="hh-file-input" accept=".xlsx" style="display:none">
+                        <input type="file" id="hh-file-input" accept=".pdf,.xlsx" style="display:none">
                     </label>
-                    <p class="hint">health-check-pdf-to-excel スキルが作った .xlsx を選んでください。</p>
+                    <p class="hint">
+                        <b>.pdf</b> … 健診機関から届いた原票をそのまま読み取ります（1人あたり10〜20秒）。<br>
+                        <b>.xlsx</b> … health-check-pdf-to-excel スキルが作った整形済みファイル。<br>
+                        PDFの読み取りは<b>同友会の個人票様式で検証済み</b>です。他の機関の様式は読めるとは限らないので、表示された値を必ず原票と見比べてください。
+                    </p>
                 </div>
                 <div class="selected-files" id="hh-selected"></div>
             </div>

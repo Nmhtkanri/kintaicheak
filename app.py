@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 import json
 import uuid
 import logging
@@ -166,8 +167,15 @@ def _load_health_session(session_id: str) -> dict | None:
 
 
 def _drop_health_session(session_id: str) -> None:
-    path = _health_session_path(session_id)
-    if path:
+    """このセッションが作ったものを全部消す。
+
+    PDF経路では pkl のほかに原票のPNG（`health_<id>_p<n>.png`）が残るので、
+    pkl だけ消すと健診の画像が居座る。セッションIDは32桁の16進固定長なので、
+    前方一致で他のセッションを巻き込むことはない。
+    """
+    if not _HEALTH_SESSION_ID_RE.fullmatch(str(session_id or "")):
+        return
+    for path in glob.glob(os.path.join(_health_session_dir(), f"{session_id}*")):
         _safe_remove(path)
 
 
@@ -2635,8 +2643,13 @@ def _health_master_payload(master):
             "institutions": institutions}
 
 
-def _health_person_payload(person, match_result, master):
-    """1名分のプレビュー。血圧は1回目・2回目の枠しか持たない（平均欄を作らない）。"""
+def _health_person_payload(person, match_result, master, *, page=None,
+                           page_image_url=""):
+    """1名分のプレビュー。血圧は1回目・2回目の枠しか持たない（平均欄を作らない）。
+
+    page / page_image_url はPDF経路のときだけ入る（画面に原票を出すため）。
+    Excel経路は従来どおり呼べば null / 空文字になる。
+    """
     bp = person.blood_pressure()
     qualitative = []
     for m in person.qualitative():
@@ -2681,6 +2694,8 @@ def _health_person_payload(person, match_result, master):
         "qualitative_count": len(person.qualitative()),
         "unmapped_items": unmapped,
         "issues": _health_issue_dicts(person.issues),
+        "page": page,
+        "page_image_url": page_image_url,
     }
 
 
@@ -2767,6 +2782,130 @@ def fetch_employees_for_health():
     from services.jinjer_api_client import JinjerClient
 
     return JinjerClient().get_employees(only_active=True)
+
+
+@app.route("/health_hpm_pdf_preview", methods=["POST"])
+def route_health_hpm_pdf_preview():
+    """健診PDFを原票画像から読み取り、一覧を返す（SSEで進捗を流す）。
+
+    1ページあたり10〜20秒かかるので、同期JSONではなくSSEにしてある。
+    この時点ではCSVを一切作らない。
+    """
+    from services.health_hpm_master import MasterError, load_master
+    from services.health_hpm_match import build_candidates, match_person
+    from services import health_hpm_pdf
+
+    # --- リクエストはジェネレータへ入る前に使い切る（/upload と同じ理由） ---
+    upload = request.files.get("health_pdf")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False,
+                        "errors": ["健診結果のPDFを選んでください"]}), 400
+    if not upload.filename.lower().endswith(".pdf"):
+        return jsonify({"success": False,
+                        "errors": [f"PDFを選んでください: {upload.filename}"]}), 400
+
+    master_path = _clean_path_input(request.form.get("master_path")) or \
+        Config.HEALTH_HPM_MASTER_XLSX
+    try:
+        master = load_master(master_path)
+    except MasterError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+
+    _cleanup_health_sessions()
+    session_id = "health_" + uuid.uuid4().hex
+    session_dir = _health_session_dir()
+    pdf_path = os.path.join(session_dir, f"{session_id}.pdf")
+    upload.save(pdf_path)
+    source_filename = upload.filename   # request を触るのはここまで
+
+    def generate():
+        try:
+            # jinjer を先に取る。ここで落ちるならAPI課金の前に止められる。
+            yield _sse_event("progress", {"message": "jinjer の在籍者を取得しています…"})
+            employees = build_candidates(fetch_employees_for_health())
+
+            analysis = None
+            for kind, payload in health_hpm_pdf.analyze_health_pdf(
+                    pdf_path, master, source_filename=source_filename):
+                if kind == "progress":
+                    yield _sse_event("progress", payload)
+                else:
+                    analysis = payload
+
+            yield _sse_event("progress", {"message": "jinjer の社員と突き合わせています…"})
+            matches = {p.key: match_person(p.name, p.gender, p.age, p.exam_date, employees)
+                       for p in analysis.parse.persons}
+
+            # 原票PNGはファイルに置く。pkl には入れない（重いうえ画面へ配れない）
+            for page_no, png in analysis.page_pngs.items():
+                with open(os.path.join(session_dir,
+                                       f"{session_id}_p{page_no}.png"), "wb") as f:
+                    f.write(png)
+
+            _save_health_session(session_id, {
+                "kind": "health_hpm",
+                "created_at": _now_iso(),
+                "source_filename": source_filename,
+                "master_path": master_path,
+                "parse": analysis.parse,
+                "employees": employees,
+                "match": matches,
+                "source": "pdf",
+                "pages": analysis.pages,
+                "pdf_name": source_filename,
+            })
+
+            errors = analysis.parse.errors()
+            warnings = analysis.parse.warnings()
+            yield _sse_event("done", {
+                "success": True,
+                "session_id": session_id,
+                "source": "pdf",
+                "source_filename": source_filename,
+                "schema_version": analysis.parse.schema_version,
+                "can_generate": not errors,
+                "counts": {"persons": len(analysis.parse.persons),
+                           "errors": len(errors), "warnings": len(warnings)},
+                "workbook_issues": _health_issue_dicts(analysis.parse.issues),
+                "master": _health_master_payload(master),
+                "roster": [c.as_dict() for c in employees],
+                "persons": [
+                    _health_person_payload(
+                        p, matches[p.key], master,
+                        page=analysis.pages.get(p.key),
+                        page_image_url=(
+                            f"/health_hpm_page_image/{session_id}/{analysis.pages[p.key]}"
+                            if p.key in analysis.pages else ""),
+                    )
+                    for p in analysis.parse.persons
+                ],
+            })
+        except health_hpm_pdf.PdfReadError as e:
+            yield _sse_event("error", {"message": str(e), "code": "PDF_READ_FAILED"})
+        except JinjerAPIError as e:
+            yield _sse_event("error", {"message": f"jinjer API エラー: {e}"})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("health_hpm_pdf_preview failed")
+            yield _sse_event("error", {"message": f"読み取りに失敗しました: {e}"})
+        finally:
+            _safe_remove(pdf_path)   # アップロードされたPDFは残さない
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/health_hpm_page_image/<session_id>/<int:page>")
+def route_health_hpm_page_image(session_id, page):
+    """プレビュー中の原票画像を画面に出す（要配慮個人情報なのでID検証を必ず通す）。"""
+    if not _HEALTH_SESSION_ID_RE.fullmatch(str(session_id or "")) or not 1 <= page <= 999:
+        return jsonify({"success": False, "errors": ["不正なリクエストです"]}), 404
+    name = f"{session_id}_p{page}.png"
+    directory = _health_session_dir()
+    if not os.path.exists(os.path.join(directory, name)):
+        return jsonify({"success": False,
+                        "errors": ["画像が見つかりません（読み込みからやり直してください）"]}), 404
+    return send_from_directory(directory, name, as_attachment=False,
+                               mimetype="image/png")
 
 
 def _now_iso():
@@ -2904,16 +3043,53 @@ def route_health_hpm_generate():
             "書き出したCSVの検証に失敗したため削除しました。", *problems]}), 500
     _log("検証: 行数・列数・全セル一致 OK")
 
+    # PDFから読んだ場合は、根拠を後から辿れるように原票画像つきの整形済みExcelを
+    # CSVと同じ場所に残す。ここで失敗してもCSVは有効なので警告に留める。
+    audit_issues, audit_path = [], None
+    if session.get("source") == "pdf":
+        audit_path, audit_issues = _write_health_audit_workbook(
+            session, body.get("session_id"), parsed, out_dir, _log)
+
     _drop_health_session(body.get("session_id"))
     return jsonify({
         "success": True,
         "output_path": out_path,
+        "audit_xlsx_path": audit_path,
         "row_count": len(rows) - 1,
         "column_count": len(rows[0]),
         "verified": True,
-        "warnings": _health_issue_dicts(list(parsed.warnings()) + list(warnings)),
+        "warnings": _health_issue_dicts(
+            list(parsed.warnings()) + list(warnings) + audit_issues),
         "console": log_lines,
     })
+
+
+def _write_health_audit_workbook(session, session_id, parsed, out_dir, _log):
+    """監査用の整形済みExcelを書く。(パス, 警告リスト) を返す。"""
+    from services.health_hpm_csv import sanitize_filename_part
+    from services.health_hpm_excel import Issue
+    from services.health_hpm_pdf import write_audit_workbook
+
+    try:
+        pdf_name = session.get("pdf_name") or "健診PDF"
+        stem = sanitize_filename_part(os.path.splitext(os.path.basename(pdf_name))[0])
+        pages = session.get("pages") or {}
+        directory = _health_session_dir()
+        png_bytes = {}
+        for page in set(pages.values()):
+            path = os.path.join(directory, f"{session_id}_p{page}.png")
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    png_bytes[page] = f.read()
+        path = write_audit_workbook(
+            os.path.join(out_dir, f"{stem}_Excel変換_整形済.xlsx"),
+            parsed, pages, png_bytes, pdf_name=pdf_name, confirmed_at=_now_iso())
+        _log(f"監査用Excel: {path}")
+        return path, []
+    except Exception as e:  # noqa: BLE001
+        logger.exception("監査用Excelの書き出しに失敗")
+        return None, [Issue("warning", "AUDIT_XLSX_FAILED",
+                            f"監査用の整形済みExcelを書けませんでした（CSVは有効です）: {e}")]
 
 
 def _read_text(path):

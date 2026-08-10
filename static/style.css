@@ -1169,6 +1169,18 @@ body {
 .hh-issue-warning { background: #fff3cd; color: #856404; }
 .hh-select { padding: 4px 7px; max-width: 100%; font-size: 12px; }
 .hh-reason { font-size: 11px; color: #a05a00; margin-top: 3px; }
+/* PDFから読んだときの原票サムネイル。クリックで原寸を別タブに開く */
+.hh-thumb {
+    width: 100%;
+    max-width: 260px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    display: block;
+}
+.hh-thumb:hover { border-color: #0e7c66; }
+details.hh-needs-check { margin-top: 5px; font-size: 12px; }
+details.hh-needs-check > summary { cursor: pointer; color: #62707c; }
+details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
 
 /* --- 結果ブロックの見出し（どのモードの結果かを明示） --- */
 .result-head {
