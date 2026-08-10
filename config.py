@@ -43,6 +43,13 @@ class Config:
     OUTPUT_FOLDER = "outputs"
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
 
+    # uploads に残った入力ファイルの写しを何日で消すか。
+    # 処理の途中で例外が出た実行では消し漏れるため、起動時にまとめて掃除する。
+    # uploads にあるのは「処理のために保存した入力のコピー」で、成果物は outputs 側。
+    # 氏名や勤怠が入ったものが共有フォルダに残り続けないようにするのが目的。
+    # 0 以下にすると掃除しない。
+    UPLOAD_RETENTION_DAYS = int(os.environ.get("UPLOAD_RETENTION_DAYS", "7"))
+
     # 許容差分（デフォルト値、画面から変更可能）
     DEFAULT_THRESHOLD_MINUTES = 10
 

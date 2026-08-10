@@ -36,7 +36,11 @@ def _open_browser():
 
 
 if __name__ == "__main__":
-    from app import app
+    from app import app, cleanup_uploads_on_start
+
+    # 前回までの実行で uploads に残った入力ファイルの写しを掃除する。
+    # 氏名や勤怠を含むファイルが共有フォルダに残り続けないようにするため。
+    cleanup_uploads_on_start()
 
     threading.Thread(target=_open_browser, daemon=True).start()
     # 各自のPCでローカル起動する運用のため、待ち受けは自分のPC内のみ（LANに公開しない）

@@ -3109,6 +3109,44 @@ def _sse_event(event_type, data):
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
+def cleanup_uploads_on_start(max_age_days: int | None = None) -> int:
+    """uploads に残った入力ファイルの写しを消す。消した数を返す。
+
+    uploads に入るのは、処理のあいだ持っておくために保存した**入力のコピー**
+    （勤務表・jinjer CSV・差異一覧・凡例レビューのpkl）。成果物は outputs 側なので、
+    ここを消しても作ったものは失われない。
+
+    各処理は終わるときに自分で消しているが、途中で例外が出た実行では残る。
+    実際 2026-08 時点で3月からの124ファイル（33MB）が溜まっていた。氏名や勤怠を
+    含むものが共有フォルダに残り続けるのは避けたいので、起動時にまとめて掃除する。
+
+    **outputs は触らない。** あちらは後から見るための成果物。
+
+    テストで app を import しただけで実ファイルが消えないよう、モジュール読み込み時
+    ではなく launcher.py と __main__ からだけ呼ぶ。
+    """
+    import time
+
+    days = Config.UPLOAD_RETENTION_DAYS if max_age_days is None else max_age_days
+    if days <= 0:
+        return 0
+    limit = days * 24 * 3600
+    now = time.time()
+    removed = 0
+    for root, _dirs, files in os.walk(Config.UPLOAD_FOLDER):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                if now - os.path.getmtime(path) > limit:
+                    _safe_remove(path)
+                    removed += 1
+            except OSError:
+                continue
+    if removed:
+        logger.info("uploads の古いファイルを %d 件削除しました（%d日より前）", removed, days)
+    return removed
+
+
 def _safe_remove(path):
     try:
         if os.path.exists(path):
@@ -3147,4 +3185,5 @@ def _ensure_extension(filename, extension):
 
 
 if __name__ == "__main__":
+    cleanup_uploads_on_start()
     app.run(debug=True, host="127.0.0.1", port=5000)
