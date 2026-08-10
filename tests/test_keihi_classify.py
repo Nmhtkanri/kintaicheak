@@ -707,6 +707,55 @@ def test_load_irregular_file_wide(tmp_path):
     }
 
 
+def test_load_irregular_file_wide_blank_cells(tmp_path):
+    """ワイド形式の空セルは「その項目なし」として読み飛ばす（0埋めを強制しない）。
+
+    以前は空セルが「金額を数値として読めません」のエラーになり、使わない項目を
+    空欄にしただけで実行全体が止まっていた（呼び出し側は errors が1件でも中断する）。
+    """
+    from services.keihi_payroll_import import load_irregular_file
+    p = tmp_path / "irr.csv"
+    p.write_bytes(
+        "社員番号,氏名,現物支給,支給過不足調整,社保調整\r\n"
+        "2026012,橘 伸俊,3000,,\r\n"          # 使わない項目は空欄のまま
+        "2024050,加藤 英人,,,2000\r\n"
+        .encode("cp932"))
+    got, errs = load_irregular_file(p)
+    assert errs == []
+    assert got == {"現物支給": {"2026012": 3000}, "社保調整": {"2024050": 2000}}
+
+
+def test_load_irregular_file_wide_blank_cells_xlsx(tmp_path):
+    """xlsx の空セル（None）も同じく読み飛ばす。"""
+    from openpyxl import Workbook
+    from services.keihi_payroll_import import load_irregular_file
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["社員番号", "定常外業務対応手当", "その他手当", "現物支給"])
+    ws.append([2026012, 15000, None, None])
+    ws.append([2024050, None, None, 3000])
+    p = tmp_path / "irr.xlsx"
+    wb.save(p)
+    got, errs = load_irregular_file(p)
+    assert errs == []
+    assert got == {"定常外業務対応手当": {"2026012": 15000}, "現物支給": {"2024050": 3000}}
+
+
+def test_load_irregular_file_wide_error_line_matches_file_row(tmp_path):
+    """空セルを読み飛ばしても、エラー文の行番号はファイルの行番号のまま。"""
+    from services.keihi_payroll_import import load_irregular_file
+    p = tmp_path / "irr.csv"
+    p.write_bytes(
+        "社員番号,現物支給\r\n"
+        "2026012,\r\n"          # 2行目: 空欄 → 読み飛ばし
+        "2024050,あああ\r\n"     # 3行目: 金額が読めない → 「3行目」と出てほしい
+        .encode("cp932"))
+    got, errs = load_irregular_file(p)
+    assert got == {}
+    assert len(errs) == 1
+    assert "3行目" in errs[0]
+
+
 def test_load_irregular_file_long(tmp_path):
     """ロング形式（社員番号・項目・金額）も読める。同一社員同一項目は加算。"""
     from services.keihi_payroll_import import load_irregular_file

@@ -204,6 +204,7 @@ def load_irregular_file(path: "str | Path", label: str = "イレギュラー経�
         2026013,  現物支給,   3000
 
     金額は負数可。同一社員・同一項目の複数行は加算。
+    ワイド形式の空セルは「その人にはその項目が無い」として読み飛ばす（0と同じ扱い）。
     """
     rows = _read_table(path, label)
     if not rows:
@@ -223,11 +224,18 @@ def load_irregular_file(path: "str | Path", label: str = "イレギュラー経�
     errors: list[str] = []
 
     if item_cols:
-        # ワイド形式: 項目名の列ごとに読む
+        # ワイド形式: 項目名の列ごとに読む。
+        # 空セルは「その人にはその項目が無い」意味なので読み飛ばす。ここをエラーにすると
+        # 使わない項目を空欄にしただけで実行全体が止まる（呼び出し側は errors が1件でも
+        # あれば処理を打ち切るため）。読み飛ばした行も「#」の行として残し、エラー文の
+        # 行番号がファイルの行とズレないようにする（先頭の「#」1行は見出し行の分）。
         for ci, item in sorted(item_cols.items()):
-            text = "\n".join(f"{r[id_col]}\t{r[ci]}" for r in body
-                             if len(r) > max(id_col, ci))
-            got, errs = parse_manual_allowances(text)
+            lines = ["#"]
+            for r in body:
+                cell = r[ci] if len(r) > max(id_col, ci) else None
+                lines.append(f"{r[id_col]}\t{cell}"
+                             if cell is not None and str(cell).strip() else "#")
+            got, errs = parse_manual_allowances("\n".join(lines))
             if got:
                 merge_manual(out, item, got)
             errors += [f"{label}ファイル（{item}）{e}" for e in errs]
