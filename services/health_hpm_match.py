@@ -127,6 +127,27 @@ def build_candidates(employees: list[dict]) -> list[JinjerCandidate]:
     return out
 
 
+# 健診の原票は戸籍どおりの異体字で印字されることがあり、jinjer は常用字体で
+# 登録されている（2026-08-10 実例: 原票「髙橋」× jinjer「高橋」）。字が違うだけで
+# 手動選択に落ちるのは手間なので、**照合キーを作るときだけ**常用字体へ寄せる。
+# 画面表示とCSV出力はそれぞれの登録どおりのまま（原票は原票、氏名はjinjer）。
+# 全社共通の services/matcher.py は他モードにも効くので触らない。
+_ITAIJI = str.maketrans({
+    "髙": "高", "﨑": "崎", "濵": "浜", "濱": "浜",
+    "邊": "辺", "邉": "辺", "齋": "斎", "齊": "斉",
+    "冨": "富", "廣": "広", "德": "徳", "橫": "横",
+})
+
+
+def fold_itaiji(text: str) -> str:
+    return str(text or "").translate(_ITAIJI)
+
+
+def match_key(text: str) -> str:
+    """氏名の照合キー。空白除去などの共通正規化に、異体字寄せを重ねる。"""
+    return normalize_name(fold_itaiji(text))
+
+
 def age_at(birth: date | None, on: date | None) -> int | None:
     """受診日時点の満年齢。誕生日が来ていなければ1つ引く。"""
     if birth is None or on is None:
@@ -159,14 +180,14 @@ def gender_to_hpm(jinjer_gender: str) -> str:
 def match_person(name: str, gender: str, age: int | None, exam_date: date | None,
                  candidates: list[JinjerCandidate]) -> MatchResult:
     """1名分の照合。全部そろったときだけ ok、それ以外は人に選ばせる。"""
-    key = normalize_name(name)
-    hits = [c for c in candidates if normalize_name(c.name) == key]
+    key = match_key(name)
+    hits = [c for c in candidates if match_key(c.name) == key]
 
     if not hits:
         # 姓だけで一致する人も候補には出す（選ぶのは人）
         loose = [c for c in candidates
-                 if key and (normalize_name(c.last_name) == key
-                             or key in normalize_name(c.name))]
+                 if key and (match_key(c.last_name) == key
+                             or key in match_key(c.name))]
         return MatchResult(
             status=STATUS_SELECT,
             candidates=loose,

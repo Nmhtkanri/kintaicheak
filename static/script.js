@@ -252,7 +252,9 @@ form.addEventListener('submit', async (e) => {
 });
 
 
-async function consumeSSEResponse(response) {
+// handler を差し替えられるようにしてある。既定は勤怠チェック用の進捗バー処理だが、
+// 健診モードのように専用の進捗表示を持つ画面では別のハンドラを渡す。
+async function consumeSSEResponse(response, handler = processSSEPart) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -264,13 +266,13 @@ async function consumeSSEResponse(response) {
         const parts = buffer.split('\n\n');
         buffer = parts.pop();
         for (const part of parts) {
-            processSSEPart(part);
+            handler(part);
         }
     }
 }
 
 
-function processSSEPart(part) {
+function parseSSEPart(part) {
     const lines = part.split('\n');
     let eventType = null;
     let data = null;
@@ -280,6 +282,12 @@ function processSSEPart(part) {
             try { data = JSON.parse(line.slice(6)); } catch { }
         }
     }
+    return { eventType, data };
+}
+
+
+function processSSEPart(part) {
+    const { eventType, data } = parseSSEPart(part);
     if (!eventType || !data) return;
 
     if (eventType === 'progress') {
@@ -2395,6 +2403,17 @@ function hhRenderPerson(person, master, roster) {
         html += '<div class="hh-box"><div class="hh-box-title">定性検査</div>'
             + '<ul class="hh-qual">' + items + '</ul></div>';
     }
+
+    // PDFから読んだときだけ、原票そのものを並べて見比べられるようにする
+    if (person.page_image_url) {
+        const url = escapeHtml(person.page_image_url);
+        html += '<div class="hh-box"><div class="hh-box-title">原票（PDF '
+            + escapeHtml(person.page) + 'ページ）</div>'
+            + '<a href="' + url + '" target="_blank" rel="noopener">'
+            + '<img class="hh-thumb" src="' + url + '" loading="lazy" alt="原票"></a>'
+            + '<div class="hh-reason">クリックで原寸表示。血圧の1回目・2回目と '
+            + '<code>(-)</code> をこの画像で確かめてください。</div></div>';
+    }
     html += '</div>';
 
     if ((person.unmapped_items || []).length) {
@@ -2402,7 +2421,17 @@ function hhRenderPerson(person, master, roster) {
         html += '<div class="hh-issue hh-issue-warning">⚠️ 変換マスタに無いため出力しない項目: '
             + escapeHtml(names) + '</div>';
     }
-    (person.issues || []).forEach(i => { html += hhIssueHtml(i); });
+
+    // エラー・警告はそのまま出し、AIの「読めなかった」メモは畳んでおく
+    const issues = person.issues || [];
+    issues.filter(i => i.level !== 'info').forEach(i => { html += hhIssueHtml(i); });
+    const notes = issues.filter(i => i.level === 'info');
+    if (notes.length) {
+        html += '<details class="hh-needs-check"><summary>AIが読めなかった項目のメモ（'
+            + notes.length + '件）</summary><ul class="hh-qual">'
+            + notes.map(i => '<li>' + escapeHtml(i.message) + '</li>').join('')
+            + '</ul></details>';
+    }
     html += '</div>';
     return html;
 }
@@ -2487,6 +2516,71 @@ function hhRenderGenerateResult(data) {
     consoleEl.style.display = (data.console || []).length ? 'block' : 'none';
 }
 
+async function hhPreviewExcel(file, status) {
+    const form = new FormData();
+    form.append('health_excel', file);
+    form.append('master_path', document.getElementById('hh-master-path').value || '');
+
+    status.textContent = '読み込み中…';
+    const res = await fetch('/health_hpm_preview', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!data.success) {
+        hhShowError(data.errors || ['読み込みに失敗しました']);
+        document.getElementById('hh-preview-area').style.display = 'none';
+        status.textContent = '';
+        return;
+    }
+    hhRenderPreview(data);
+    status.textContent = data.counts.persons + '名を読み込みました';
+}
+
+
+// PDFは1人10〜20秒かかるので、SSEで進捗を出しながら読む。
+async function hhPreviewPdf(file, status) {
+    if (file.size > 45 * 1024 * 1024) {
+        hhShowError('PDFが大きすぎます（上限50MB）。ページを分けてから読み込んでください');
+        return;
+    }
+    const form = new FormData();
+    form.append('health_pdf', file);
+    form.append('master_path', document.getElementById('hh-master-path').value || '');
+
+    status.textContent = 'PDFを送信しています…';
+    const res = await fetch('/health_hpm_pdf_preview', { method: 'POST', body: form });
+
+    // 読み取りが始まる前に落ちた場合（拡張子・マスタ・サイズ超過）はJSONで返る
+    const contentType = res.headers.get('Content-Type') || '';
+    if (!res.ok || contentType.includes('application/json')) {
+        let errors = ['読み取りを開始できませんでした'];
+        try { errors = (await res.json()).errors || errors; } catch { }
+        hhShowError(errors);
+        document.getElementById('hh-preview-area').style.display = 'none';
+        status.textContent = '';
+        return;
+    }
+    await consumeSSEResponse(res, hhProcessSSEPart);
+}
+
+
+function hhProcessSSEPart(part) {
+    const { eventType, data } = parseSSEPart(part);
+    if (!eventType || !data) return;
+    const status = document.getElementById('hh-status');
+
+    if (eventType === 'progress') {
+        status.textContent = data.message || '読み取り中…';
+    } else if (eventType === 'done') {
+        hhRenderPreview(data);
+        status.textContent = data.counts.persons
+            + '名を読み取りました（AIの読み取りです。原票と見比べてください）';
+    } else if (eventType === 'error') {
+        hhShowError(data.message || '読み取りに失敗しました');
+        document.getElementById('hh-preview-area').style.display = 'none';
+        status.textContent = '';
+    }
+}
+
+
 function setupHealthHpmMode() {
     const previewBtn = document.getElementById('hh-preview-btn');
     const generateBtn = document.getElementById('hh-generate-btn');
@@ -2531,28 +2625,22 @@ function setupHealthHpmMode() {
         const input = document.getElementById('hh-file-input');
         const status = document.getElementById('hh-status');
         hhClearError();
-        if (!input.files || !input.files.length) {
-            hhShowError('整形済みの健診Excel（.xlsx）を選んでください');
+        const file = input.files && input.files[0];
+        if (!file) {
+            hhShowError('健診結果のPDF、または整形済みExcel（.xlsx）を選んでください');
             return;
         }
-        const form = new FormData();
-        form.append('health_excel', input.files[0]);
-        form.append('master_path', document.getElementById('hh-master-path').value || '');
 
         previewBtn.disabled = true;
-        status.textContent = '読み込み中…';
         try {
-            const res = await fetch('/health_hpm_preview', { method: 'POST', body: form });
-            const data = await res.json();
-            if (!data.success) {
-                hhShowError(data.errors || ['読み込みに失敗しました']);
-                document.getElementById('hh-preview-area').style.display = 'none';
-                return;
+            if (/\.pdf$/i.test(file.name)) {
+                await hhPreviewPdf(file, status);
+            } else {
+                await hhPreviewExcel(file, status);
             }
-            hhRenderPreview(data);
-            status.textContent = data.counts.persons + '名を読み込みました';
         } catch (e) {
             hhShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
         } finally {
             previewBtn.disabled = false;
         }
