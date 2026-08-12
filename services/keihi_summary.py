@@ -486,15 +486,38 @@ def _cell(r: list, i: int) -> str:
 # 経路突合チェック（通勤経路上の移動なのに通勤系以外で申請された交通費の検出）
 # ======================================================================
 
+# 「武蔵境駅南口／小田急バス」「川越駅西口／西武バス」はバス停の名前で、通勤経路には
+# 駅名（武蔵境・川越）で登録されている。同じ場所なので駅名まで切り詰めて突き合わせる。
+_STATION_EXIT_PAT = re.compile(r"駅(中央口|東口|西口|南口|北口|入口|改札|前|口).*$")
+
+
 def _norm_station(s) -> str:
+    """駅名の表記ゆれを吸収する。交通費精査モードと同じ規則（norm_station）に駅名の切り詰めを足す。
+
+    2つのモードで判定が食い違うと「精査では一致、経路突合では不一致」が起きて説明できない。
+    """
     if s is None:
         return ""
-    import unicodedata
-    s = unicodedata.normalize("NFKC", str(s)).strip()
-    s = re.sub(r"[（(].*?[）)]", "", s)   # 括弧内の路線名等を除去
-    s = s.replace(" ", "").replace("　", "")
-    s = re.sub(r"駅$", "", s)
-    return s
+    from services.kotsuhi_seisa import norm_station
+    # 括弧内・「」の除去、ヶ→ケ、空白除去は精査側と共通
+    base = norm_station(s)
+    cut = _STATION_EXIT_PAT.sub("", base)          # 「武蔵境駅南口／小田急バス」→「武蔵境」
+    cut = re.sub(r"駅$", "", cut)                   # 「武蔵境駅」→「武蔵境」
+    return cut or base                              # 切り詰めで空になったら元に戻す
+
+
+def _station_in(name: str, stations: set) -> bool:
+    """駅名が登録経路の駅集合にあるか。CSVで名前が途中で切れるので前方一致も許す。
+
+    実例（2026-07）: 登録が「武蔵境」で申請が「武蔵境駅南口／小田急バス」、
+    登録が「…※旧ＣＨＯ」で申請が「…※旧」。同じ停留所なのに文字列が違うだけで
+    片側一致（▲）に落ちていた。判定は交通費精査モードの station_eq をそのまま使う
+    （短い側が4文字未満の誤マッチ防止・「/」区切りなら長さ不問、の安全弁つき）。
+    """
+    if not name:
+        return False
+    from services.kotsuhi_seisa import station_eq
+    return any(station_eq(name, s) for s in stations)
 
 
 def _stations_from_route_text(text) -> list[str]:
@@ -600,9 +623,9 @@ def evaluate_route_check(
 
         if not ent or not stations:
             match = "通勤経路登録なし"
-        elif board and alight and board in stations and alight in stations:
+        elif board and alight and _station_in(board, stations) and _station_in(alight, stations):
             match = "経路内"
-        elif (board and board in stations) or (alight and alight in stations):
+        elif _station_in(board, stations) or _station_in(alight, stations):
             match = "片側一致"
         else:
             match = "一致なし"

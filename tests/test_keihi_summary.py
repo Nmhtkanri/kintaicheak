@@ -547,6 +547,74 @@ def test_car_travel_member_precedence_is_unchanged():
 # 片側一致（▲）もレビューに出す（2026-08-12 谷津さん決定）
 # ----------------------------------------------------------------------
 
+def test_station_names_cut_off_in_the_export_still_match():
+    """CSVで駅名が途中で切れても同じ停留所とみなす（前方一致）。
+
+    2026-07 実データ: 登録「…※旧ＣＨＯ」に対し申請が「…※旧」で、
+    実際は経路内なのに片側一致（▲）に落ちて定期代30,000円がレビューに出ていた。
+    """
+    commute = [{"社員番号": "2026006", "出発": "あすみ大通り南／京成バス千葉イースト※旧ＣＨＯ",
+                "到着": "霞ケ関(東京都)", "経由1": "", "経由2": "", "通勤経路": "",
+                "利用交通機関": "公共交通機関"}]
+    row = _integrated_transit("2026006", "あすみ大通り南／京成バス千葉イースト※旧",
+                              "霞ケ関(東京都)", "通勤定期代")
+    res = evaluate_route_check([row], commute)
+    assert res[0]["一致"] == "経路内"
+    assert res[0]["判定"] == "OK（通勤系を選択）"
+
+
+def test_bus_stop_written_as_a_station_name_matches():
+    """登録が「武蔵境」で申請が「武蔵境駅南口／小田急バス」でも同じ場所とみなす。
+
+    2026-07 実データ: 藤田さんの定期代21,600円がこれで▲に落ちていた。
+    駅名が3文字だと station_eq の前方一致ガード（4文字以上）に掛からないので、
+    バス停名を駅名まで切り詰めてから突き合わせる。
+    """
+    commute = [{"社員番号": "2017014", "出発": "西児童館入口/小田急バス", "到着": "武蔵境",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "公共交通機関"}]
+    row = _integrated_transit("2017014", "西児童館入口／小田急バス",
+                              "武蔵境駅南口／小田急バス", "通勤定期代")
+    res = evaluate_route_check([row], commute)
+    assert res[0]["一致"] == "経路内"
+
+
+def test_station_exit_names_are_trimmed_to_the_station():
+    """「川越駅西口／西武バス」と「川越」は同じ場所。駅の出口表記は落とす。"""
+    from services.keihi_summary import _norm_station
+    assert _norm_station("川越駅西口／西武バス") == "川越"
+    assert _norm_station("武蔵境駅南口／小田急バス") == "武蔵境"
+    assert _norm_station("国際展示場駅前(高速・連絡バス)") == "国際展示場"
+    assert _norm_station("武蔵境駅") == "武蔵境"
+    assert _norm_station("豊洲") == "豊洲"
+
+
+def test_different_stations_sharing_a_prefix_do_not_match():
+    """「西新宿」と「西新宿五丁目」は別の駅。切り詰めや前方一致で同一視しない。"""
+    commute = [{"社員番号": "2020001", "出発": "西新宿五丁目", "到着": "豊洲",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "公共交通機関"}]
+    row = _integrated_transit("2020001", "西新宿", "品川", "通勤定期代")
+    res = evaluate_route_check([row], commute)
+    assert res[0]["一致"] == "一致なし"
+
+
+def test_station_normalization_matches_kotsuhi_seisa_mode():
+    """ヶ/ケ・「」・末尾の駅 の表記ゆれを吸収する（精査モードと同じ規則）。"""
+    commute = [{"社員番号": "2020001", "出発": "祖師ヶ谷大蔵", "到着": "豊洲",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "公共交通機関"}]
+    row = _integrated_transit("2020001", "祖師ケ谷大蔵駅", "豊洲」", "通勤定期代")
+    res = evaluate_route_check([row], commute)
+    assert res[0]["一致"] == "経路内"
+
+
+def test_short_station_names_do_not_match_by_prefix():
+    """「東京」が「東京テレポート」に化けない（station_eq の4文字ガード）。"""
+    commute = [{"社員番号": "2020001", "出発": "東京テレポート", "到着": "豊洲",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "公共交通機関"}]
+    row = _integrated_transit("2020001", "東京", "品川", "通勤定期代")
+    res = evaluate_route_check([row], commute)
+    assert res[0]["一致"] == "一致なし"
+
+
 def _side_match_rows():
     """乗車だけ／降車だけが登録経路上の行を作る（通勤系・非通勤系の両方）。"""
     commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
