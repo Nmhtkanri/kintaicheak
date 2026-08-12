@@ -378,3 +378,50 @@ def test_no_commute_diff_marks_the_new_judgment_rows():
     rows = _no_commute(details, _nc_workdays(work=20, tw=5))
     apply_diff("通勤費申請なし", rows, {"通勤費申請なし": {"通勤費申請なし|2020001"}}, "確認要否")
     assert rows[0]["前回比"] == "継続"
+
+
+# ----------------------------------------------------------------------
+# 入力ブックの取り違え検知（2026-08-12 谷津さんが精査結果ブックを指定してハマった）
+# ----------------------------------------------------------------------
+
+def _csv_for_inputs(tmp_path):
+    import csv as _csv
+    p = tmp_path / "交通費申請.csv"
+    with open(p, "w", encoding="cp932", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["ステータス", "交通機関", "社員番号", "申請者", "所属グループ", "申請書No.",
+                    "明細No.", "利用日", "金額", "往復", "小計", "乗車場所", "降車場所", "経路", "目的地"])
+    return p
+
+
+def test_load_seisa_inputs_explains_a_book_without_required_sheets(tmp_path):
+    """『Worksheet 通勤費 does not exist.』ではなく、何を指定すべきかを日本語で伝える。"""
+    import openpyxl as _op
+    import pytest as _pytest
+    from services.kotsuhi_seisa import load_seisa_inputs
+    wb = _op.Workbook()
+    wb.active.title = "無関係"
+    book = tmp_path / "別物.xlsx"
+    wb.save(book)
+    with _pytest.raises(ValueError) as e:
+        load_seisa_inputs(_csv_for_inputs(tmp_path), book, "2026-07")
+    msg = str(e.value)
+    assert "『通勤費』『サマリ』シートがありません" in msg
+    assert "集計を実行" in msg
+
+
+def test_load_seisa_inputs_names_the_review_output_book(tmp_path):
+    """精査結果ブック（このモードの出力）を指定した実際の間違いは名指しで案内する。"""
+    import openpyxl as _op
+    import pytest as _pytest
+    from services.kotsuhi_seisa import load_seisa_inputs
+    wb = _op.Workbook()
+    wb.active.title = "サマリ"
+    wb.create_sheet("通勤費申請なし")     # 精査結果ブックにだけあるシート
+    book = tmp_path / "交通費精査結果_2026年7月.xlsx"
+    wb.save(book)
+    with _pytest.raises(ValueError) as e:
+        load_seisa_inputs(_csv_for_inputs(tmp_path), book, "2026-07")
+    msg = str(e.value)
+    assert "『通勤費』シートがありません" in msg
+    assert "精査結果のブック" in msg

@@ -532,6 +532,42 @@ def build_commute_station_sets(commute_rows: list[dict]) -> dict:
     return commute
 
 
+def _amount_as_int(v) -> "int | None":
+    """金額らしき値を int に。できなければ None（一致なし扱い）。"""
+    try:
+        s = str(v).replace(",", "").strip()
+        return int(round(float(s))) if s else None
+    except (TypeError, ValueError):
+        return None
+
+
+def build_commute_amount_index(commute_rows: list[dict]) -> dict:
+    """車通勤の金額突合用に 社員番号 → {"car": bool, "amounts": set[int]} を作る。
+
+    車通勤の人は駅の突合ができず、通勤系で申請すると毎月△に落ちてノイズになる。
+    申請金額がマスタの支給額と合っていればOKにする（2026-08-12 谷津さん決定）ため、
+    経路ごとの支給金額と、支給間隔ごとの合計（乗継の合算）を突合できる形で持つ。
+    CSVフォールバック由来の行は支給間隔が空だが、空グループの合計として同様に機能する。
+    """
+    index: dict = {}
+    sums: dict = {}
+    for c in commute_rows or []:
+        emp = str(c.get("社員番号") or "").strip()
+        if not emp:
+            continue
+        ent = index.setdefault(emp, {"car": False, "amounts": set()})
+        if str(c.get("利用交通機関") or "") == "車":
+            ent["car"] = True
+        amt = _amount_as_int(c.get("支給金額"))
+        if amt is not None and amt > 0:
+            ent["amounts"].add(amt)
+            key = (emp, str(c.get("支給間隔") or ""))
+            sums[key] = sums.get(key, 0) + amt
+    for (emp, _interval), total in sums.items():
+        index[emp]["amounts"].add(total)
+    return index
+
+
 def evaluate_route_check(
     integrated_rows: list[list[str]],
     commute_rows: list[dict],
@@ -542,9 +578,14 @@ def evaluate_route_check(
     travel_members（移動交通費（立替精算）対象者 {社員番号: 氏名}）を渡すと、
     該当者は経路の有無によらず「移動交通費＝立替精算が正」として判定する。
     通勤系の交通機関を選んでいた場合だけ △ で知らせる（2026-08-03 谷津さん指定）。
+
+    車通勤の人（マスタの利用交通機関=車）は駅の突合ができないため、
+    通勤系の申請金額がマスタの支給額と一致していればOKにして一覧に載せない
+    （2026-08-12 谷津さん指定）。金額が合わない車通勤者は従来どおり△で出す。
     """
     travel_members = travel_members or {}
     commute = build_commute_station_sets(commute_rows)
+    amount_index = build_commute_amount_index(commute_rows)
     results: list[dict] = []
     for _idx, r in enumerate(integrated_rows):
         kikan = _cell(r, C_TRANS)
@@ -566,11 +607,16 @@ def evaluate_route_check(
         else:
             match = "一致なし"
 
+        amounts = amount_index.get(emp) or {}
         if emp in travel_members:
             if kikan in COMMUTE_TYPES:
                 verdict = "△逆要確認（移動交通費（立替精算）対象者が通勤系を選択）"
             else:
                 verdict = "OK（移動交通費対象者＝立替精算）"
+        elif (amounts.get("car") and kikan in COMMUTE_TYPES
+                and _amount_as_int(_cell(r, C_TOTAL) or _cell(r, C_FARE)) in amounts["amounts"]):
+            # 車通勤は駅の突合ができない。金額がマスタと合っていれば正しい申請とみなす
+            verdict = "OK（車通勤・マスタ金額一致）"
         elif match == "経路内":
             verdict = "OK（通勤系を選択）" if kikan in COMMUTE_TYPES else "★要確認（経路内なのに通勤系以外を選択）"
         elif match in ("一致なし", "通勤経路登録なし") and kikan in COMMUTE_TYPES:

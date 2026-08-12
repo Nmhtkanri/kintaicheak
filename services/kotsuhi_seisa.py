@@ -1260,6 +1260,18 @@ def load_seisa_inputs(csv_path: Path, check_path: Path, target_ym: str,
 
     wb_src = openpyxl.load_workbook(check_path, data_only=True)
     try:
+        # シートが無いまま進むと openpyxl の KeyError（英語・引用符付き）がそのまま画面に出る。
+        # 精査結果のブック（このモードの出力）を誤って指定するのが実際に起きた間違いなので、
+        # それと分かるヒントを付けて日本語で止める（2026-08-12 谷津さんがハマった箇所）。
+        missing = [s for s in ("通勤費", "サマリ") if s not in wb_src.sheetnames]
+        if missing:
+            hint = ("※指定されたのは精査結果のブック（このステップの出力）のようです。"
+                    if "通勤費申請なし" in wb_src.sheetnames else "")
+            raise ValueError(
+                f"このブックには『{'』『'.join(missing)}』シートがありません。"
+                f"①「集計を実行」で出した経費チェックのブック"
+                f"（経費チェック20XX年X月.xlsx）を指定してください。{hint}"
+                f"指定されたファイル: {check_path}")
         master = CommuteMaster(wb_src["通勤費"])
         workdays = build_workdays(wb_src)
     finally:

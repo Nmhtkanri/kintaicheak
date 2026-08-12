@@ -1715,6 +1715,8 @@ def route_expense_telework():
         "success": result.ok,
         "download_url": f"/download/{output_filename}" if result.ok else None,
         "output_filename": output_filename if result.ok else None,
+        # ②承認前精査の「①で出したブック」欄へ自動入力するための実パス
+        "output_path": str(output_path) if result.ok else None,
         "stats": {
             "employee_count": result.employee_count,
             "telework_total": result.telework_total,
@@ -1825,6 +1827,8 @@ def _teiki_shiwake_form():
             errors.append(f"{label}のパスを入力してください")
         elif not _Path(value).exists():
             errors.append(f"{label}が見つかりません: {value}")
+    # 仕訳データはフォルダ指定可（追加計上分が別CSVになるパターンがあるため）。
+    # 中身のCSV有無・各ファイルの検証はサービス側（load_shiwake_sources）が行う。
     return (month_label, csv_str, xlsx_str, shiwake_str), errors
 
 
@@ -1878,8 +1882,11 @@ def route_teiki_shiwake_preview():
             "append_count": res.append_count,
             "append_total": res.append_total,
             "source_rows": res.source_rows,
+            "source_files": res.source_files,
+            "booked_count": res.booked_count,
             "ref_shiwake_no": res.ref_shiwake_no,
             "ref_company": res.ref_company,
+            "ref_source": res.ref_source,
         },
         "console": log_lines,
     })
@@ -1887,7 +1894,7 @@ def route_teiki_shiwake_preview():
 
 @app.route("/teiki_shiwake_generate", methods=["POST"])
 def route_teiki_shiwake_generate():
-    """プレビューと同じ計算をやり直し、別名の仕訳データCSVへ追記する（確認後実行）。
+    """プレビューと同じ計算をやり直し、追記行だけの新CSVを作る（確認後実行）。
 
     フォーム: month / kotsuhi_csv / check_xlsx / shiwake_csv
               ＋ confirmed="1" / expected_count / expected_total
@@ -1906,7 +1913,8 @@ def route_teiki_shiwake_generate():
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
 
-    output_filename = f"{_Path(shiwake_str).stem}_通勤定期代追記.csv"
+    y, m = month_label.split("-")
+    output_filename = f"通勤定期代追記_{y}年{int(m)}月.csv"
     output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
 
     log_lines: list[str] = []

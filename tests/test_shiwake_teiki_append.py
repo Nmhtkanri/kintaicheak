@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""仕訳データCSVへの通勤定期代追記（イレギュラー救済処置）。
+"""仕訳データCSVを補う通勤定期代行の生成（イレギュラー救済処置）。
 
 2026-08-07 の手作業（29名31行・562,570円）で起きた2つの事故を再発させないことを主眼に置く。
-  ① Excel経由で仕訳No.の先頭ゼロが落ちた
-  ② 追記のついでに既存行が書き換わっていた
+  ① Excel経由で仕訳No.の先頭ゼロが落ちた → 全工程で文字列のまま扱う
+  ② 追記のついでに既存行が書き換わっていた → 既存ファイルには書き込みで触れない（standalone出力）
+
+2026-08-12 拡張: 入力はフォルダでもよく（追加計上分が別CSVになるパターン）、
+どれかのCSVに定期代が計上済みの人はスキップする＝二重計上が構造的に起きない。
 """
 import csv
 import io
@@ -18,12 +21,13 @@ from services.kotsuhi_seisa import CommuteMaster  # noqa: E402
 from services.shiwake_teiki_append import (  # noqa: E402
     SHIWAKE_COLS,
     ShiwakeError,
-    append_to_shiwake_csv,
+    booked_pass_members,
     build_teiki_append_rows,
     find_teiki_reference,
-    load_shiwake_csv,
+    load_shiwake_sources,
     month_bounds,
     render_shiwake_rows,
+    write_standalone_shiwake_csv,
 )
 
 
@@ -31,12 +35,12 @@ from services.shiwake_teiki_append import (  # noqa: E402
 # ヘルパー
 # ----------------------------------------------------------------------
 
-def _shiwake_row(emp="2026009", name="稲田 真勢", trans="通勤定期代",
+def _shiwake_row(emp="2026009", name="稲田 真勢", trans="通勤定期代", use="2026/7/7",
                  shiwake_no="00000239", company="株式会社エヌエム・ヒューマテック"):
     """実物（2026年08月06日仕訳データ.csv）の1行を模した33列。"""
     r = [""] * SHIWAKE_COLS
-    r[0], r[1], r[2], r[3] = emp, name, "2026/7/7", "1182"
-    r[5], r[6] = "2026/7/7", trans
+    r[0], r[1], r[2], r[3] = emp, name, use, "1182"
+    r[5], r[6] = use, trans
     r[12], r[13], r[14] = "1182", "591", "往復"
     r[20], r[21] = "2026/7/31", "20260731"
     r[22], r[23] = "10", "0"
@@ -46,15 +50,12 @@ def _shiwake_row(emp="2026009", name="稲田 真勢", trans="通勤定期代",
     return r
 
 
-def _write_shiwake(path, rows, trailing_newline=True, encoding="cp932"):
+def _write_shiwake(path, rows, encoding="cp932"):
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
     w.writerow(["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(SHIWAKE_COLS - 2)])
     w.writerows(rows)
-    text = buf.getvalue()
-    if not trailing_newline:
-        text = text.rstrip("\r\n")
-    path.write_bytes(text.encode(encoding))
+    path.write_bytes(buf.getvalue().encode(encoding))
     return path
 
 
@@ -80,60 +81,113 @@ def _no_commute(emp="2008003", name="友納 英彦", kubun="通勤定期代",
 
 
 # ----------------------------------------------------------------------
-# 入力CSVの読み込み（想定外の形は必ず止める）
+# 入力CSVの読み込み（ファイル／フォルダ・想定外の形は必ず止める）
 # ----------------------------------------------------------------------
 
-def test_load_shiwake_csv_keeps_zero_padded_shiwake_no(tmp_path):
+def test_load_sources_reads_a_single_file_and_keeps_zero_padded_shiwake_no(tmp_path):
     """仕訳No. の先頭ゼロを落とさない（手作業では 00000240 → 240 になっていた）。"""
     p = _write_shiwake(tmp_path / "仕訳.csv", [_shiwake_row(shiwake_no="00000240")])
-    raw, header, body = load_shiwake_csv(p)
-    assert len(header) == SHIWAKE_COLS
-    assert body[0][24] == "00000240"
-    assert raw.endswith(b"\r\n")
+    files = load_shiwake_sources(p)
+    assert [f.name for f in files] == ["仕訳.csv"]
+    assert len(files[0].header) == SHIWAKE_COLS
+    assert files[0].body[0][24] == "00000240"
 
 
-def test_load_shiwake_csv_rejects_bom(tmp_path):
+def test_load_sources_reads_every_csv_in_a_folder_sorted_by_name(tmp_path):
+    """追加計上分が別CSVになるパターン（8/6本体＋8/7追加）に対応する。"""
+    _write_shiwake(tmp_path / "2026年08月07日仕訳データ.csv", [_shiwake_row(emp="2020002")])
+    _write_shiwake(tmp_path / "2026年08月06日仕訳データ.csv", [_shiwake_row(emp="2020001")])
+    files = load_shiwake_sources(tmp_path)
+    assert [f.name for f in files] == ["2026年08月06日仕訳データ.csv", "2026年08月07日仕訳データ.csv"]
+    assert sum(len(f.body) for f in files) == 2
+
+
+def test_load_sources_rejects_an_empty_folder(tmp_path):
+    with pytest.raises(ShiwakeError, match="CSVファイルがありません"):
+        load_shiwake_sources(tmp_path)
+
+
+def test_load_sources_names_the_broken_file_in_the_folder(tmp_path):
+    """フォルダ指定だとどのファイルが悪いのか分からないので、必ずファイル名を出す。"""
+    _write_shiwake(tmp_path / "a_正常.csv", [_shiwake_row()])
+    (tmp_path / "b_壊れ.csv").write_bytes("社員番号,氏名\r\n1,2\r\n".encode("cp932"))
+    with pytest.raises(ShiwakeError, match="b_壊れ.csv"):
+        load_shiwake_sources(tmp_path)
+
+
+def test_load_sources_rejects_bom(tmp_path):
     p = tmp_path / "bom.csv"
     p.write_bytes(b"\xef\xbb\xbf" + b"a," * (SHIWAKE_COLS - 1) + b"b\r\n")
     with pytest.raises(ShiwakeError, match="BOM"):
-        load_shiwake_csv(p)
+        load_shiwake_sources(p)
 
 
-def test_load_shiwake_csv_rejects_wrong_column_count(tmp_path):
-    p = tmp_path / "短い.csv"
-    p.write_bytes("社員番号,氏名\r\n2026009,稲田\r\n".encode("cp932"))
-    with pytest.raises(ShiwakeError, match="列数"):
-        load_shiwake_csv(p)
-
-
-def test_load_shiwake_csv_rejects_utf8(tmp_path):
-    """UTF-8で保存し直したファイルは読めない（CP932前提のため）。"""
-    p = _write_shiwake(tmp_path / "utf8.csv", [_shiwake_row(name="髙橋 淳")],
-                       encoding="utf-8")
+def test_load_sources_rejects_utf8(tmp_path):
+    p = _write_shiwake(tmp_path / "utf8.csv", [_shiwake_row(name="髙橋 淳")], encoding="utf-8")
     with pytest.raises(ShiwakeError, match="CP932"):
-        load_shiwake_csv(p)
+        load_shiwake_sources(p)
 
 
-def test_load_shiwake_csv_rejects_missing_file(tmp_path):
+def test_load_sources_rejects_missing_path(tmp_path):
     with pytest.raises(ShiwakeError, match="見つかりません"):
-        load_shiwake_csv(tmp_path / "ない.csv")
+        load_shiwake_sources(tmp_path / "ない.csv")
+
+
+# ----------------------------------------------------------------------
+# 計上済み検知（追加計上分・過去の追記出力との二重計上を防ぐ）
+# ----------------------------------------------------------------------
+
+def test_booked_members_are_collected_across_files_with_the_source_name(tmp_path):
+    _write_shiwake(tmp_path / "a.csv", [_shiwake_row(emp="2020001")])
+    _write_shiwake(tmp_path / "b_追加.csv", [_shiwake_row(emp="2020002", use="2026/7/1")])
+    booked = booked_pass_members(load_shiwake_sources(tmp_path), "2026-07")
+    assert booked == {"2020001": "a.csv", "2020002": "b_追加.csv"}
+
+
+def test_booked_members_ignores_other_months_and_non_pass_rows(tmp_path):
+    rows = [_shiwake_row(emp="2020001", use="2026/8/1"),                      # 別月
+            _shiwake_row(emp="2020002", trans="交通費（電車・バス）")]        # 定期代でない
+    files = load_shiwake_sources(_write_shiwake(tmp_path / "a.csv", rows))
+    assert booked_pass_members(files, "2026-07") == {}
+
+
+def test_build_rows_skips_people_already_booked_with_the_file_name():
+    """計上済みの人を追記したら二重計上。スキップ理由にどのファイルかを出す。"""
+    master = _master(("2008003", 1, "あざみ野", "銀座", "公共交通機関", "毎月", 18570))
+    rows, skipped, _w = build_teiki_append_rows(
+        [_no_commute()], master, "2026-07",
+        booked={"2008003": "2026年08月07日仕訳データ.csv"})
+    assert rows == []
+    assert len(skipped) == 1
+    assert "計上済み" in skipped[0]["理由"]
+    assert "2026年08月07日仕訳データ.csv" in skipped[0]["理由"]
 
 
 # ----------------------------------------------------------------------
 # 雛形（仕訳No.・企業名）の引き継ぎ
 # ----------------------------------------------------------------------
 
-def test_find_teiki_reference_copies_raw_values():
-    body = [_shiwake_row(trans="交通費（電車・バス）", shiwake_no="00000240"),
-            _shiwake_row(shiwake_no="00000240")]
-    assert find_teiki_reference(body) == ("00000240", "株式会社エヌエム・ヒューマテック")
+def test_find_teiki_reference_prefers_the_newest_file(tmp_path):
+    """仕訳No.は出力ごとに変わる（8/6版=239 / 8/7版=240）。最新ファイルを優先する。"""
+    _write_shiwake(tmp_path / "2026年08月06日仕訳データ.csv", [_shiwake_row(shiwake_no="00000239")])
+    _write_shiwake(tmp_path / "2026年08月07日仕訳データ.csv", [_shiwake_row(shiwake_no="00000240")])
+    no, company, source = find_teiki_reference(load_shiwake_sources(tmp_path))
+    assert (no, source) == ("00000240", "2026年08月07日仕訳データ.csv")
+    assert company == "株式会社エヌエム・ヒューマテック"
 
 
-def test_find_teiki_reference_stops_when_no_template_row():
-    """定期代の既存行が無い月は当て推量で書かずに止める。"""
-    body = [_shiwake_row(trans="交通費（電車・バス）")]
+def test_find_teiki_reference_falls_back_to_older_files(tmp_path):
+    """最新ファイルに定期代が無ければ前のファイルへ遡る（追加計上CSVは実費だけのことがある）。"""
+    _write_shiwake(tmp_path / "a.csv", [_shiwake_row(shiwake_no="00000239")])
+    _write_shiwake(tmp_path / "b_追加.csv", [_shiwake_row(trans="交通費（電車・バス）")])
+    no, _c, source = find_teiki_reference(load_shiwake_sources(tmp_path))
+    assert (no, source) == ("00000239", "a.csv")
+
+
+def test_find_teiki_reference_stops_when_no_file_has_a_template_row(tmp_path):
+    _write_shiwake(tmp_path / "a.csv", [_shiwake_row(trans="交通費（電車・バス）")])
     with pytest.raises(ShiwakeError, match="通勤定期代"):
-        find_teiki_reference(body)
+        find_teiki_reference(load_shiwake_sources(tmp_path))
 
 
 # ----------------------------------------------------------------------
@@ -166,7 +220,6 @@ def test_build_rows_skips_with_a_reason(kubun, judge, reason):
 
 
 def test_build_rows_skips_people_without_a_monthly_leg():
-    """区分は定期代でもマスタに毎月支給の経路が無ければ追記しない（金額が作れない）。"""
     master = _master(("2008003", 1, "あざみ野", "銀座", "公共交通機関", "毎日", 590))
     rows, skipped, _w = build_teiki_append_rows([_no_commute()], master, "2026-07")
     assert rows == []
@@ -174,7 +227,6 @@ def test_build_rows_skips_people_without_a_monthly_leg():
 
 
 def test_build_rows_includes_zero_attendance_people_with_a_flag():
-    """勤怠実績0日でもマスタに登録があれば追記する。ただし印を付ける。"""
     master = _master(("2007002", 1, "自宅", "本社", "公共交通機関", "毎月", 12000))
     rows, _s, _w = build_teiki_append_rows(
         [_no_commute(emp="2007002", name="代表 太郎", work=0)], master, "2026-07")
@@ -187,7 +239,6 @@ def test_build_rows_includes_zero_attendance_people_with_a_flag():
 # ----------------------------------------------------------------------
 
 def test_build_rows_flags_car_commuters():
-    """既存の定期代51名は全員が公共交通機関。車は費目が違う可能性があるので印を付ける。"""
     master = _master(("2007001", 1, "", "", "車", "毎月", 20000))
     rows, _s, _w = build_teiki_append_rows(
         [_no_commute(emp="2007001", name="菅原 伸")], master, "2026-07")
@@ -197,7 +248,6 @@ def test_build_rows_flags_car_commuters():
 
 
 def test_build_rows_emits_one_row_per_route_with_position_note():
-    """複数経路は合算せず経路ごとに1行（乗継か選択制か判別できないため）。"""
     master = _master(("2026010", 1, "本厚木", "新宿", "公共交通機関", "毎月", 14870),
                      ("2026010", 2, "新宿", "東京", "公共交通機関", "毎月", 14870))
     rows, _s, _w = build_teiki_append_rows(
@@ -208,7 +258,6 @@ def test_build_rows_emits_one_row_per_route_with_position_note():
 
 
 def test_build_rows_flags_over_limit_but_never_cuts():
-    """上限3万超は印だけ。金額は切らない（切るのは給与インポートCSVを作る瞬間だけ）。"""
     master = _master(("2014013", 1, "A", "B", "公共交通機関", "毎月", 35090))
     rows, _s, _w = build_teiki_append_rows(
         [_no_commute(emp="2014013", name="柴田 和浩")], master, "2026-07")
@@ -217,7 +266,6 @@ def test_build_rows_flags_over_limit_but_never_cuts():
 
 
 def test_build_rows_pays_exempt_members_in_full_without_a_flag():
-    """免除者は満額でよいので印を付けない（7月の岡崎38,500・稲場31,660がこれ）。"""
     master = _master(("2016024", 1, "津田沼", "北府中", "公共交通機関", "毎月", 38500))
     rows, _s, _w = build_teiki_append_rows(
         [_no_commute(emp="2016024", name="岡崎 修司")], master, "2026-07",
@@ -230,7 +278,7 @@ def test_build_rows_warns_when_daily_legs_also_exist():
     master = _master(("2008003", 1, "あざみ野", "銀座", "公共交通機関", "毎月", 18570),
                      ("2008003", 2, "銀座", "東京", "公共交通機関", "毎日", 590))
     rows, _s, warnings = build_teiki_append_rows([_no_commute()], master, "2026-07")
-    assert [r["金額"] for r in rows] == [18570]     # 毎月分だけ
+    assert [r["金額"] for r in rows] == [18570]
     assert any("毎日支給" in w for w in warnings)
 
 
@@ -286,7 +334,7 @@ def test_render_puts_the_confirm_note_after_a_full_width_space():
 
 
 # ----------------------------------------------------------------------
-# 追記（既存行のバイト保全）
+# standalone出力（既存ファイルには書き込みで触れない）
 # ----------------------------------------------------------------------
 
 def _new_rows():
@@ -298,43 +346,54 @@ def _new_rows():
         "2026-07", "00000240", "株式会社エヌエム・ヒューマテック")
 
 
-def test_append_keeps_existing_bytes_untouched(tmp_path):
-    """手作業では追記のついでに既存行2行が書き換わっていた。バイト単位で保証する。"""
+def _header():
+    return ["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(SHIWAKE_COLS - 2)]
+
+
+def test_standalone_output_contains_only_header_and_new_rows(tmp_path):
     src = _write_shiwake(tmp_path / "元.csv", [_shiwake_row(), _shiwake_row(emp="2026010")])
-    raw = src.read_bytes()
+    raw_before = src.read_bytes()
     out = tmp_path / "追記.csv"
-    assert append_to_shiwake_csv(raw, _new_rows(), out) == []
+    assert write_standalone_shiwake_csv(_header(), _new_rows(), out) == []
 
     written = out.read_bytes()
-    assert written[:len(raw)] == raw            # 先頭は1バイトも変わらない
+    assert written[:3] != b"\xef\xbb\xbf"        # BOMなし
     assert written.endswith(b"\r\n")
     rows = list(csv.reader(io.StringIO(written.decode("cp932"), newline="")))
-    assert len(rows) == 4                        # 見出し + 既存2 + 追記1
-    assert rows[-1][24] == "00000240"
-    assert src.read_bytes() == raw               # 元ファイルは触らない
+    assert len(rows) == 2                        # ヘッダー + 追記1行だけ（元データは含まない）
+    assert rows[0] == _header()
+    assert rows[1][24] == "00000240"             # ゼロ埋め保持
+    assert src.read_bytes() == raw_before        # 元ファイルは1バイトも変わらない
 
 
-def test_append_adds_a_newline_when_the_source_lacks_one(tmp_path):
-    src = _write_shiwake(tmp_path / "元.csv", [_shiwake_row()], trailing_newline=False)
-    out = tmp_path / "追記.csv"
-    assert append_to_shiwake_csv(src.read_bytes(), _new_rows(), out) == []
-    rows = list(csv.reader(io.StringIO(out.read_bytes().decode("cp932"), newline="")))
-    assert len(rows) == 3                        # 最終行と追記行がつながっていない
-    assert rows[1][0] == "2026009" and rows[2][0] == "2008003"
-
-
-def test_append_stops_before_writing_when_cp932_cannot_encode(tmp_path):
-    """CP932で書けない文字は先に洗い出す（中途半端なファイルを残さない）。"""
-    src = _write_shiwake(tmp_path / "元.csv", [_shiwake_row()])
+def test_standalone_output_stops_before_writing_when_cp932_cannot_encode(tmp_path):
     rows = _new_rows()
     rows[0][1] = "髙橋 淳µ"                 # µ は CP932 にできない
     out = tmp_path / "追記.csv"
-    problems = append_to_shiwake_csv(src.read_bytes(), rows, out)
+    problems = write_standalone_shiwake_csv(_header(), rows, out)
     assert problems and "CP932" in problems[0]
     assert not out.exists()
 
 
-def test_append_rejects_rows_with_a_wrong_column_count(tmp_path):
-    src = _write_shiwake(tmp_path / "元.csv", [_shiwake_row()])
+def test_standalone_output_rejects_wrong_column_counts(tmp_path):
     with pytest.raises(ShiwakeError, match="列"):
-        append_to_shiwake_csv(src.read_bytes(), [["a", "b"]], tmp_path / "追記.csv")
+        write_standalone_shiwake_csv(_header(), [["a", "b"]], tmp_path / "追記.csv")
+    with pytest.raises(ShiwakeError, match="ヘッダー"):
+        write_standalone_shiwake_csv(["a", "b"], _new_rows(), tmp_path / "追記.csv")
+
+
+def test_rerun_with_previous_output_in_the_folder_is_idempotent(tmp_path):
+    """出力CSVをフォルダに入れて再実行しても、同じ人が二重に追記されない。"""
+    _write_shiwake(tmp_path / "a_元.csv", [_shiwake_row()])
+    out = tmp_path / "通勤定期代追記_2026年7月.csv"
+    write_standalone_shiwake_csv(_header(), _new_rows(), out)
+
+    files = load_shiwake_sources(tmp_path)
+    booked = booked_pass_members(files, "2026-07")
+    assert booked["2008003"] == "通勤定期代追記_2026年7月.csv"
+
+    master = _master(("2008003", 1, "あざみ野", "銀座", "公共交通機関", "毎月", 18570))
+    rows, skipped, _w = build_teiki_append_rows([_no_commute()], master, "2026-07",
+                                                booked=booked)
+    assert rows == []
+    assert "計上済み" in skipped[0]["理由"]

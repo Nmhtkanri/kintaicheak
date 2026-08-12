@@ -1,18 +1,25 @@
 # -*- coding: utf-8 -*-
-"""jinjer 仕訳データCSV への「通勤定期代」行の追記（イレギュラー救済処置）。
+"""jinjer 仕訳データCSV を補う「通勤定期代」行の生成（イレギュラー救済処置）。
 
 定期代の人は毎月申請しないのが正常なので、申請が無いまま仕訳に載らず支給漏れになる。
 2026-08-07 に谷津さんが手作業で拾った流れ（29名31行・562,570円）をそのまま機能にしたもの。
 **定常機能ではない**。通勤費申請なしリストを見て、必要なときだけ回す。
 
+入力はファイルでもフォルダでもよい（2026-08-12 谷津さん依頼）。追加で計上した分が
+別CSVになるパターンがあるため、フォルダなら中のCSVを全部読み、
+**どれかに定期代が計上済みの人はスキップする**＝二重計上が構造的に起きない。
+過去にこのツールが出したCSVがフォルダに入っていても同じ仕組みで冪等になる。
+
+出力は**追記行だけの新しいCSV**（ヘッダー＋追記行のみ。2026-08-12 谷津さん決定）。
+元ファイルは読み取り専用で一切書かない。統合一覧表はフォルダの中のCSVを全部読むので、
+できたCSVを jinjer経費フォルダに追加するだけでよい。以前の「元CSV＋追記の別名コピー」は、
+元とコピーが両方フォルダに残ると同じデータを二重に取り込むため廃止した。
+
 手作業で起きた事故を構造的に防ぐ:
   1. Excelを経由したせいで仕訳No.の先頭ゼロが落ちた（00000240 → 240）
-     → このモジュールは最初から最後まで文字列とバイトだけを扱い、数値化を一切しない。
+     → このモジュールは最初から最後まで文字列だけを扱い、数値化を一切しない。
   2. 追記のついでに既存行が2行ほど書き換わっていた
-     → 元ファイルのバイト列をそのまま先頭に置き、後ろに新しい行を足すだけにする。
-        書いたあとに読み直して、先頭 len(元) バイトが1バイトも違わないことを確認する。
-
-出力は別名（{元stem}_通勤定期代追記.csv）。元ファイルは絶対に上書きしない。
+     → 既存ファイルには書き込みで触れない（standalone出力）。
 """
 from __future__ import annotations
 
@@ -66,9 +73,12 @@ class TeikiAppendPreview:
     rows: list = field(default_factory=list)        # 追記する行（画面表示用の辞書）
     skipped: list = field(default_factory=list)     # 対象外 {社員番号, 氏名, 理由}
     warnings: list = field(default_factory=list)
-    source_rows: int = 0                            # 元CSVのデータ行数
+    source_rows: int = 0                            # 読み込んだ全CSVのデータ行数合計
+    source_files: list = field(default_factory=list)  # [{名前, 行数}] 読み込んだCSVの一覧
+    booked_count: int = 0                           # 仕訳データに計上済みでスキップした人数
     ref_shiwake_no: str = ""                        # 既存行から引き継ぐ仕訳No.（文字列のまま）
     ref_company: str = ""
+    ref_source: str = ""                            # 仕訳No.をどのファイルから取ったか
     append_count: int = 0
     append_total: int = 0
     error: str = ""
@@ -86,47 +96,89 @@ def month_bounds(month: str) -> tuple[str, str, str]:
     return f"{y}/{mo}/1", f"{y}/{mo}/{last}", f"{y}{mo:02d}{last:02d}"
 
 
-def load_shiwake_csv(path: "str | Path") -> tuple[bytes, list[str], list[list[str]]]:
-    """仕訳データCSVを (原文バイト, ヘッダー, データ行) で返す。
+@dataclass
+class ShiwakeFile:
+    """読み込んだ仕訳データCSV1つ分。"""
+    name: str                      # ファイル名（エラー・スキップ理由の表示用）
+    header: list
+    body: list                     # 空行を除いたデータ行
+
+
+def _load_one_shiwake_csv(path: Path) -> ShiwakeFile:
+    """仕訳データCSVを1つ読む。
 
     BOM付き・33列でない・CP932で読めない、のいずれもここで止める。
     黙って別形式を受け入れると、列がずれた行を給与の元データに混ぜてしまう。
+    エラーには必ずファイル名を入れる（フォルダ指定だとどれが悪いか分からないため）。
     """
-    path = Path(path)
-    if not path.exists():
-        raise ShiwakeError(f"仕訳データCSVが見つかりません: {path}")
     raw = path.read_bytes()
     if raw[:3] == b"\xef\xbb\xbf":
         raise ShiwakeError(
-            f"仕訳データCSVにBOMが付いています（jinjerからの生CSVを使ってください）: {path}")
+            f"仕訳データCSVにBOMが付いています（jinjerからの生CSVを使ってください）: {path.name}")
     try:
         text = raw.decode(ENCODING)
     except UnicodeDecodeError as e:
-        raise ShiwakeError(f"仕訳データCSVをCP932として読めません（{e}）: {path}") from e
+        raise ShiwakeError(f"仕訳データCSVをCP932として読めません（{e}）: {path.name}") from e
     rows = list(csv.reader(io.StringIO(text, newline="")))
     if not rows:
-        raise ShiwakeError(f"仕訳データCSVが空です: {path}")
+        raise ShiwakeError(f"仕訳データCSVが空です: {path.name}")
     header = rows[0]
     if len(header) != SHIWAKE_COLS:
         raise ShiwakeError(
-            f"仕訳データCSVの列数が {len(header)} です（{SHIWAKE_COLS} 列でなければなりません）: {path}")
+            f"仕訳データCSVの列数が {len(header)} です"
+            f"（{SHIWAKE_COLS} 列でなければなりません）: {path.name}")
     body = [r for r in rows[1:] if any(str(c).strip() for c in r)]
-    return raw, header, body
+    return ShiwakeFile(name=path.name, header=header, body=body)
 
 
-def find_teiki_reference(rows: list[list[str]]) -> tuple[str, str]:
-    """既存の「通勤定期代」行から (仕訳No., 企業名) を**文字列のまま**取る。
+def load_shiwake_sources(path: "str | Path") -> list[ShiwakeFile]:
+    """仕訳データCSVを読む。ファイルなら1つ、フォルダなら中の *.csv を全部。
+
+    追加で計上した分が別CSVになるパターンがあるため（例: 8/6本体＋8/7追加計上分）、
+    フォルダごと渡せば全部を突合対象にできる（2026-08-12 谷津さん依頼）。
+    並びはファイル名ソート＝統合一覧表のフォルダ読み（keihi_summary）と同じ。
+    """
+    p = Path(path)
+    if not p.exists():
+        raise ShiwakeError(f"仕訳データCSVが見つかりません: {p}")
+    files = sorted(p.glob("*.csv")) if p.is_dir() else [p]
+    if not files:
+        raise ShiwakeError(f"フォルダにCSVファイルがありません: {p}")
+    return [_load_one_shiwake_csv(f) for f in files]
+
+
+def booked_pass_members(files: list[ShiwakeFile], month: str) -> dict:
+    """いずれかのCSVに**対象月の通勤定期代**が既に計上されている人 {社員番号: ファイル名}。
+
+    追加計上分のCSVや、このツールが過去に出したCSVがフォルダに入っていても、
+    ここで拾ってスキップするので二重計上にならない（＝再実行しても冪等）。
+    """
+    from services.kotsuhi_seisa import year_month
+    booked: dict = {}
+    for f in files:
+        for r in f.body:
+            if len(r) > C_TRANS and r[C_TRANS] == KIND_PASS \
+                    and year_month(r[C_USEDATE]) == month:
+                emp = str(r[C_EMP] or "").strip()
+                if emp:
+                    booked.setdefault(emp, f.name)
+    return booked
+
+
+def find_teiki_reference(files: list[ShiwakeFile]) -> tuple[str, str, str]:
+    """既存の「通勤定期代」行から (仕訳No., 企業名, 取得元ファイル名) を**文字列のまま**取る。
 
     仕訳No. は月ごと・出力ごとに変わる（8/6版=239 / 8/7版=240）ので固定値にできない。
-    追記先のファイル自身から引くのが唯一正しい。見つからなければ止める
-    （雛形が無い月に当て推量で書くと、取込側で別仕訳になってしまう）。
+    ファイル名ソートの**最後（=最新）から遡って**最初に見つかった定期代行を採用する。
+    全ファイルに無ければ止める（雛形が無い月に当て推量で書くと、取込側で別仕訳になる）。
     """
-    for r in rows:
-        if len(r) > C_COMPANY and r[C_TRANS] == KIND_PASS:
-            no = str(r[C_SHIWAKE_NO] or "").strip()
-            company = str(r[C_COMPANY] or "").strip()
-            if no:
-                return no, company
+    for f in reversed(files):
+        for r in f.body:
+            if len(r) > C_COMPANY and r[C_TRANS] == KIND_PASS:
+                no = str(r[C_SHIWAKE_NO] or "").strip()
+                company = str(r[C_COMPANY] or "").strip()
+                if no:
+                    return no, company, f.name
     raise ShiwakeError(
         "仕訳データCSVに「通勤定期代」の既存行がありません。"
         "仕訳No.・企業名を引き継げないため中止しました"
@@ -136,14 +188,19 @@ def find_teiki_reference(rows: list[list[str]]) -> tuple[str, str]:
 def build_teiki_append_rows(no_commute_rows: list[dict], master: CommuteMaster,
                             month: str, limit_exempt: dict | None = None,
                             monthly_limit: int = COMMUTE_MONTHLY_LIMIT,
+                            booked: dict | None = None,
                             ) -> tuple[list[dict], list[dict], list[str]]:
     """通勤費申請なしリストから追記対象を組み立てる。(追記行, スキップ, 警告) を返す。
+
+    booked は仕訳データに定期代が計上済みの人 {社員番号: ファイル名}
+    （booked_pass_members の戻り値）。該当者は理由付きでスキップする。
 
     1人が複数経路を持つ場合は**経路ごとに1行**出し、備考に「経路N本のうちM本目」を入れる。
     乗継の合算なのか勤務地の選択制なのかはマスタから判別できないため、
     合算して1行にすると選択制の人を二重支給しかねない。人が見て消せる形にする。
     """
     limit_exempt = limit_exempt or {}
+    booked = booked or {}
     rows: list[dict] = []
     skipped: list[dict] = []
     warnings: list[str] = []
@@ -161,6 +218,11 @@ def build_teiki_append_rows(no_commute_rows: list[dict], master: CommuteMaster,
         if judge != JUDGE_PAYABLE:
             skipped.append({"社員番号": emp, "氏名": name,
                             "理由": f"判定が「{judge}」（精査で確定してから追記してください）"})
+            continue
+        if emp in booked:
+            # 追加計上分のCSVや過去の追記出力に既に載っている＝追記したら二重計上になる
+            skipped.append({"社員番号": emp, "氏名": name,
+                            "理由": f"仕訳データに計上済み（{booked[emp]}）"})
             continue
 
         legs = master.legs(emp, INTERVAL_MONTHLY)
@@ -258,35 +320,35 @@ def check_cp932(rows: list[list[str]]) -> list[str]:
     return problems
 
 
-def append_to_shiwake_csv(src_bytes: bytes, new_rows: list[list[str]],
-                          out_path: "str | Path") -> list[str]:
-    """元のバイト列＋追記行 で新しいファイルを書き、読み直して検証する。
+def write_standalone_shiwake_csv(header: list, new_rows: list[list[str]],
+                                 out_path: "str | Path") -> list[str]:
+    """ヘッダー＋追記行だけの新しいCSVを書き、読み直して検証する。戻り値は問題一覧（空ならOK）。
 
-    戻り値は問題の一覧（空ならOK）。元ファイルは読むだけで触らない。
+    既存ファイルには一切書かない。できたCSVを jinjer経費フォルダに**追加**すれば、
+    統合一覧表がフォルダごと読むので既存分と一緒に取り込まれる（8/7追加計上CSVと同じ扱い）。
     """
     out_path = Path(out_path)
+    if len(header) != SHIWAKE_COLS:
+        raise ShiwakeError(f"ヘッダーが {len(header)} 列です（{SHIWAKE_COLS} 列のはず）")
     for i, row in enumerate(new_rows, start=1):
         if len(row) != SHIWAKE_COLS:
             raise ShiwakeError(f"追記{i}行目が {len(row)} 列です（{SHIWAKE_COLS} 列のはず）")
-    problems = check_cp932(new_rows)
+    problems = check_cp932([list(header)] + new_rows)
     if problems:
         return problems
 
     buf = io.StringIO()
-    csv.writer(buf, lineterminator=LINE_TERMINATOR, quoting=csv.QUOTE_MINIMAL).writerows(new_rows)
-    appended = buf.getvalue().encode(ENCODING, errors="strict")   # 置換は禁止
-
-    head = src_bytes
-    if head and not head.endswith(b"\r\n"):
-        # 元ファイルが改行で終わっていないと最終行と追記1行目がつながる
-        head = head + b"\r\n"
+    w = csv.writer(buf, lineterminator=LINE_TERMINATOR, quoting=csv.QUOTE_MINIMAL)
+    w.writerow(header)
+    w.writerows(new_rows)
+    data = buf.getvalue().encode(ENCODING, errors="strict")   # 置換は禁止
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(head + appended)
+    out_path.write_bytes(data)
 
-    # 読み直して「既存行が1バイトも変わっていない」ことを確かめる
+    # 読み直して中身がそのまま入っていることを確かめる（このCSVは給与の元データになる）
     written = out_path.read_bytes()
-    if written[:len(head)] != head:
-        problems.append("既存行が書き換わっています（追記のみのはず）")
+    if written[:3] == b"\xef\xbb\xbf":
+        problems.append("BOMが付いています")
     if not written.endswith(b"\r\n"):
         problems.append("末尾がCRLFではありません")
     try:
@@ -294,12 +356,12 @@ def append_to_shiwake_csv(src_bytes: bytes, new_rows: list[list[str]],
     except UnicodeDecodeError as e:
         problems.append(f"書いたファイルをCP932として読み直せません: {e}")
         return problems
-    tail = [r for r in rows[-len(new_rows):]] if new_rows else []
-    if len(tail) != len(new_rows):
-        problems.append(f"追記行数が合いません（{len(tail)} / {len(new_rows)}）")
-    for i, (want, got) in enumerate(zip(new_rows, tail), start=1):
-        if want != got:
-            problems.append(f"追記{i}行目が書いた内容と違います")
+    want = [list(header)] + [list(r) for r in new_rows]
+    if len(rows) != len(want):
+        problems.append(f"行数が合いません（書いたはず {len(want)} / ファイル {len(rows)}）")
+    for i, (a, b) in enumerate(zip(want, rows)):
+        if a != b:
+            problems.append(f"{i}行目が書いた内容と違います")
     return problems
 
 
@@ -307,9 +369,12 @@ def _collect(kotsuhi_csv, check_xlsx, shiwake_csv, month, target_list=None,
              excluded_list=None, limit_exempt_list=None, monthly_limit=COMMUTE_MONTHLY_LIMIT,
              log_func=print):
     """プレビューと生成で完全に同じ計算を通すための共通部分。"""
-    src_bytes, _header, body = load_shiwake_csv(shiwake_csv)
-    ref_no, ref_company = find_teiki_reference(body)
-    log_func(f"[info] 仕訳データCSV: {len(body)}行（仕訳No. {ref_no} / {ref_company}）")
+    files = load_shiwake_sources(shiwake_csv)
+    ref_no, ref_company, ref_source = find_teiki_reference(files)
+    booked = booked_pass_members(files, month)
+    total_rows = sum(len(f.body) for f in files)
+    log_func(f"[info] 仕訳データCSV: {len(files)}ファイル・計{total_rows}行"
+             f"（仕訳No. {ref_no}＝{ref_source} から / 定期代の計上済み {len(booked)}名）")
 
     inputs = load_seisa_inputs(Path(kotsuhi_csv), Path(check_xlsx), month,
                                target_list=target_list, excluded_list=excluded_list,
@@ -318,8 +383,8 @@ def _collect(kotsuhi_csv, check_xlsx, shiwake_csv, month, target_list=None,
                                        inputs.workdays, inputs.target_ids, inputs.excluded)
     log_func(f"[info] 通勤費申請なし: {len(no_commute)}名")
     rows, skipped, warnings = build_teiki_append_rows(
-        no_commute, inputs.master, month, inputs.limit_exempt, monthly_limit)
-    return src_bytes, body, ref_no, ref_company, rows, skipped, warnings
+        no_commute, inputs.master, month, inputs.limit_exempt, monthly_limit, booked=booked)
+    return files, ref_no, ref_company, ref_source, booked, rows, skipped, warnings
 
 
 def run_teiki_shiwake_preview(kotsuhi_csv, check_xlsx, shiwake_csv, month,
@@ -330,7 +395,7 @@ def run_teiki_shiwake_preview(kotsuhi_csv, check_xlsx, shiwake_csv, month,
     """追記内容を計算して返す（ファイルは1つも作らない）。"""
     res = TeikiAppendPreview()
     try:
-        _src, body, ref_no, ref_company, rows, skipped, warnings = _collect(
+        files, ref_no, ref_company, ref_source, booked, rows, skipped, warnings = _collect(
             kotsuhi_csv, check_xlsx, shiwake_csv, month, target_list,
             excluded_list, limit_exempt_list, monthly_limit, log_func)
     except ShiwakeError as e:
@@ -344,8 +409,10 @@ def run_teiki_shiwake_preview(kotsuhi_csv, check_xlsx, shiwake_csv, month,
 
     res.ok = True
     res.rows, res.skipped, res.warnings = rows, skipped, warnings
-    res.source_rows = len(body)
-    res.ref_shiwake_no, res.ref_company = ref_no, ref_company
+    res.source_files = [{"名前": f.name, "行数": len(f.body)} for f in files]
+    res.source_rows = sum(len(f.body) for f in files)
+    res.booked_count = len(booked)
+    res.ref_shiwake_no, res.ref_company, res.ref_source = ref_no, ref_company, ref_source
     res.append_count = len(rows)
     res.append_total = sum(r["金額"] for r in rows)
     log_func(f"[info] 追記対象: {res.append_count}行 / 計 {res.append_total:,}円"
@@ -359,14 +426,14 @@ def run_teiki_shiwake_generate(kotsuhi_csv, check_xlsx, shiwake_csv, month, out_
                                limit_exempt_list=None,
                                monthly_limit: int = COMMUTE_MONTHLY_LIMIT,
                                log_func=print) -> TeikiAppendPreview:
-    """プレビューと同じ計算をやり直して追記ファイルを書く。
+    """プレビューと同じ計算をやり直し、追記行だけの新CSVを書く。
 
     件数・合計がプレビューと1つでも違えば書かずに止める
     （承認が進んで入力が変わった＝人が見ていない行が混ざる）。
     """
     res = TeikiAppendPreview()
     try:
-        src_bytes, body, ref_no, ref_company, rows, skipped, warnings = _collect(
+        files, ref_no, ref_company, ref_source, booked, rows, skipped, warnings = _collect(
             kotsuhi_csv, check_xlsx, shiwake_csv, month, target_list,
             excluded_list, limit_exempt_list, monthly_limit, log_func)
     except ShiwakeError as e:
@@ -379,8 +446,10 @@ def run_teiki_shiwake_generate(kotsuhi_csv, check_xlsx, shiwake_csv, month, out_
         return res
 
     res.rows, res.skipped, res.warnings = rows, skipped, warnings
-    res.source_rows = len(body)
-    res.ref_shiwake_no, res.ref_company = ref_no, ref_company
+    res.source_files = [{"名前": f.name, "行数": len(f.body)} for f in files]
+    res.source_rows = sum(len(f.body) for f in files)
+    res.booked_count = len(booked)
+    res.ref_shiwake_no, res.ref_company, res.ref_source = ref_no, ref_company, ref_source
     res.append_count = len(rows)
     res.append_total = sum(r["金額"] for r in rows)
 
@@ -397,8 +466,9 @@ def run_teiki_shiwake_generate(kotsuhi_csv, check_xlsx, shiwake_csv, month, out_
         log_func(f"[error] {res.error}")
         return res
 
-    problems = append_to_shiwake_csv(
-        src_bytes, render_shiwake_rows(rows, month, ref_no, ref_company), out_path)
+    # ヘッダーは読み込んだ先頭ファイルのものをそのまま使う（全ファイル33列検証済み）
+    problems = write_standalone_shiwake_csv(
+        files[0].header, render_shiwake_rows(rows, month, ref_no, ref_company), out_path)
     if problems:
         Path(out_path).unlink(missing_ok=True)
         res.error = "追記ファイルの検証に失敗したため出力を取り消しました:\n" + "\n".join(problems)
@@ -406,5 +476,6 @@ def run_teiki_shiwake_generate(kotsuhi_csv, check_xlsx, shiwake_csv, month, out_
         return res
 
     res.ok = True
-    log_func(f"[info] 追記しました: {out_path}（{res.append_count}行 / 計 {res.append_total:,}円）")
+    log_func(f"[info] 追記CSVを作りました: {out_path}"
+             f"（{res.append_count}行 / 計 {res.append_total:,}円）")
     return res

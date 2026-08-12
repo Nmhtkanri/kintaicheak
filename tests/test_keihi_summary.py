@@ -467,6 +467,83 @@ def test_default_route_choice_follows_system_verdict():
 
 
 # ----------------------------------------------------------------------
+# 車通勤は金額一致でOK（2026-08-12 谷津さん決定）
+# ----------------------------------------------------------------------
+
+def _car_commute(emp="2007001", amount=20000, interval="毎月"):
+    return {"社員番号": emp, "出発": "", "到着": "", "経由1": "", "経由2": "",
+            "通勤経路": "", "利用交通機関": "車", "支給間隔": interval, "支給金額": amount}
+
+
+def test_car_commuter_with_matching_amount_is_ok_and_not_reviewable():
+    """車通勤は駅の突合ができず毎月△に落ちていた。金額がマスタと合えばOKで一覧に出さない。"""
+    from services.keihi_summary import build_route_choice_keys
+    commute = [_car_commute()]
+    row = _integrated_transit("2007001", "", "", "通勤定期代")
+    row[C_TOTAL] = "20000"
+    res = evaluate_route_check([row], commute)
+    assert res[0]["判定"] == "OK（車通勤・マスタ金額一致）"
+    assert build_route_choice_keys(res) == []
+
+
+def test_car_commuter_with_wrong_amount_stays_reviewable():
+    """金額がおかしい車通勤者は従来どおり△で出す（見えなくしない）。"""
+    commute = [_car_commute(amount=20000)]
+    row = _integrated_transit("2007001", "", "", "通勤定期代")
+    row[C_TOTAL] = "12345"
+    res = evaluate_route_check([row], commute)
+    assert res[0]["判定"].startswith("△")
+
+
+def test_car_commuter_matches_the_sum_of_multiple_legs():
+    """乗継で経路が分かれている場合は合算も一致とみなす。"""
+    commute = [_car_commute(amount=12000), _car_commute(amount=8000)]
+    row = _integrated_transit("2007001", "", "", "通勤定期代")
+    row[C_TOTAL] = "20000"
+    res = evaluate_route_check([row], commute)
+    assert res[0]["判定"] == "OK（車通勤・マスタ金額一致）"
+
+
+def test_car_commuter_non_commute_application_keeps_current_behavior():
+    """車通勤の非通勤系申請は従来どおり（経路外＝もともとOK）。金額ルールは通勤系だけ。"""
+    commute = [_car_commute()]
+    row = _integrated_transit("2007001", "", "", "交通費（電車・バス）")
+    row[C_TOTAL] = "20000"
+    res = evaluate_route_check([row], commute)
+    assert res[0]["判定"] == "OK（経路外）"
+
+
+def test_car_rule_does_not_swallow_star_for_mixed_mode_people():
+    """車＋公共の両方を持つ人が登録経路内を非通勤系で申請 → ★のまま。"""
+    commute = [_car_commute(amount=20000),
+               {"社員番号": "2007001", "出発": "東京", "到着": "品川", "経由1": "",
+                "経由2": "", "通勤経路": "", "利用交通機関": "公共交通機関",
+                "支給間隔": "毎月", "支給金額": 15000}]
+    row = _integrated_transit("2007001", "東京", "品川", "交通費（電車・バス）")
+    row[C_TOTAL] = "300"
+    res = evaluate_route_check([row], commute)
+    assert res[0]["判定"].startswith("★")
+
+
+def test_car_rule_works_with_csv_fallback_rows_without_interval():
+    """CSVフォールバック由来の行は支給間隔が空。それでも金額突合が働く。"""
+    commute = [_car_commute(interval="")]
+    row = _integrated_transit("2007001", "", "", "通勤交通費（実費）")
+    row[C_TOTAL] = "20000"
+    res = evaluate_route_check([row], commute)
+    assert res[0]["判定"] == "OK（車通勤・マスタ金額一致）"
+
+
+def test_car_travel_member_precedence_is_unchanged():
+    """移動交通費対象者は車通勤でも従来どおり対象者ルールが先に効く。"""
+    commute = [_car_commute(emp="2018017")]
+    row = _integrated_transit("2018017", "", "", "通勤定期代")
+    row[C_TOTAL] = "20000"
+    res = evaluate_route_check([row], commute, {"2018017": "中村 淳一"})
+    assert res[0]["判定"].startswith("△逆要確認（移動交通費")
+
+
+# ----------------------------------------------------------------------
 # 片側一致（▲）もレビューに出す（2026-08-12 谷津さん決定）
 # ----------------------------------------------------------------------
 

@@ -786,8 +786,8 @@
         <div class="card-head">
             <span class="card-icon icon-expense">💴</span>
             <div>
-                <div class="card-title">jinjer 経費承認前作業</div>
-                <p class="card-lead">経費を承認する前のチェック用に、対象月のテレワーク日数・出社日数・実施日を社員番号／氏名ごとに Excel でまとめます。</p>
+                <div class="card-title">① テレワーク・通勤費マスタを集計する</div>
+                <p class="card-lead">経費を承認する前のチェック用に、対象月のテレワーク日数・出社日数・通勤費マスタを社員番号／氏名ごとに Excel でまとめます。<b>jinjer APIから取得するため数分かかります（月1回でOK）。</b>このブックが下の②③の入力になります。</p>
             </div>
         </div>
 
@@ -864,7 +864,7 @@
         <div id="ex-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
 
         <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
-            <h3 style="margin:0 0 4px; font-size:14px">承認前の交通費精査</h3>
+            <h3 style="margin:0 0 4px; font-size:14px">② 承認前の交通費精査</h3>
             <p class="card-lead" style="margin-top:0">
                 jinjer の交通費申請（<b>進行中も含む</b>）を通勤費マスタと突き合わせ、金額と経路の誤りを
                 <b>承認する前に</b>見つけます。統合一覧表の経路突合は仕訳データ＝承認済みしか見られないため、
@@ -878,9 +878,9 @@
                     <span class="field-hint">jinjer 経費 → 交通費申請のエクスポート（Shift-JIS）</span>
                 </label>
                 <label class="field">
-                    <span class="field-label">経費チェックのブック <span class="tag tag-req">必須</span></span>
+                    <span class="field-label">①で出したブック <span class="tag tag-req">必須</span></span>
                     <input type="text" id="pr-xlsx" placeholder="例: Y:\給与明細\R8年\8月\経費確認精査データ\経費チェック2026年7月.xlsx">
-                    <span class="field-hint">上の「集計を実行」で出したブック。通勤費マスタと勤怠を読みます</span>
+                    <span class="field-hint">①「集計を実行」の直後は自動で入ります。別のブック（入社日フィルタ後版など）を使うときは貼り替えてください。<b>精査結果（交通費精査結果_～.xlsx）ではありません</b></span>
                 </label>
             </div>
             <details class="hint-details">
@@ -921,31 +921,34 @@
 
         <!-- ==== 仕訳データへの定期代追記（イレギュラー救済処置）==== -->
         <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
-            <h3 style="margin:0 0 4px; font-size:14px">仕訳データへの定期代追記 <span class="tag tag-opt">イレギュラー救済</span></h3>
+            <h3 style="margin:0 0 4px; font-size:14px">③ 仕訳データへの定期代追記 <span class="tag tag-opt">イレギュラー救済</span></h3>
             <p class="card-lead" style="margin-top:0">
                 定期代の人は毎月申請しないのが正常なので、<b>申請が無いまま仕訳に載らず支給漏れ</b>になります。
-                上の精査で出た「通勤費申請なし」のうち<b>区分＝通勤定期代・判定＝マスタから支給</b>の人を、
-                jinjer の仕訳データCSVへ1経路1行で追記します。
-                <b>毎月の定常作業ではありません。</b>元ファイルは触らず別名で出力します。
+                ②の精査で出た「通勤費申請なし」のうち<b>区分＝通勤定期代・判定＝マスタから支給</b>の人を、
+                <b>追記行だけの新しいCSV</b>（1経路1行）にして出力します。
+                <b>毎月の定常作業ではありません。</b>元ファイルには一切触りません。
             </p>
             <div class="field-grid">
                 <label class="field">
-                    <span class="field-label">仕訳データCSV <span class="tag tag-req">必須</span></span>
-                    <input type="text" id="ts-shiwake" placeholder="例: Y:\給与明細\R8年\8月\wk\2026年08月06日仕訳データ.csv">
-                    <span class="field-hint">jinjer 経費 → 仕訳データのエクスポート（Shift-JIS・33列）。交通費申請CSV／経費チェックのブック／対象月は上の欄を使います</span>
+                    <span class="field-label">仕訳データCSV（ファイルまたはフォルダ） <span class="tag tag-req">必須</span></span>
+                    <input type="text" id="ts-shiwake" placeholder="例: Y:\給与明細\R8年\8月\経費確認精査データ\jinjer経費">
+                    <span class="field-hint">jinjer 経費 → 仕訳データのエクスポート（Shift-JIS・33列）。<b>フォルダを指定すると中のCSVを全部読み、どれかに定期代が計上済みの人は自動でスキップ</b>します（追加計上分が別CSVでもOK）。交通費申請CSV／経費チェックのブック／対象月は上の欄を使います</span>
                 </label>
             </div>
             <details class="hint-details">
-                <summary>追記する行の中身／※要確認が付くもの</summary>
+                <summary>追記する行の中身／※要確認が付くもの／できたCSVの使い方</summary>
                 <div class="hint-body">
+                    <p><b>出力</b>：ヘッダー＋追記行だけの新しいCSV（通勤定期代追記_20XX年X月.csv）。
+                    <b>jinjer経費のフォルダにそのまま追加</b>してください（元ファイルの入れ替えは不要）。
+                    統合一覧表はフォルダの中のCSVを全部読むので、一緒に取り込まれます。</p>
                     <p><b>金額</b>：通勤費マスタの毎月支給額。<b>上限3万円を超えていても切りません</b>
                     （切るのは給与インポートCSVを作る瞬間だけ）。免除リストの人は満額のまま印も付きません。</p>
-                    <p><b>仕訳No.・企業名</b>：追記先のファイルにある既存の「通勤定期代」行から引き継ぎます
+                    <p><b>仕訳No.・企業名</b>：読み込んだCSVの既存の「通勤定期代」行（最新のファイル優先）から引き継ぎます
                     （月ごとに変わるため固定値にできません）。先頭ゼロもそのまま保持します。</p>
                     <p><b>※要確認が付くもの</b>：車通勤（既存の定期代は全員が公共交通機関＝費目が違う可能性）／
                     マスタに経路が複数（乗継の合算か勤務地の選択制か判別できないので経路ごとに1行出します）／
                     勤怠実績0日／上限3万超かつ免除リスト外。<b>取込前に必ず目視してください。</b></p>
-                    <p><b>安全策</b>：既存行は1バイトも書き換えません（書いた後に読み直して検証します）。
+                    <p><b>安全策</b>：既に計上済みの人は二重にならないよう自動でスキップ（再実行しても安全）。
                     プレビューと件数・合計が変わっていたら出力せずに止めます。</p>
                 </div>
             </details>
@@ -967,7 +970,7 @@
                     </label>
                     <button type="button" class="btn btn-danger" id="ts-generate-btn" disabled>📝 追記したCSVを作る</button>
                 </div>
-                <a id="ts-download-link" href="#" class="btn btn-download" style="display:none; margin-top:8px">📥 追記済み仕訳データCSVをダウンロード</a>
+                <a id="ts-download-link" href="#" class="btn btn-download" style="display:none; margin-top:8px">📥 追記CSV（追記行のみ）をダウンロード</a>
                 <pre id="ts-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
             </div>
             <div id="ts-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
@@ -1537,7 +1540,15 @@
                 consoleEl.textContent = (data.console || []).join('\n');
                 consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
                 document.getElementById('ex-result-area').style.display = 'block';
-                document.getElementById('ex-status').textContent = '完了';
+                // ②の「①で出したブック」欄が空なら出力パスを自動で入れる。
+                // 入社日フィルタ後版など手で貼ったパスは上書きしない
+                let filled = '';
+                const px = document.getElementById('pr-xlsx');
+                if (px && !px.value.trim() && data.output_path) {
+                    px.value = data.output_path;
+                    filled = '（②の「①で出したブック」欄に出力パスを入れました）';
+                }
+                document.getElementById('ex-status').textContent = '完了' + filled;
             } catch (e) {
                 showError('ex-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('ex-status').textContent = '';
@@ -1620,12 +1631,17 @@
         const rows = data.rows || [];
         const s = data.summary || {};
         tsExpected = {count: s.append_count, total: s.append_total};
+        const files = s.source_files || [];
+        const fileList = files.map(f => escapeHtml(f['名前']) + '（' + f['行数'] + '行）').join('、');
         document.getElementById('ts-summary').innerHTML =
-            '追記 <b>' + (s.append_count || 0) + '行</b> / 計 <b>'
-            + Number(s.append_total || 0).toLocaleString() + '円</b>（元の仕訳データ '
-            + (s.source_rows || 0) + '行の後ろに足します）<br>'
+            '読み込んだ仕訳データ: ' + (fileList || '—')
+            + (s.booked_count ? ' ／ 定期代の計上済み <b>' + s.booked_count + '名</b> はスキップ' : '')
+            + '<br>追記 <b>' + (s.append_count || 0) + '行</b> / 計 <b>'
+            + Number(s.append_total || 0).toLocaleString() + '円</b>'
+            + '（<b>追記行だけの新しいCSV</b>を作ります）<br>'
             + '仕訳No. <b>' + escapeHtml(s.ref_shiwake_no || '') + '</b> ・ '
-            + escapeHtml(s.ref_company || '') + ' を既存行から引き継ぎます';
+            + escapeHtml(s.ref_company || '') + ' を '
+            + escapeHtml(s.ref_source || '既存行') + ' から引き継ぎます';
 
         const warnEl = document.getElementById('ts-warnings');
         const warns = data.warnings || [];
@@ -1728,7 +1744,8 @@
                 dl.style.display = 'inline-block';
                 document.getElementById('ts-status').textContent =
                     '完了（' + data.appended_rows + '行 / 計 '
-                    + Number(data.appended_total).toLocaleString() + '円を追記）';
+                    + Number(data.appended_total).toLocaleString() + '円）。'
+                    + 'できたCSVを jinjer経費のフォルダに追加してください（元ファイルの入れ替えは不要）';
             } catch (e) {
                 showError('ts-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('ts-status').textContent = '';
