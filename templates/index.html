@@ -2197,44 +2197,96 @@
         el.style.display = '';
     }
 
+    // 判定ごとのグループ。★だけ開いた状態で出し、移動交通費に倒れる△と参考の▲は畳む。
+    // 畳んでも行はDOMに残る＝選択値は送信対象のまま（キーは全件必須のため欠けさせない）。
+    const KI_ROUTE_GROUPS = [
+        {mark: '★', label: '★要確認（登録経路内なのに通勤系以外を選択）', bg: '#FFC7CE', open: true},
+        {mark: '△', label: '△逆要確認（移動交通費に計上する行）', bg: '#FFEB9C', open: false},
+        {mark: '▲', label: '▲要確認（片側のみ一致・初期値は申請どおり）', bg: '#DDEBF7', open: false},
+    ];
+
     function kiRenderRouteReview(rows, summary) {
         const table = document.getElementById('ki-route-review-table');
         const cols = ['判定', '社員番号', '氏名', '利用日', '交通機関', '内訳', '金額',
                       '乗車場所', '降車場所', '一致', '計上先'];
+        const span = cols.length + 1;
+        const amt = (r) => {
+            const n = Number(String(r['金額'] || '').replace(/,/g, ''));
+            return isFinite(n) ? n : 0;
+        };
+        // 判定の先頭文字でグループ分け（該当しないものは末尾にそのまま出す）
+        const bucket = {}, rest = [];
+        KI_ROUTE_GROUPS.forEach(g => bucket[g.mark] = []);
+        rows.forEach(r => {
+            const m = String(r['判定'] || '').charAt(0);
+            if (bucket[m]) bucket[m].push(r); else rest.push(r);
+        });
+
+        const rowHtml = (r, g) => {
+            let h = '<tr class="ki-route-row" data-mark="' + (g ? g.mark : '')
+                  + '" style="background:' + (g ? g.bg : '') + ';'
+                  + (g && !g.open ? 'display:none' : '') + '" title="'
+                  + escapeHtml(r['登録通勤経路'] || '') + '">';
+            cols.forEach(c => {
+                const align = (c === '金額') ? 'right' : 'left';
+                h += '<td style="border:1px solid #ddd; padding:2px 5px; text-align:' + align + '">'
+                   + escapeHtml(String(r[c] === undefined || r[c] === null ? '' : r[c])) + '</td>';
+            });
+            h += '<td style="border:1px solid #ddd; padding:2px 5px; white-space:nowrap">';
+            if (r['付替可']) {
+                h += '<select class="legend-template-select ki-route-choice" data-key="'
+                   + escapeHtml(r['key']) + '" style="width:auto; min-width:120px">'
+                   + ['通勤費', '移動交通費'].map(v =>
+                         '<option value="' + v + '"' + (v === r['既定選択'] ? ' selected' : '') + '>'
+                         + v + '</option>').join('')
+                   + '</select>';
+                if (r['移動額']) {
+                    h += '<span class="hint" style="margin-left:6px">'
+                       + Number(r['移動額']).toLocaleString() + '円</span>';
+                }
+            } else {
+                h += '<span class="ki-route-choice" data-key="' + escapeHtml(r['key'])
+                   + '" data-fixed="対象外" style="color:#888">対象外（動かせません）</span>';
+            }
+            return h + '</td></tr>';
+        };
+
         let html = '<thead><tr>'
             + cols.map(c => '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
                           + ' padding:3px 5px; white-space:nowrap">' + escapeHtml(c) + '</th>').join('')
             + '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
             + ' padding:3px 5px; white-space:nowrap">この月の計上先</th></tr></thead><tbody>';
-        rows.forEach(r => {
-            const bg = String(r['判定'] || '').startsWith('★') ? '#FFC7CE'
-                     : String(r['判定'] || '').startsWith('△') ? '#FFEB9C'
-                     : String(r['判定'] || '').startsWith('▲') ? '#DDEBF7' : '';
-            html += '<tr style="background:' + bg + '" title="' + escapeHtml(r['登録通勤経路'] || '') + '">';
-            cols.forEach(c => {
-                const align = (c === '金額') ? 'right' : 'left';
-                html += '<td style="border:1px solid #ddd; padding:2px 5px; text-align:' + align + '">'
-                      + escapeHtml(String(r[c] === undefined || r[c] === null ? '' : r[c])) + '</td>';
-            });
-            html += '<td style="border:1px solid #ddd; padding:2px 5px; white-space:nowrap">';
-            if (r['付替可']) {
-                html += '<select class="legend-template-select ki-route-choice" data-key="'
-                      + escapeHtml(r['key']) + '" style="width:auto; min-width:120px">'
-                      + ['通勤費', '移動交通費'].map(v =>
-                            '<option value="' + v + '"' + (v === r['既定選択'] ? ' selected' : '') + '>'
-                            + v + '</option>').join('')
-                      + '</select>';
-                if (r['移動額']) {
-                    html += '<span class="hint" style="margin-left:6px">'
-                          + Number(r['移動額']).toLocaleString() + '円</span>';
-                }
-            } else {
-                html += '<span class="ki-route-choice" data-key="' + escapeHtml(r['key'])
-                      + '" data-fixed="対象外" style="color:#888">対象外（動かせません）</span>';
-            }
-            html += '</td></tr>';
+        KI_ROUTE_GROUPS.forEach(g => {
+            const list = bucket[g.mark];
+            if (!list.length) return;
+            const total = list.reduce((s, r) => s + amt(r), 0);
+            html += '<tr class="ki-route-toggle" data-mark="' + g.mark + '" data-open="'
+                  + (g.open ? '1' : '0') + '" style="cursor:pointer; background:' + g.bg + '">'
+                  + '<td colspan="' + span + '" style="border:1px solid #ccc; padding:4px 6px; font-weight:bold">'
+                  + '<span class="ki-route-caret">' + (g.open ? '▼' : '▶') + '</span> '
+                  + escapeHtml(g.label) + '　' + list.length + '行 / 計 '
+                  + total.toLocaleString() + '円'
+                  + '<span class="hint" style="margin-left:8px; font-weight:normal">'
+                  + (g.open ? 'クリックで畳む' : 'クリックで開く') + '</span></td></tr>';
+            list.forEach(r => html += rowHtml(r, g));
         });
+        rest.forEach(r => html += rowHtml(r, null));
         table.innerHTML = html + '</tbody>';
+
+        table.querySelectorAll('.ki-route-toggle').forEach(tr => {
+            tr.addEventListener('click', () => {
+                const open = tr.dataset.open !== '1';
+                tr.dataset.open = open ? '1' : '0';
+                table.querySelectorAll('.ki-route-row').forEach(row => {
+                    if (row.dataset.mark === tr.dataset.mark) row.style.display = open ? '' : 'none';
+                });
+                const caret = tr.querySelector('.ki-route-caret');
+                if (caret) caret.textContent = open ? '▼' : '▶';
+                const hint = tr.querySelector('.hint');
+                if (hint) hint.textContent = open ? 'クリックで畳む' : 'クリックで開く';
+            });
+        });
+
         const movable = (summary.movable_rows !== undefined) ? summary.movable_rows
                       : rows.filter(r => r['付替可']).length;
         document.getElementById('ki-route-review-note').innerHTML =
@@ -2244,6 +2296,8 @@
             + '<b>初期値はシステムの判定</b>（★＝経路内なので通勤費 / △＝経路と不一致なので移動交通費）'
             + 'が入っています。違うと思う行だけ変えてください。'
             + '<b>▲（片側のみ一致）はシステムに判断材料が無いため、初期値は申請どおりの計上先</b>のままです。'
+            + '<br><b>見るべき★だけを開いてあります。</b>移動交通費に計上する△と参考の▲は畳んであるので、'
+            + '中身を見たい行だけ見出しをクリックしてください（<b>畳んだままでも選択はすべて反映されます</b>）。'
             + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金に計上するため、この表には出ません。';
         document.getElementById('ki-route-review-area').style.display = '';
     }
