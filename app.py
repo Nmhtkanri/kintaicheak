@@ -1809,6 +1809,139 @@ def route_expense_prereview():
     })
 
 
+def _teiki_shiwake_form():
+    """仕訳データへの定期代追記の共通フォーム読み取り。(値, エラー) を返す。"""
+    month_label = (request.form.get("month") or "").strip()
+    csv_str = _clean_path_input(request.form.get("kotsuhi_csv"))
+    xlsx_str = _clean_path_input(request.form.get("check_xlsx"))
+    shiwake_str = _clean_path_input(request.form.get("shiwake_csv"))
+
+    errors = []
+    if not re.fullmatch(r"\d{4}-\d{2}", month_label):
+        errors.append("対象月は YYYY-MM 形式で入力してください（例: 2026-07）")
+    for label, value in (("交通費申請CSV", csv_str), ("経費チェックのブック", xlsx_str),
+                         ("仕訳データCSV", shiwake_str)):
+        if not value:
+            errors.append(f"{label}のパスを入力してください")
+        elif not _Path(value).exists():
+            errors.append(f"{label}が見つかりません: {value}")
+    return (month_label, csv_str, xlsx_str, shiwake_str), errors
+
+
+def _teiki_shiwake_lists():
+    """精査で使う共有CSV（移動交通費対象者・精査対象外者・上限免除者）のパス。"""
+    def _p(name):
+        v = getattr(Config, name, "")
+        return _Path(v) if v else None
+    return (_p("KEIHI_TRAVEL_EXPENSE_MEMBERS_CSV"), _p("KOTSUHI_EXCLUDED_MEMBERS_CSV"),
+            _p("KOTSUHI_LIMIT_EXEMPT_MEMBERS_CSV"))
+
+
+@app.route("/teiki_shiwake_preview", methods=["POST"])
+def route_teiki_shiwake_preview():
+    """仕訳データCSVへ追記する通勤定期代の行を計算して返す（ファイルは作らない）。
+
+    フォーム: month / kotsuhi_csv / check_xlsx / shiwake_csv
+    """
+    from services.shiwake_teiki_append import run_teiki_shiwake_preview
+
+    (month_label, csv_str, xlsx_str, shiwake_str), errors = _teiki_shiwake_form()
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    target_csv, excluded_csv, exempt_csv = _teiki_shiwake_lists()
+    try:
+        res = run_teiki_shiwake_preview(
+            kotsuhi_csv=csv_str, check_xlsx=xlsx_str, shiwake_csv=shiwake_str,
+            month=month_label, target_list=target_csv, excluded_list=excluded_csv,
+            limit_exempt_list=exempt_csv,
+            monthly_limit=int(getattr(Config, "KOTSUHI_MONTHLY_LIMIT", 30000)),
+            log_func=_log)
+    except Exception as e:
+        logger.exception("teiki_shiwake_preview failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    if not res.ok:
+        return jsonify({"success": False, "errors": [res.error or "追記内容の計算に失敗しました"],
+                        "console": log_lines}), 500
+    return jsonify({
+        "success": True,
+        "rows": res.rows,
+        "skipped": res.skipped,
+        "warnings": res.warnings,
+        "summary": {
+            "append_count": res.append_count,
+            "append_total": res.append_total,
+            "source_rows": res.source_rows,
+            "ref_shiwake_no": res.ref_shiwake_no,
+            "ref_company": res.ref_company,
+        },
+        "console": log_lines,
+    })
+
+
+@app.route("/teiki_shiwake_generate", methods=["POST"])
+def route_teiki_shiwake_generate():
+    """プレビューと同じ計算をやり直し、別名の仕訳データCSVへ追記する（確認後実行）。
+
+    フォーム: month / kotsuhi_csv / check_xlsx / shiwake_csv
+              ＋ confirmed="1" / expected_count / expected_total
+    """
+    from services.shiwake_teiki_append import run_teiki_shiwake_generate
+
+    (month_label, csv_str, xlsx_str, shiwake_str), errors = _teiki_shiwake_form()
+    if (request.form.get("confirmed") or "").strip() != "1":
+        errors.append("プレビュー確認済みフラグがありません（画面から実行してください）。")
+    try:
+        expected_count = int((request.form.get("expected_count") or "").strip())
+        expected_total = int((request.form.get("expected_total") or "").strip())
+    except ValueError:
+        expected_count = expected_total = -1
+        errors.append("プレビューの件数・合計を受け取れませんでした。もう一度プレビューしてください。")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    output_filename = f"{_Path(shiwake_str).stem}_通勤定期代追記.csv"
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    target_csv, excluded_csv, exempt_csv = _teiki_shiwake_lists()
+    try:
+        res = run_teiki_shiwake_generate(
+            kotsuhi_csv=csv_str, check_xlsx=xlsx_str, shiwake_csv=shiwake_str,
+            month=month_label, out_path=output_path,
+            expected_count=expected_count, expected_total=expected_total,
+            target_list=target_csv, excluded_list=excluded_csv,
+            limit_exempt_list=exempt_csv,
+            monthly_limit=int(getattr(Config, "KOTSUHI_MONTHLY_LIMIT", 30000)),
+            log_func=_log)
+    except Exception as e:
+        logger.exception("teiki_shiwake_generate failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    if not res.ok:
+        return jsonify({"success": False, "errors": [res.error or "追記に失敗しました"],
+                        "console": log_lines}), 500
+    return jsonify({
+        "success": True,
+        "download_url": f"/download/{output_filename}",
+        "output_filename": output_filename,
+        "appended_rows": res.append_count,
+        "appended_total": res.append_total,
+        "warnings": res.warnings,
+        "console": log_lines,
+    })
+
+
 @app.route("/travel_expense_members", methods=["GET"])
 def route_travel_expense_members():
     """経費チェック: 移動交通費（立替精算）対象者リストの取得（UI表示・編集用）。
@@ -1934,67 +2067,17 @@ def route_expense_integration_preview():
     })
 
 
-@app.route("/expense_integration", methods=["POST"])
-def route_expense_integration():
-    """経費統合一覧表の生成（経費マクロ移植 P1a）。
+def _collect_irregular_inputs():
+    """イレギュラー経費の入力（画面の一覧＋一括取込ファイル）を集める。
 
-    4ソース（jinjer / e-staffing / SAP / freee）の生CSVパスを受け取り、前処理・社員番号照合して
-    34列の経費統合一覧表を作り、経路突合チェックシートと合わせて Excel 出力する。
-    指定されたソースだけ取り込む（未指定は「未取込」）。
-
-    フォーム:
-      - jinjer_csv / estaffing_csv / sap_csv / freee_csv : 各生CSVパス（いずれか1つ以上必須）
-      - output_filename : 任意
-      - route_check     : "1"/"0"（既定 "1"。通勤経路は jinjer API から取得）
-      - route_choices   : 任意。経路突合レビューで人が選んだ計上先の JSON
-                          [{"key": ..., "choice": "通勤費"|"移動交通費"}]。
-                          /expense_integration_preview が返したキーと食い違えばエラー停止する
+    フォーム: irregular_items（JSON [{type, id, amount}]）/ irregular_file（CSV・xlsx のパス）
+    戻り値は ({項目: {社員番号: 金額}}, エラー一覧)。統合実行と追加投入で同じ規約を使う。
     """
-    sources = {
-        "jinjer_csv": _clean_path_input(request.form.get("jinjer_csv")),
-        "estaffing_csv": _clean_path_input(request.form.get("estaffing_csv")),
-        "sap_csv": _clean_path_input(request.form.get("sap_csv")),
-        "freee_csv": _clean_path_input(request.form.get("freee_csv")),
-    }
-    # SAP重複除外: 取込済み費用シート台帳と突合する（過去CSVを画面で選ぶ方式は 2026-08-06 に廃止。
-    # 「どのファイルで取り込んだか」を人間が思い出す必要をなくすため）。
-    sap_ledger_csv = (_clean_path_input(request.form.get("sap_ledger_csv"))
-                      or Config.KEIHI_SAP_LEDGER_CSV)
-    sap_import_month = (request.form.get("sap_import_month") or "").strip()
-    sap_record_ledger = (request.form.get("sap_record_ledger") or "1").strip() != "0"
-    output_filename = (request.form.get("output_filename") or "").strip()
-    route_check = (request.form.get("route_check") or "1").strip() != "0"
-    classify = (request.form.get("classify") or "1").strip() != "0"
-    keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
-    import_template_str = _clean_path_input(request.form.get("import_template_csv"))
-
-    # イレギュラー経費（経費4ソースから導けない手決めの金額）。
-    # 画面で1人ずつ追加した明細（1件＝1人）と、ファイル一括取込を合算する。
     from services.keihi_payroll_import import (
-        parse_manual_allowances, load_irregular_file, merge_manual, MANUAL_ITEM_KEYS)
+        MANUAL_ITEM_KEYS, load_irregular_file, merge_manual, parse_manual_allowances)
 
-    errors = []
     manual_items: dict = {}
-
-    # 経路突合レビューの選択（未指定＝レビューを通していない。空配列＝要確認0件でレビュー済み）
-    route_choices = None
-    raw_choices = (request.form.get("route_choices") or "").strip()
-    if raw_choices:
-        try:
-            parsed = json.loads(raw_choices)
-        except ValueError:
-            parsed = None
-            errors.append("経路突合の選択を読み取れませんでした（もう一度実行してください）。")
-        if isinstance(parsed, list):
-            route_choices = []
-            for ent in parsed:
-                if not isinstance(ent, dict) or not str(ent.get("key") or ""):
-                    errors.append("経路突合の選択の形式が不正です（もう一度実行してください）。")
-                    break
-                route_choices.append({"key": str(ent.get("key")),
-                                      "choice": str(ent.get("choice") or "")})
-        elif parsed is not None:
-            errors.append("経路突合の選択の形式が不正です（もう一度実行してください）。")
+    errors: list = []
 
     raw_items = (request.form.get("irregular_items") or "").strip()
     if raw_items:
@@ -2038,6 +2121,70 @@ def route_expense_integration():
                     merge_manual(manual_items, item, d)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"イレギュラー経費の一括取込ファイルを読めませんでした: {e}")
+    return manual_items, errors
+
+
+@app.route("/expense_integration", methods=["POST"])
+def route_expense_integration():
+    """経費統合一覧表の生成（経費マクロ移植 P1a）。
+
+    4ソース（jinjer / e-staffing / SAP / freee）の生CSVパスを受け取り、前処理・社員番号照合して
+    34列の経費統合一覧表を作り、経路突合チェックシートと合わせて Excel 出力する。
+    指定されたソースだけ取り込む（未指定は「未取込」）。
+
+    フォーム:
+      - jinjer_csv / estaffing_csv / sap_csv / freee_csv : 各生CSVパス（いずれか1つ以上必須）
+      - output_filename : 任意
+      - route_check     : "1"/"0"（既定 "1"。通勤経路は jinjer API から取得）
+      - route_choices   : 任意。経路突合レビューで人が選んだ計上先の JSON
+                          [{"key": ..., "choice": "通勤費"|"移動交通費"}]。
+                          /expense_integration_preview が返したキーと食い違えばエラー停止する
+    """
+    sources = {
+        "jinjer_csv": _clean_path_input(request.form.get("jinjer_csv")),
+        "estaffing_csv": _clean_path_input(request.form.get("estaffing_csv")),
+        "sap_csv": _clean_path_input(request.form.get("sap_csv")),
+        "freee_csv": _clean_path_input(request.form.get("freee_csv")),
+    }
+    # SAP重複除外: 取込済み費用シート台帳と突合する（過去CSVを画面で選ぶ方式は 2026-08-06 に廃止。
+    # 「どのファイルで取り込んだか」を人間が思い出す必要をなくすため）。
+    sap_ledger_csv = (_clean_path_input(request.form.get("sap_ledger_csv"))
+                      or Config.KEIHI_SAP_LEDGER_CSV)
+    sap_import_month = (request.form.get("sap_import_month") or "").strip()
+    sap_record_ledger = (request.form.get("sap_record_ledger") or "1").strip() != "0"
+    output_filename = (request.form.get("output_filename") or "").strip()
+    route_check = (request.form.get("route_check") or "1").strip() != "0"
+    classify = (request.form.get("classify") or "1").strip() != "0"
+    keywords_file_str = _clean_path_input(request.form.get("keywords_file"))
+    import_template_str = _clean_path_input(request.form.get("import_template_csv"))
+
+    errors = []
+
+    # 経路突合レビューの選択（未指定＝レビューを通していない。空配列＝要確認0件でレビュー済み）
+    route_choices = None
+    raw_choices = (request.form.get("route_choices") or "").strip()
+    if raw_choices:
+        try:
+            parsed = json.loads(raw_choices)
+        except ValueError:
+            parsed = None
+            errors.append("経路突合の選択を読み取れませんでした（もう一度実行してください）。")
+        if isinstance(parsed, list):
+            route_choices = []
+            for ent in parsed:
+                if not isinstance(ent, dict) or not str(ent.get("key") or ""):
+                    errors.append("経路突合の選択の形式が不正です（もう一度実行してください）。")
+                    break
+                route_choices.append({"key": str(ent.get("key")),
+                                      "choice": str(ent.get("choice") or "")})
+        elif parsed is not None:
+            errors.append("経路突合の選択の形式が不正です（もう一度実行してください）。")
+
+    # イレギュラー経費（経費4ソースから導けない手決めの金額）。
+    # 画面で1人ずつ追加した明細（1件＝1人）と、ファイル一括取込を合算する。
+    manual_items, _item_errors = _collect_irregular_inputs()
+    errors += _item_errors
+
     paths: dict = {}
     for key, val in sources.items():
         if not val:
@@ -2111,6 +2258,7 @@ def route_expense_integration():
         "import_csv_name": result.import_csv_name or None,
         "import_preview": result.import_preview,
         "import_warnings": result.import_warnings,
+        "warnings": result.warnings,
         "commute_cuts": result.commute_cuts,
         "route_moves": [m for m in result.route_moves if m.get("変更") != "変更なし"],
         "stats": {
@@ -2287,9 +2435,149 @@ def route_expense_payroll_import():
         "console": log_lines,
     }
     if not result.ok:
+        # status "2"（一部失敗）は台帳に記録しない。jinjer側が中途半端な状態なので、
+        # それを土台に追加投入すると差が分からなくなる。作り直して投入し直してもらう。
         payload["errors"] = [result.error] if result.error else ["インポート投入に失敗しました"]
         return jsonify(payload), 500
+
+    # 投入した中身を月ごとに保持する（あとからイレギュラー経費が出たときの追加投入の土台）。
+    # 記録に失敗しても投入は終わっているので成功扱いのまま、警告だけ返す。
+    from services.keihi_import_ledger import record_submission
+    recorded, ledger_warnings = record_submission(
+        Config.KEIHI_IMPORT_LEDGER_CSV, month, csv_path.read_bytes(),
+        import_csv_name, template_id, result.status)
+    payload["ledger_recorded"] = recorded
+    payload["ledger_warnings"] = ledger_warnings
+    for w in ledger_warnings:
+        _log(f"[warn] {w}")
+    if recorded:
+        _log(f"[info] 投入台帳に {month} の内容を記録しました")
     return jsonify(payload)
+
+
+@app.route("/keihi_import_ledger_status", methods=["GET"])
+def route_keihi_import_ledger_status():
+    """投入台帳の状態（月ごとの投入済み行数・最終投入日時）を返す。"""
+    from services.keihi_import_ledger import load_ledger, months_summary
+
+    path = Config.KEIHI_IMPORT_LEDGER_CSV
+    try:
+        ledger = load_ledger(path)
+    except Exception as e:  # noqa: BLE001 — 状態表示なので落とさない
+        return jsonify({"success": False, "ledger_csv": str(path), "error": str(e)})
+    return jsonify({
+        "success": True,
+        "ledger_csv": str(path),
+        "exists": _Path(path).exists(),
+        "months": months_summary(ledger),
+    })
+
+
+@app.route("/expense_import_addon_preview", methods=["POST"])
+def route_expense_import_addon_preview():
+    """前回の投入内容にイレギュラー経費を足し、再投入用のCSVを作る（投入はしない）。
+
+    投入後にイレギュラー経費が出てきたとき、統合一覧表を4ソースから作り直して
+    経路突合レビューをやり直さずに済ませるための道（2026-08-10 谷津さん依頼）。
+    jinjer は同じ月・同じ社員を再投入すると置き換えになるので、前回分＋追加分の
+    **全行**を作り直して投入する。
+
+    フォーム: month（YYYY-MM）/ irregular_items / irregular_file / import_template_csv
+    """
+    from services.keihi_import_ledger import (
+        RESULT_OK, load_ledger, merge_addon, month_rows, months_summary, resolve_names)
+    from services.keihi_payroll_import import read_template_header, write_import_csv
+
+    month = (request.form.get("month") or "").strip()
+    template_str = _clean_path_input(request.form.get("import_template_csv"))
+
+    errors = []
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        errors.append("処理月は YYYY-MM 形式で入力してください（例: 2026-07）")
+    manual_items, item_errors = _collect_irregular_inputs()
+    errors += item_errors
+    if not manual_items:
+        errors.append("追加する金額が入力されていません（イレギュラー経費を1件以上入れてください）。")
+    if template_str and not _Path(template_str).exists():
+        errors.append(f"インポートテンプレCSVが見つかりません: {template_str}")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    try:
+        ledger = load_ledger(Config.KEIHI_IMPORT_LEDGER_CSV)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "console": log_lines, "errors": [
+            f"投入台帳を読めませんでした（{e}）。追加投入は使えないので、"
+            "統合一覧表から作り直して投入してください。"]}), 500
+
+    base = month_rows(ledger, month)
+    if not base:
+        known = "／".join(m["month"] for m in months_summary(ledger)) or "なし"
+        return jsonify({"success": False, "console": log_lines, "errors": [
+            f"{month} の投入記録が台帳にありません（記録がある月: {known}）。"
+            "初回は上の「統合を実行」からインポートCSVを作って投入してください。"]}), 400
+    _log(f"[info] 投入台帳から {month} の前回投入 {len(base)}名分を読みました")
+
+    results = {str(r.get("投入結果") or "") for r in base}
+    warnings: list[str] = []
+    if results - {RESULT_OK}:
+        warnings.append(
+            f"⚠️ 前回の投入結果が「{'／'.join(sorted(results - {RESULT_OK}))}」です。"
+            "jinjer のインポート履歴で前回分が入っているか確認してから投入してください。")
+
+    rows, preview, merge_warnings = merge_addon(base, manual_items)
+    warnings += merge_warnings
+
+    # 氏名は台帳から引く。台帳に無い社員番号が残ったときだけ jinjer から取る。
+    # レート制限(429)はテナント単位なので、要らない取得はしない。
+    def _fetch_roster_names():
+        from services.keihi_summary import fetch_roster_and_commute
+        _roster, id_to_name, _commute = fetch_roster_and_commute(
+            client=None, route_check=False, log_func=_log)
+        return id_to_name
+
+    names, name_warnings = resolve_names(ledger, [r["社員番号"] for r in rows],
+                                         roster_fetch=_fetch_roster_names)
+    warnings += name_warnings
+    for r, p in zip(rows, preview):
+        if not r.get("氏名"):
+            r["氏名"] = p["氏名"] = names.get(r["社員番号"], "")
+
+    template_header = None
+    if template_str:
+        try:
+            template_header = read_template_header(template_str)
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"success": False, "console": log_lines,
+                            "errors": [f"インポートテンプレCSVを読めませんでした: {e}"]}), 400
+
+    csv_name = f"経費追加投入_{month}_jinjerインポート.csv"
+    csv_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, csv_name)))
+    try:
+        write_import_csv(rows, csv_path, template_header)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("addon import csv failed")
+        return jsonify({"success": False, "console": log_lines,
+                        "errors": [f"インポートCSVを作れませんでした: {e}"]}), 500
+
+    added = sum(1 for p in preview if p["区分"] != "前回のみ")
+    _log(f"[info] 追加投入CSV: {len(rows)}名（うち追加あり・新規 {added}名） → {csv_name}")
+    return jsonify({
+        "success": True,
+        "import_preview": preview,
+        "import_warnings": warnings,
+        "import_csv_name": csv_name,
+        "import_csv_url": f"/download/{csv_name}",
+        "month": month,
+        "base_rows": len(base),
+        "added_rows": added,
+        "console": log_lines,
+    })
 
 
 # =============================================================================

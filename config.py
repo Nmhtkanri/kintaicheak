@@ -113,6 +113,12 @@ class Config:
     KEIHI_SAP_LEDGER_WRITERS_CSV = os.environ.get(
         "KEIHI_SAP_LEDGER_WRITERS_CSV", r"Z:\API連携\docs\SAP台帳_書き込み許可ユーザー.csv")
 
+    # 経費チェック: jinjer給与へ投入したインポート内容の台帳（2026-08-12 実装）。
+    # 投入後にイレギュラー経費が出たとき、統合一覧表を4ソースから作り直さずに
+    # 「前回分＋追加分」を再投入するための土台。月をまたぐので年度フォルダの外に置く。
+    KEIHI_IMPORT_LEDGER_CSV = os.environ.get(
+        "KEIHI_IMPORT_LEDGER_CSV", r"Y:\給与明細\_経費インポート投入台帳.csv")
+
     # 経費チェック: 移動交通費（立替精算）対象者リスト（2026-08-03 谷津さん指定）。
     # 現場直行などで通勤経路の登録が無くて正しい人たち＝交通費は通勤費でなく
     # 移動交通費（立替精算）で計上する。谷津さんが直すファイルなので exe に同梱せず

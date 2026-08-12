@@ -537,7 +537,7 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
                           target_ids: set[str], excluded: dict[str, str]) -> list[dict]:
     """通勤費申請なしリストを自動抽出する（2026-08-05 谷津さん決定=C案）。
 
-    条件は「テレワークをしていない」「当月の通勤費申請なし」。
+    条件は「当月の通勤費申請なし」。
     定期支給者は毎月申請しないのが正常で、この人たちの通勤費はマスタから支給する。
     だから申請が無いこと自体は異常ではなく、リストは支給用の一覧として使う。
     そのうえで**マスタにも登録が無い人**は1円も出ていない可能性があるので印を付ける。
@@ -545,21 +545,39 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
     出勤実績0でも落とさない（2026-08-05 谷津さん指摘）。代表取締役や打刻申請の
     無い人がいて、その人たちも経費対象者。出勤0を在職の代用にすると取りこぼす。
     対象月に在職しているかは経費モード側の入社日・退職日で絞り込む前提。
+
+    テレワーク実施者の扱い（2026-08-12 谷津さん決定＝抽出条件の拡張）:
+    以前は「テレワークが1日でもあれば対象外」だったが、それだとテレワークと実費申請が
+    混在する人が丸ごと抜け落ちていた。実費申請者はテレワーク日には申請しないのが正常で、
+    **実費申請日数 ＋ テレワーク日数 ＝ 出勤日数** なら全日に説明が付くので通過させる。
+    式が合わない人は日数の内訳を添えて要確認に出す。
     """
-    applied: set[str] = set()
+    # 定期代の申請がある人は定期代突合シートの担当なのでこのリストからは外す。
+    # 実費は「何日申請したか」が判定に要るので、ユニークな利用日を数える
+    # （build_actual_rows と同じ数え方＝往復で2行あっても同じ日なら1日）。
+    applied_pass: set[str] = set()
+    actual_days: dict[str, set[str]] = defaultdict(set)
     for r in details:
         if r[idx["ステータス"]] not in ACTIVE_STATUS:
             continue
-        if r[idx["交通機関"]] in (KIND_PASS, KIND_ACTUAL):
-            applied.add(r[idx["社員番号"]])
+        if r[idx["交通機関"]] == KIND_PASS:
+            applied_pass.add(r[idx["社員番号"]])
+        elif r[idx["交通機関"]] == KIND_ACTUAL:
+            actual_days[r[idx["社員番号"]]].add(r[idx["利用日"]])
 
     rows = []
     for emp, info in workdays.items():
-        if not is_company_employee(emp) or emp in applied or emp in excluded:
+        if not is_company_employee(emp) or emp in applied_pass or emp in excluded:
             continue
         work = info["出勤日数"] if isinstance(info["出勤日数"], (int, float)) else 0
         tw = info["テレワーク日数"] if isinstance(info["テレワーク日数"], (int, float)) else 0
-        if tw > 0:
+        actual = len(actual_days.get(emp, ()))
+        if tw <= 0:
+            # テレワークなし: 実費の申請が1件でもあれば申請済み＝このリストの対象外
+            if actual:
+                continue
+        elif int(round(actual + tw)) == int(round(work)):
+            # 実費申請日とテレワーク日で出勤日が全部埋まる＝支給漏れではない
             continue
 
         legs = sorted(master.rows.get(emp, []), key=lambda m: m["経路No"] or 0)
@@ -571,7 +589,17 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
             kubun = "移動交通費"
             remark = "立替精算対象"
         state = "マスタ未登録" if not legs else "マスタの支給金額が0"
-        if work <= 0:
+        tw_note = f"（テレワーク{int(tw)}日）" if tw > 0 else ""
+        if actual > 0:
+            # ここに来るのはテレワークありで式が合わない人だけ（テレワーク無しの実費申請者は
+            # 上で除外済み）。どちらに振れているかで意味が変わるので向きを書き分ける。
+            judge = "実費申請の日数不一致"
+            direction = ("実費申請がテレワーク日と重なっている疑い"
+                         if actual + tw > work else "出社日の一部しか実費申請が無い（申請漏れの可能性）")
+            note = (f"出勤{int(work)}日・テレワーク{int(tw)}日・実費申請{actual}日で"
+                    f"一致しない（{direction}）")
+            kubun_judge = "要確認"
+        elif work <= 0:
             # 代表取締役や打刻申請の無い人も出勤0になる。支給漏れとは断定できない。
             # 対象月より後の入社もここに落ちるが、それは経費モード側の入社日判定で消える。
             judge = "マスタから支給" if amount else "勤怠実績なし"
@@ -580,11 +608,11 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
             kubun_judge = "情報"
         elif amount == 0:
             judge = "支給漏れの疑い"
-            note = f"{int(work - tw)}日出社しているが、{state}かつ通勤費の申請も無い"
+            note = f"{int(work - tw)}日出社しているが、{state}かつ通勤費の申請も無い{tw_note}"
             kubun_judge = "要確認"
         else:
             judge = "マスタから支給"
-            note = f"申請は無いがマスタに{interval}{amount:,}円の登録あり"
+            note = f"申請は無いがマスタに{interval}{amount:,}円の登録あり{tw_note}"
             kubun_judge = "OK"
 
         rows.append({
@@ -597,7 +625,7 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
             "説明": note,
             "確認要否": kubun_judge,
         })
-    order = {"支給漏れの疑い": 0, "勤怠実績なし": 1, "マスタから支給": 2}
+    order = {"支給漏れの疑い": 0, "実費申請の日数不一致": 1, "勤怠実績なし": 2, "マスタから支給": 3}
     rows.sort(key=lambda r: (order.get(r["判定"], 9), r["社員番号"]))
     return rows
 
@@ -1073,15 +1101,22 @@ def write_summary(wb, pass_rows, actual_rows, travel_rows, gap_rows, stock_rows,
     r += 2
     ws.cell(row=r, column=1, value="■ 通勤費申請なし（自動抽出）").font = Font(bold=True, size=11)
     r += 1
-    miss = [x for x in no_commute_rows if x["確認要否"] == "要確認"]
-    for label, n, note in [
-        ("支給漏れの疑い", len(miss), "毎日出社しているが、マスタ登録も当月の申請も無い"),
-        ("マスタから支給", len(no_commute_rows) - len(miss), "申請は無いがマスタに登録あり＝この金額で支給する"),
+    # 判定ごとに数える。支給漏れの疑いと日数不一致はどちらも確認要否=要確認なので、
+    # 確認要否で数えると2種類が混ざってしまう。
+    by_judge: dict[str, int] = defaultdict(int)
+    for x in no_commute_rows:
+        by_judge[x["判定"]] += 1
+    for label, note in [
+        ("支給漏れの疑い", "出社しているが、マスタ登録も当月の申請も無い"),
+        ("実費申請の日数不一致", "実費申請日数＋テレワーク日数が出勤日数と合わない"),
+        ("勤怠実績なし", "対象月の勤怠実績が無い（入社日・在籍状況の確認が必要）"),
+        ("マスタから支給", "申請は無いがマスタに登録あり＝この金額で支給する"),
     ]:
+        n = by_judge.get(label, 0)
         ws.cell(row=r, column=1, value=label)
         ws.cell(row=r, column=2, value=n)
         ws.cell(row=r, column=3, value=note)
-        if label == "支給漏れの疑い" and n:
+        if label in ("支給漏れの疑い", "実費申請の日数不一致") and n:
             for c in range(1, 4):
                 ws.cell(row=r, column=c).fill = NG_FILL
         r += 1
@@ -1192,11 +1227,24 @@ def apply_diff(sheet: str, rows: list[dict], prev: dict[str, set[str]],
     return len(before - now)
 
 
-def main(csv_path: Path, check_path: Path, out_path: Path,
-         target_list: Path | None = None, target_ym: str = "2026-07",
-         excluded_list: Path | None = None,
-         limit_exempt_list: Path | None = None,
-         monthly_limit: int = COMMUTE_MONTHLY_LIMIT):
+@dataclass
+class SeisaInputs:
+    """精査の入力一式。main と仕訳追記（shiwake_teiki_append）で共用する。"""
+    details: list                  # 対象月に絞った申請明細
+    idx: dict                      # 列名 → CSVの列位置
+    master: CommuteMaster
+    workdays: dict
+    target_ids: set                # 移動交通費（立替精算）対象者
+    excluded: dict                 # 精査対象外者 {社員番号: 理由}
+    limit_exempt: dict             # 通勤費の上限免除者 {社員番号: 理由}
+    out_of_month: int = 0          # 対象月外の有効明細数（警告用）
+
+
+def load_seisa_inputs(csv_path: Path, check_path: Path, target_ym: str,
+                      target_list: Path | None = None,
+                      excluded_list: Path | None = None,
+                      limit_exempt_list: Path | None = None) -> SeisaInputs:
+    """交通費申請CSVと経費チェックブックを読み、精査に要る入力をまとめて返す。"""
     header, all_details = read_cp932_csv(csv_path)
     names = ["ステータス", "交通機関", "社員番号", "申請者", "所属グループ", "申請書No.",
              "明細No.", "利用日", "金額", "往復", "小計", "乗車場所", "降車場所", "経路", "目的地"]
@@ -1211,9 +1259,11 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
     )
 
     wb_src = openpyxl.load_workbook(check_path, data_only=True)
-    master = CommuteMaster(wb_src["通勤費"])
-
-    workdays = build_workdays(wb_src)
+    try:
+        master = CommuteMaster(wb_src["通勤費"])
+        workdays = build_workdays(wb_src)
+    finally:
+        wb_src.close()
 
     target_ids = set()
     if target_list and target_list.exists():
@@ -1228,8 +1278,26 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
             if row and row[0].strip():
                 target_ids.add(row[0].strip())
 
-    excluded = load_excluded_members(excluded_list)
-    limit_exempt = load_limit_exempt_members(limit_exempt_list)
+    return SeisaInputs(
+        details=details, idx=idx, master=master, workdays=workdays,
+        target_ids=target_ids,
+        excluded=load_excluded_members(excluded_list),
+        limit_exempt=load_limit_exempt_members(limit_exempt_list),
+        out_of_month=out_of_month,
+    )
+
+
+def main(csv_path: Path, check_path: Path, out_path: Path,
+         target_list: Path | None = None, target_ym: str = "2026-07",
+         excluded_list: Path | None = None,
+         limit_exempt_list: Path | None = None,
+         monthly_limit: int = COMMUTE_MONTHLY_LIMIT):
+    src = load_seisa_inputs(csv_path, check_path, target_ym,
+                            target_list=target_list, excluded_list=excluded_list,
+                            limit_exempt_list=limit_exempt_list)
+    details, idx, master, workdays = src.details, src.idx, src.master, src.workdays
+    target_ids, excluded, limit_exempt = src.target_ids, src.excluded, src.limit_exempt
+    out_of_month = src.out_of_month
 
     pass_rows = build_pass_rows(details, idx, master)
     actual_rows = build_actual_rows(details, idx, master, workdays)

@@ -918,6 +918,60 @@
             </div>
             <div id="pr-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
         </div>
+
+        <!-- ==== 仕訳データへの定期代追記（イレギュラー救済処置）==== -->
+        <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
+            <h3 style="margin:0 0 4px; font-size:14px">仕訳データへの定期代追記 <span class="tag tag-opt">イレギュラー救済</span></h3>
+            <p class="card-lead" style="margin-top:0">
+                定期代の人は毎月申請しないのが正常なので、<b>申請が無いまま仕訳に載らず支給漏れ</b>になります。
+                上の精査で出た「通勤費申請なし」のうち<b>区分＝通勤定期代・判定＝マスタから支給</b>の人を、
+                jinjer の仕訳データCSVへ1経路1行で追記します。
+                <b>毎月の定常作業ではありません。</b>元ファイルは触らず別名で出力します。
+            </p>
+            <div class="field-grid">
+                <label class="field">
+                    <span class="field-label">仕訳データCSV <span class="tag tag-req">必須</span></span>
+                    <input type="text" id="ts-shiwake" placeholder="例: Y:\給与明細\R8年\8月\wk\2026年08月06日仕訳データ.csv">
+                    <span class="field-hint">jinjer 経費 → 仕訳データのエクスポート（Shift-JIS・33列）。交通費申請CSV／経費チェックのブック／対象月は上の欄を使います</span>
+                </label>
+            </div>
+            <details class="hint-details">
+                <summary>追記する行の中身／※要確認が付くもの</summary>
+                <div class="hint-body">
+                    <p><b>金額</b>：通勤費マスタの毎月支給額。<b>上限3万円を超えていても切りません</b>
+                    （切るのは給与インポートCSVを作る瞬間だけ）。免除リストの人は満額のまま印も付きません。</p>
+                    <p><b>仕訳No.・企業名</b>：追記先のファイルにある既存の「通勤定期代」行から引き継ぎます
+                    （月ごとに変わるため固定値にできません）。先頭ゼロもそのまま保持します。</p>
+                    <p><b>※要確認が付くもの</b>：車通勤（既存の定期代は全員が公共交通機関＝費目が違う可能性）／
+                    マスタに経路が複数（乗継の合算か勤務地の選択制か判別できないので経路ごとに1行出します）／
+                    勤怠実績0日／上限3万超かつ免除リスト外。<b>取込前に必ず目視してください。</b></p>
+                    <p><b>安全策</b>：既存行は1バイトも書き換えません（書いた後に読み直して検証します）。
+                    プレビューと件数・合計が変わっていたら出力せずに止めます。</p>
+                </div>
+            </details>
+            <div class="actions">
+                <button type="button" class="btn btn-primary" id="ts-preview-btn">🔍 追記内容をプレビュー</button>
+                <span id="ts-status" class="status-text"></span>
+            </div>
+            <div id="ts-result-area" style="display:none; margin-top:8px">
+                <div id="ts-summary" style="margin-bottom:6px; font-size:13px"></div>
+                <div id="ts-warnings" class="alert alert-warning" style="display:none; margin:6px 0"></div>
+                <div style="max-height:300px; overflow:auto; border:1px solid #ddd">
+                    <table id="ts-table" style="border-collapse:collapse; font-size:11px; width:100%"></table>
+                </div>
+                <div id="ts-skipped" style="margin-top:6px; font-size:11px; color:#666"></div>
+                <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+                    <label style="display:inline-flex; align-items:center; gap:6px; font-weight:bold">
+                        <input type="checkbox" id="ts-confirmed">
+                        ※要確認の行を確認しました
+                    </label>
+                    <button type="button" class="btn btn-danger" id="ts-generate-btn" disabled>📝 追記したCSVを作る</button>
+                </div>
+                <a id="ts-download-link" href="#" class="btn btn-download" style="display:none; margin-top:8px">📥 追記済み仕訳データCSVをダウンロード</a>
+                <pre id="ts-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+            </div>
+            <div id="ts-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
+        </div>
     </div>
 
     <!-- ==== 経費集計: 経費統合一覧表の生成（マクロ移植 P1a）==== -->
@@ -1006,6 +1060,7 @@
                     <label><input type="checkbox" id="ki-route-check" checked> 経路突合チェックシートを付ける</label>
                     <label><input type="checkbox" id="ki-classify" checked> 分類・集計シート＋jinjer給与インポートCSVも作る</label>
                 </div>
+                <div id="ki-opt-warn" style="display:none; margin-top:7px; padding:8px 11px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:12px"></div>
                 <details class="more">
                     <summary>それぞれの中身</summary>
                     <div class="more-body">
@@ -1091,6 +1146,60 @@
             </div>
         </div>
 
+        <!-- ==== 追加投入（前回の投入データを使う）==== -->
+        <div style="margin:8px 14px; border:1px solid #d7dee8; border-radius:6px; background:#fafcff; padding:10px 13px">
+            <details id="ki-addon-details">
+                <summary style="cursor:pointer; font-weight:bold; font-size:13px">
+                    ➕ 追加投入（前回の投入データを使う）
+                </summary>
+                <p class="card-lead" style="margin:8px 0">
+                    投入したあとにイレギュラー経費が出てきたときに使います。
+                    <b>統合一覧表を作り直さず</b>、前回投入した内容に追加分を足した
+                    <b>全行</b>を作って投入し直します（jinjer は同じ月・同じ社員を再投入すると
+                    加算ではなく置き換えになります）。<br>
+                    <b>リセットして作り直す場合は、上の「統合を実行」から従来どおり進めてください。</b>
+                    追加できるのはイレギュラー経費の項目だけです（承認が遅れた経費行は作り直しが必要）。
+                </p>
+                <div id="ki-ledger-status" style="margin:6px 0; padding:8px 11px; border-radius:6px; background:#eef3fa; font-size:12px; color:#334">投入台帳を読み込み中...</div>
+                <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">対象月</span>
+                        <input type="text" id="ki-addon-month" placeholder="例: 2026-07" style="width:120px">
+                    </label>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">項目</span>
+                        <select id="ki-addon-type" style="min-width:190px">
+                            <option value="定常外業務対応手当">定常外業務対応手当</option>
+                            <option value="その他手当">その他手当</option>
+                            <option value="現物支給">現物支給</option>
+                            <option value="支給過不足調整">支給過不足調整</option>
+                            <option value="社保調整">社保調整（控除）</option>
+                        </select>
+                    </label>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">社員番号</span>
+                        <input type="text" id="ki-addon-id" placeholder="2026013" style="width:110px">
+                    </label>
+                    <label class="field" style="gap:3px">
+                        <span class="field-sub">金額（マイナス可）</span>
+                        <input type="text" id="ki-addon-amount" placeholder="15000" style="width:110px">
+                    </label>
+                    <button type="button" class="btn btn-secondary" id="ki-addon-add">＋ 追加</button>
+                </div>
+                <div id="ki-addon-list" style="margin-top:8px; font-size:12px"></div>
+                <label class="field" style="margin-top:8px">
+                    <span class="field-sub">一括取込ファイル（任意）</span>
+                    <input type="text" id="ki-addon-file" placeholder="例: Z:\経費\イレギュラー経費_2026年7月_追加分.xlsx">
+                    <span class="field-sub">上の「イレギュラー経費」と同じ形式（ワイド／ロングどちらでも可）</span>
+                </label>
+                <div class="actions" style="margin-top:8px">
+                    <button type="button" class="btn btn-primary" id="ki-addon-preview-btn">🔍 追加投入プレビュー</button>
+                    <span id="ki-addon-status" class="status-text"></span>
+                </div>
+                <div id="ki-addon-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
+            </details>
+        </div>
+
         <div id="ki-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
             <div class="summary-cards" style="margin-bottom:8px">
                 <div class="summary-card"><div class="card-label">統合一覧表(行)</div><div class="card-value" id="ki-cnt-rows">0</div></div>
@@ -1099,41 +1208,46 @@
                 <div class="summary-card"><div class="card-label">社員番号 未照合(行)</div><div class="card-value" id="ki-cnt-unmatched">0</div></div>
                 <div class="summary-card"><div class="card-label">★要確認(経路突合)</div><div class="card-value" id="ki-cnt-flagged">—</div></div>
                 <div class="summary-card"><div class="card-label">△逆要確認</div><div class="card-value" id="ki-cnt-rev">—</div></div>
+                <div class="summary-card"><div class="card-label">▲片側一致</div><div class="card-value" id="ki-cnt-side">—</div></div>
                 <div class="summary-card"><div class="card-label">集計 社員数</div><div class="card-value" id="ki-cnt-summary">—</div></div>
                 <div class="summary-card"><div class="card-label">判定「差分あり」</div><div class="card-value" id="ki-cnt-diffng">—</div></div>
             </div>
+            <div id="ki-run-warn" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:13px"></div>
             <div id="ki-ledger-warn" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:13px"></div>
             <a id="ki-download-link" href="#" class="btn btn-download" style="display:none">📥 統合一覧表xlsxをダウンロード</a>
             <a id="ki-import-csv-link" href="#" class="btn btn-download" style="display:none; margin-left:8px">📥 jinjer給与インポートCSVをダウンロード</a>
             <div id="ki-route-moves" style="display:none; margin-top:10px; padding:9px 12px; border-radius:6px; border:1px solid #b8860b; background:#fdf6e3; color:#7a5c00; font-size:12px"></div>
             <pre id="ki-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
 
-            <!-- ==== jinjer給与インポート（人間チェック → API投入）==== -->
-            <div id="ki-import-area" style="display:none; margin-top:14px; border:2px solid #c00000; border-radius:6px; padding:10px 14px">
-                <div style="font-weight:bold; margin-bottom:6px">🧾 jinjer給与インポート プレビュー（投入前に必ず確認してください）</div>
-                <div id="ki-import-warnings" class="alert alert-warning" style="display:none; margin:6px 0"></div>
-                <div style="max-height:320px; overflow:auto; border:1px solid #ddd">
-                    <table id="ki-import-table" style="border-collapse:collapse; font-size:11px; width:100%"></table>
-                </div>
-                <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
-                    <label style="display:inline-flex; align-items:center; gap:6px">
-                        処理月:
-                        <input type="text" id="ki-import-month" placeholder="例: 2026-07" style="width:120px; padding:6px 10px">
-                    </label>
-                    <label style="display:inline-flex; align-items:center; gap:6px">
-                        テンプレートID:
-                        <input type="text" id="ki-import-template" value="44450" style="width:90px; padding:6px 10px">
-                        <span class="hint" style="font-size:11px">（jinjer「経費APIインポート用」。列名がCSVと一致していることをjinjer画面で確認）</span>
-                    </label>
-                    <label style="display:inline-flex; align-items:center; gap:6px; font-weight:bold">
-                        <input type="checkbox" id="ki-import-confirmed">
-                        プレビューとCSVを確認しました
-                    </label>
-                    <button type="button" class="btn btn-danger" id="ki-import-btn" disabled>🚀 jinjer給与へAPIインポート</button>
-                    <span id="ki-import-status" style="color:#666"></span>
-                </div>
-                <pre id="ki-import-console" style="margin-top:8px; max-height:160px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
+        </div>
+
+        <!-- ==== jinjer給与インポート（人間チェック → API投入）====
+             統合実行の結果エリアの外に置く。追加投入（前回の投入データを使う）からも
+             同じプレビュー・確認・投入の流れを使うため。 -->
+        <div id="ki-import-area" style="display:none; margin:8px 14px; border:2px solid #c00000; border-radius:6px; padding:10px 14px">
+            <div style="font-weight:bold; margin-bottom:6px">🧾 jinjer給与インポート プレビュー（投入前に必ず確認してください）</div>
+            <div id="ki-import-warnings" class="alert alert-warning" style="display:none; margin:6px 0"></div>
+            <div style="max-height:320px; overflow:auto; border:1px solid #ddd">
+                <table id="ki-import-table" style="border-collapse:collapse; font-size:11px; width:100%"></table>
             </div>
+            <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+                <label style="display:inline-flex; align-items:center; gap:6px">
+                    処理月:
+                    <input type="text" id="ki-import-month" placeholder="例: 2026-07" style="width:120px; padding:6px 10px">
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:6px">
+                    テンプレートID:
+                    <input type="text" id="ki-import-template" value="44450" style="width:90px; padding:6px 10px">
+                    <span class="hint" style="font-size:11px">（jinjer「経費APIインポート用」。列名がCSVと一致していることをjinjer画面で確認）</span>
+                </label>
+                <label style="display:inline-flex; align-items:center; gap:6px; font-weight:bold">
+                    <input type="checkbox" id="ki-import-confirmed">
+                    プレビューとCSVを確認しました
+                </label>
+                <button type="button" class="btn btn-danger" id="ki-import-btn" disabled>🚀 jinjer給与へAPIインポート</button>
+                <span id="ki-import-status" style="color:#666"></span>
+            </div>
+            <pre id="ki-import-console" style="margin-top:8px; max-height:160px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
         </div>
         <div id="ki-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
@@ -1487,6 +1601,150 @@
             }
         });
     }
+
+    // ----- 仕訳データへの定期代追記（イレギュラー救済処置）-----
+    // プレビュー → 確認 → 生成 の二段階。生成時にサーバ側で同じ計算をやり直し、
+    // 件数・合計が変わっていたら（＝承認が進んで入力が変わった）書かずに止める。
+    let tsExpected = null;
+
+    function tsForm() {
+        const fd = new FormData();
+        fd.append('month', document.getElementById('ex-month').value);
+        fd.append('kotsuhi_csv', document.getElementById('pr-csv').value);
+        fd.append('check_xlsx', document.getElementById('pr-xlsx').value);
+        fd.append('shiwake_csv', document.getElementById('ts-shiwake').value);
+        return fd;
+    }
+
+    function tsRenderPreview(data) {
+        const rows = data.rows || [];
+        const s = data.summary || {};
+        tsExpected = {count: s.append_count, total: s.append_total};
+        document.getElementById('ts-summary').innerHTML =
+            '追記 <b>' + (s.append_count || 0) + '行</b> / 計 <b>'
+            + Number(s.append_total || 0).toLocaleString() + '円</b>（元の仕訳データ '
+            + (s.source_rows || 0) + '行の後ろに足します）<br>'
+            + '仕訳No. <b>' + escapeHtml(s.ref_shiwake_no || '') + '</b> ・ '
+            + escapeHtml(s.ref_company || '') + ' を既存行から引き継ぎます';
+
+        const warnEl = document.getElementById('ts-warnings');
+        const warns = data.warnings || [];
+        if (warns.length) {
+            warnEl.innerHTML = warns.map(w => escapeHtml(w)).join('<br>');
+            warnEl.style.display = 'block';
+        } else {
+            warnEl.style.display = 'none';
+        }
+
+        const cols = ['社員番号', '氏名', '乗車場所', '降車場所', '利用交通機関', '金額', '要確認'];
+        let html = '<thead><tr>' + cols.map(c =>
+            '<th style="border:1px solid #ccc; padding:3px 6px; background:#2f5597; color:#fff;'
+            + ' position:sticky; top:0">' + escapeHtml(c) + '</th>').join('') + '</tr></thead><tbody>';
+        rows.forEach(r => {
+            const bg = r['要確認'] ? 'background:#fdf6e3;' : '';
+            html += '<tr style="' + bg + '">' + cols.map(c => {
+                const isAmt = (c === '金額');
+                const v = isAmt ? Number(r[c] || 0).toLocaleString() : String(r[c] ?? '');
+                return '<td style="border:1px solid #ddd; padding:2px 6px;'
+                     + (isAmt ? 'text-align:right' : '') + '">' + escapeHtml(v) + '</td>';
+            }).join('') + '</tr>';
+        });
+        document.getElementById('ts-table').innerHTML = html + '</tbody>';
+
+        const skipped = data.skipped || [];
+        document.getElementById('ts-skipped').innerHTML = skipped.length
+            ? '対象外 ' + skipped.length + '名: ' + skipped.map(x =>
+                escapeHtml(x['社員番号'] + ' ' + x['氏名'] + '（' + x['理由'] + '）')).join(' / ')
+            : '';
+
+        document.getElementById('ts-confirmed').checked = false;
+        document.getElementById('ts-generate-btn').disabled = true;
+        document.getElementById('ts-download-link').style.display = 'none';
+        const consoleEl = document.getElementById('ts-console');
+        consoleEl.textContent = (data.console || []).join('\n');
+        consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+        document.getElementById('ts-result-area').style.display = 'block';
+    }
+
+    const tsPreviewBtn = document.getElementById('ts-preview-btn');
+    if (tsPreviewBtn) {
+        tsPreviewBtn.addEventListener('click', async () => {
+            hideError('ts-error-area');
+            document.getElementById('ts-result-area').style.display = 'none';
+            document.getElementById('ts-status').textContent = '追記内容を計算中...';
+            tsPreviewBtn.disabled = true;
+            try {
+                const res = await fetch('/teiki_shiwake_preview', {method:'POST', body: tsForm()});
+                const data = await res.json();
+                if (!data.success){
+                    showError('ts-error-area', data.errors || ['プレビューに失敗しました']);
+                    document.getElementById('ts-status').textContent = '';
+                    return;
+                }
+                if (!(data.rows || []).length){
+                    document.getElementById('ts-status').textContent =
+                        '追記対象はありません（定期代で支給待ちの人がいません）';
+                    return;
+                }
+                tsRenderPreview(data);
+                document.getElementById('ts-status').textContent = '内容を確認してください';
+            } catch (e) {
+                showError('ts-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('ts-status').textContent = '';
+            } finally {
+                tsPreviewBtn.disabled = false;
+            }
+        });
+    }
+
+    const tsConfirmed = document.getElementById('ts-confirmed');
+    const tsGenerateBtn = document.getElementById('ts-generate-btn');
+    if (tsConfirmed && tsGenerateBtn) {
+        tsConfirmed.addEventListener('change', () => {
+            tsGenerateBtn.disabled = !tsConfirmed.checked;
+        });
+        tsGenerateBtn.addEventListener('click', async () => {
+            if (!tsExpected) return;
+            hideError('ts-error-area');
+            document.getElementById('ts-status').textContent = '追記ファイルを作成中...';
+            tsGenerateBtn.disabled = true;
+            try {
+                const fd = tsForm();
+                fd.append('confirmed', '1');
+                fd.append('expected_count', String(tsExpected.count));
+                fd.append('expected_total', String(tsExpected.total));
+                const res = await fetch('/teiki_shiwake_generate', {method:'POST', body: fd});
+                const data = await res.json();
+                const consoleEl = document.getElementById('ts-console');
+                consoleEl.textContent = (data.console || []).join('\n');
+                consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+                if (!data.success){
+                    showError('ts-error-area', data.errors || ['追記に失敗しました']);
+                    document.getElementById('ts-status').textContent = '';
+                    return;
+                }
+                const dl = document.getElementById('ts-download-link');
+                dl.href = data.download_url;
+                dl.style.display = 'inline-block';
+                document.getElementById('ts-status').textContent =
+                    '完了（' + data.appended_rows + '行 / 計 '
+                    + Number(data.appended_total).toLocaleString() + '円を追記）';
+            } catch (e) {
+                showError('ts-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('ts-status').textContent = '';
+            } finally {
+                tsGenerateBtn.disabled = !tsConfirmed.checked;
+            }
+        });
+    }
+    // 入力を変えたらプレビューは無効（古い表のまま生成させない。最後の砦はサーバ側の件数突合）
+    ['ex-month', 'pr-csv', 'pr-xlsx', 'ts-shiwake'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => {
+            tsExpected = null;
+            document.getElementById('ts-result-area').style.display = 'none';
+        });
+    });
 
     // ----- 移動交通費（立替精算）対象者リストの表示・編集 -----
     // リストの実体は共有フォルダのCSV（保存すれば exe 再ビルドなしで次回実行から反映）。
@@ -1843,6 +2101,16 @@
                 warnEl.style.display = 'none';
                 warnEl.textContent = '';
             }
+            // 経路突合・分類をオフにして実行した場合など、止めはしないが伝えるべきこと
+            const runWarnEl = document.getElementById('ki-run-warn');
+            const runWarns = data.warnings || [];
+            if (runWarns.length) {
+                runWarnEl.innerHTML = '⚠ ' + runWarns.map(w => escapeHtml(w)).join('<br>⚠ ');
+                runWarnEl.style.display = '';
+            } else {
+                runWarnEl.style.display = 'none';
+                runWarnEl.textContent = '';
+            }
             // 台帳へ暫定登録された結果を画面に反映する
             kiLoadLedger();
             document.getElementById('ki-cnt-unmatched').textContent = st.unmatched_emp || 0;
@@ -1854,6 +2122,10 @@
             document.getElementById('ki-cnt-rev').textContent =
                 (rs.rev_rows !== undefined)
                     ? (rs.rev_rows + '行 / ' + rs.rev_emps + '名')
+                    : '—';
+            document.getElementById('ki-cnt-side').textContent =
+                (rs.side_rows !== undefined)
+                    ? (rs.side_rows + '行 / ' + rs.side_emps + '名')
                     : '—';
             const cs = st.classify_summary || {};
             document.getElementById('ki-cnt-summary').textContent =
@@ -1919,7 +2191,8 @@
             + ' padding:3px 5px; white-space:nowrap">この月の計上先</th></tr></thead><tbody>';
         rows.forEach(r => {
             const bg = String(r['判定'] || '').startsWith('★') ? '#FFC7CE'
-                     : String(r['判定'] || '').startsWith('△') ? '#FFEB9C' : '';
+                     : String(r['判定'] || '').startsWith('△') ? '#FFEB9C'
+                     : String(r['判定'] || '').startsWith('▲') ? '#DDEBF7' : '';
             html += '<tr style="background:' + bg + '" title="' + escapeHtml(r['登録通勤経路'] || '') + '">';
             cols.forEach(c => {
                 const align = (c === '金額') ? 'right' : 'left';
@@ -1949,9 +2222,11 @@
                       : rows.filter(r => r['付替可']).length;
         document.getElementById('ki-route-review-note').innerHTML =
             '要確認 ' + rows.length + '行（★' + (summary.flagged_rows || 0)
-            + ' / △' + (summary.rev_rows || 0) + '）のうち、計上先を選べるのは ' + movable + '行です。'
+            + ' / △' + (summary.rev_rows || 0) + ' / ▲' + (summary.side_rows || 0)
+            + '）のうち、計上先を選べるのは ' + movable + '行です。'
             + '<b>初期値はシステムの判定</b>（★＝経路内なので通勤費 / △＝経路と不一致なので移動交通費）'
             + 'が入っています。違うと思う行だけ変えてください。'
+            + '<b>▲（片側のみ一致）はシステムに判断材料が無いため、初期値は申請どおりの計上先</b>のままです。'
             + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金に計上するため、この表には出ません。';
         document.getElementById('ki-route-review-area').style.display = '';
     }
@@ -1968,8 +2243,10 @@
         kiRunBtn.addEventListener('click', async () => {
             const routeCheck = document.getElementById('ki-route-check').checked;
             const classify = document.getElementById('ki-classify').checked;
-            // 経路突合も分類もオンのときだけ、先に要確認行を出して人に選んでもらう
-            if (!routeCheck || !classify) { await kiRunIntegration(null); return; }
+            // 経路突合も分類もオンのときだけ、先に要確認行を出して人に選んでもらう。
+            // 片方でも外すと付け替えが起きないまま通るので、実行前に必ず画面へ出す
+            // （止めはしない＝オフのまま実行できる。2026-08-12 谷津さん）
+            if (!routeCheck || !classify) { kiUpdateOptionWarning(); await kiRunIntegration(null); return; }
 
             hideError('ki-error-area');
             kiHideRouteReview();
@@ -2031,6 +2308,29 @@
         if (el) el.addEventListener('change', kiHideRouteReview);
     });
 
+    // 経路突合・分類を外すと付け替えが一切起きない。チェックを外した時点で伝える
+    function kiUpdateOptionWarning() {
+        const el = document.getElementById('ki-opt-warn');
+        if (!el) return;
+        const routeCheck = document.getElementById('ki-route-check').checked;
+        const classify = document.getElementById('ki-classify').checked;
+        const msgs = [];
+        if (!routeCheck) msgs.push('経路突合がオフなので、経路内の移動交通費申請は立替金のままです');
+        if (!classify) msgs.push('分類・集計がオフなのでレビュー・付け替えは行われません');
+        if (msgs.length) {
+            el.innerHTML = '⚠ ' + msgs.map(m => escapeHtml(m)).join('<br>⚠ ');
+            el.style.display = '';
+        } else {
+            el.style.display = 'none';
+            el.textContent = '';
+        }
+    }
+    ['ki-route-check', 'ki-classify'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', kiUpdateOptionWarning);
+    });
+    kiUpdateOptionWarning();
+
     // ----- jinjer給与インポート プレビュー表示＋API投入 -----
     let kiImportCsvName = '';
 
@@ -2052,25 +2352,36 @@
         } else {
             warnEl.style.display = 'none';
         }
-        const cols = ['社員番号','氏名','夜間当番手当','定常外業務対応手当','支給過不足調整',
-                      '非課税通勤費','立替金（顧客請求分）','立替金','その他','その他手当','現物支給'];
+        // 金額列。左に「社員番号・氏名」、追加投入のときだけ右端に「区分・追加内容」が付く
+        const amountCols = ['夜間当番手当','定常外業務対応手当','支給過不足調整',
+                            '非課税通勤費','立替金（顧客請求分）','立替金','その他','その他手当',
+                            '現物支給','社保調整'];
+        const isAddon = rows[0]['区分'] !== undefined;
+        const cols = ['社員番号','氏名'].concat(amountCols)
+                     .concat(isAddon ? ['区分','追加内容'] : []);
         const table = document.getElementById('ki-import-table');
         const totals = {};
-        cols.slice(2).forEach(c => totals[c] = 0);
+        amountCols.forEach(c => totals[c] = 0);
+        const isAmount = (c) => amountCols.indexOf(c) >= 0;
         let html = '<thead><tr>' + cols.map(c =>
             '<th style="border:1px solid #ccc; padding:3px 6px; background:#2f5597; color:#fff; position:sticky; top:0">' + escapeHtml(c) + '</th>').join('') + '</tr></thead><tbody>';
         for (const r of rows) {
-            html += '<tr>' + cols.map((c, i) => {
+            // 追加分・新規の行は色を付けて、前回のまま流れる行と見分けられるようにする
+            const rowBg = (r['区分'] === '追加あり') ? 'background:#e7f3ff;'
+                        : (r['区分'] === '新規') ? 'background:#e9f7e9;' : '';
+            html += '<tr style="' + rowBg + '">' + cols.map(c => {
                 const v = r[c];
-                if (i >= 2) totals[c] += (v || 0);
-                const style = 'border:1px solid #ddd; padding:2px 6px;' + (i >= 2 ? 'text-align:right' : '');
-                const disp = (i >= 2) ? Number(v || 0).toLocaleString() : escapeHtml(String(v ?? ''));
-                const hl = (i >= 2 && v) ? 'background:#fff7e0;' : '';
+                const amt = isAmount(c);
+                if (amt) totals[c] += (v || 0);
+                const style = 'border:1px solid #ddd; padding:2px 6px;' + (amt ? 'text-align:right' : '');
+                const disp = amt ? Number(v || 0).toLocaleString() : escapeHtml(String(v ?? ''));
+                const hl = (amt && v && !rowBg) ? 'background:#fff7e0;' : '';
                 return '<td style="' + style + hl + '">' + disp + '</td>';
             }).join('') + '</tr>';
         }
         html += '<tr><td colspan="2" style="border:1px solid #ccc; padding:2px 6px; font-weight:bold">合計（' + rows.length + '名）</td>' +
-            cols.slice(2).map(c => '<td style="border:1px solid #ccc; padding:2px 6px; text-align:right; font-weight:bold">' + totals[c].toLocaleString() + '</td>').join('') + '</tr>';
+            amountCols.map(c => '<td style="border:1px solid #ccc; padding:2px 6px; text-align:right; font-weight:bold">' + totals[c].toLocaleString() + '</td>').join('') +
+            (isAddon ? '<td style="border:1px solid #ccc"></td><td style="border:1px solid #ccc"></td>' : '') + '</tr>';
         html += '</tbody>';
         table.innerHTML = html;
         area.style.display = 'block';
@@ -2114,6 +2425,15 @@
                     document.getElementById('ki-import-status').textContent =
                         (data.status === '1') ? '✅ インポート成功（jinjer画面で金額をご確認ください）'
                                               : '✅ 投入予約OK（完了はjinjer画面/通知メールでご確認ください）';
+                    // 台帳に記録できなかったら必ず伝える。黙って進むと「記録されたつもり」で
+                    // 追加投入したときに前回分が落ちる。
+                    const lw = data.ledger_warnings || [];
+                    if (lw.length) {
+                        const warnEl = document.getElementById('ki-import-warnings');
+                        warnEl.innerHTML = '⚠️ ' + lw.map(w => escapeHtml(w)).join('<br>⚠️ ');
+                        warnEl.style.display = 'block';
+                    }
+                    kiLoadImportLedger();
                 } else {
                     document.getElementById('ki-import-status').textContent = '❌ 失敗: ' + ((data.errors || [])[0] || '');
                 }
@@ -2122,6 +2442,130 @@
             } finally {
                 kiImportBtn.disabled = !kiConfirmed.checked;
             }
+        });
+    }
+
+    // ---- 追加投入（前回の投入データを使う）----
+    // 台帳に残した前回の投入内容にイレギュラー経費を足し、全行を作り直して再投入する。
+    // 作ったCSVは上のプレビュー・確認・投入ボタンにそのまま流す（投入経路は1本のまま）。
+    const kiAddonItems = [];
+
+    function kiRenderAddonList() {
+        const el = document.getElementById('ki-addon-list');
+        if (!el) return;
+        if (!kiAddonItems.length) {
+            el.innerHTML = '<span class="hint">まだ追加分がありません。</span>';
+            return;
+        }
+        el.innerHTML = kiAddonItems.map((it, i) =>
+            '<div style="display:flex; gap:8px; align-items:center; padding:2px 0">'
+            + '<span>' + escapeHtml(it.type) + '</span>'
+            + '<span>' + escapeHtml(it.id) + '</span>'
+            + '<span style="font-weight:bold">' + escapeHtml(it.amount) + '円</span>'
+            + '<button type="button" class="btn btn-link ki-addon-del" data-i="' + i + '">削除</button>'
+            + '</div>').join('');
+        el.querySelectorAll('.ki-addon-del').forEach(b => {
+            b.addEventListener('click', () => {
+                kiAddonItems.splice(Number(b.dataset.i), 1);
+                kiRenderAddonList();
+            });
+        });
+    }
+
+    async function kiLoadImportLedger() {
+        const el = document.getElementById('ki-ledger-status');
+        if (!el) return;
+        try {
+            const res = await fetch('/keihi_import_ledger_status');
+            const d = await res.json();
+            if (!d.success) {
+                el.textContent = '⚠ 投入台帳を読めません: ' + (d.error || '');
+                return;
+            }
+            const months = d.months || [];
+            if (!months.length) {
+                el.innerHTML = '投入台帳にまだ記録がありません（'
+                    + escapeHtml(d.ledger_csv || '') + '）。'
+                    + '初回は上の「統合を実行」→ 投入 を行うと記録されます。';
+                return;
+            }
+            el.innerHTML = '<b>投入台帳</b>: '
+                + months.slice(0, 3).map(m =>
+                    escapeHtml(m.month) + ' → ' + m.rows + '名（' + escapeHtml(m.last_at)
+                    + '・' + escapeHtml(m.last_result) + '）').join(' ／ ');
+            if (!document.getElementById('ki-addon-month').value) {
+                document.getElementById('ki-addon-month').value = months[0].month;
+            }
+        } catch (e) {
+            el.textContent = '⚠ 投入台帳の状態を取得できませんでした: ' + e.message;
+        }
+    }
+
+    const kiAddonAdd = document.getElementById('ki-addon-add');
+    if (kiAddonAdd) {
+        kiAddonAdd.addEventListener('click', () => {
+            const id = document.getElementById('ki-addon-id').value.trim();
+            const amount = document.getElementById('ki-addon-amount').value.trim();
+            if (!id || !amount) { alert('社員番号と金額を入力してください'); return; }
+            kiAddonItems.push({type: document.getElementById('ki-addon-type').value, id, amount});
+            document.getElementById('ki-addon-id').value = '';
+            document.getElementById('ki-addon-amount').value = '';
+            kiRenderAddonList();
+        });
+        kiRenderAddonList();
+    }
+
+    const kiAddonBtn = document.getElementById('ki-addon-preview-btn');
+    if (kiAddonBtn) {
+        kiAddonBtn.addEventListener('click', async () => {
+            hideError('ki-addon-error-area');
+            const month = document.getElementById('ki-addon-month').value.trim();
+            if (!/^\d{4}-\d{2}$/.test(month)) {
+                showError('ki-addon-error-area', ['対象月を YYYY-MM 形式で入力してください（例: 2026-07）']);
+                return;
+            }
+            document.getElementById('ki-addon-status').textContent = '前回の投入内容とマージ中...';
+            kiAddonBtn.disabled = true;
+            try {
+                const fd = new FormData();
+                fd.append('month', month);
+                fd.append('irregular_items', JSON.stringify(kiAddonItems));
+                fd.append('irregular_file', document.getElementById('ki-addon-file').value);
+                fd.append('import_template_csv',
+                          document.getElementById('ki-import-template-csv').value);
+                const res = await fetch('/expense_import_addon_preview', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success) {
+                    showError('ki-addon-error-area', data.errors || ['追加投入プレビューに失敗しました']);
+                    document.getElementById('ki-addon-status').textContent = '';
+                    return;
+                }
+                // 投入前プレビューへ流す。処理月も合わせておく（投入ボタンはそのまま使える）
+                document.getElementById('ki-import-month').value = data.month || month;
+                renderImportPreview(data);
+                const idl = document.getElementById('ki-import-csv-link');
+                if (idl && data.import_csv_url) {
+                    idl.href = data.import_csv_url;
+                    idl.style.display = 'inline-block';
+                }
+                document.getElementById('ki-addon-status').textContent =
+                    '完了: 前回 ' + data.base_rows + '名 → 投入 ' + (data.import_preview || []).length
+                    + '名（追加・新規 ' + data.added_rows + '名）。下のプレビューを確認して投入してください';
+                document.getElementById('ki-import-area').scrollIntoView({behavior: 'smooth'});
+            } catch (e) {
+                showError('ki-addon-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('ki-addon-status').textContent = '';
+            } finally {
+                kiAddonBtn.disabled = false;
+            }
+        });
+    }
+
+    const kiAddonDetails = document.getElementById('ki-addon-details');
+    if (kiAddonDetails) {
+        // 開いたときに最新の台帳状態を読む（起動時に毎回APIを叩かない）
+        kiAddonDetails.addEventListener('toggle', () => {
+            if (kiAddonDetails.open) kiLoadImportLedger();
         });
     }
 })();

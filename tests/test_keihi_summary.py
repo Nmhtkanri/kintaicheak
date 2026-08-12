@@ -7,6 +7,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.keihi_summary import (  # noqa: E402
@@ -462,6 +464,123 @@ def test_default_route_choice_follows_system_verdict():
     # 計上先を動かせない行は対象外で固定
     assert default_route_choice("★要確認（経路内なのに通勤系以外を選択）",
                                 "対象外（顧客請求分）", False) == "対象外"
+
+
+# ----------------------------------------------------------------------
+# 片側一致（▲）もレビューに出す（2026-08-12 谷津さん決定）
+# ----------------------------------------------------------------------
+
+def _side_match_rows():
+    """乗車だけ／降車だけが登録経路上の行を作る（通勤系・非通勤系の両方）。"""
+    commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "電車"}]
+    rows = [
+        _integrated_transit("2020001", "東京", "新宿", "交通費（電車・バス）"),  # 乗車のみ一致
+        _integrated_transit("2020001", "渋谷", "品川", "通勤定期代"),            # 降車のみ一致
+    ]
+    return evaluate_route_check(rows, commute)
+
+
+def test_route_check_marks_one_side_match_as_reviewable():
+    """片側一致は「参考」ではなく▲要確認。通勤系で申請していても同じ扱い。"""
+    res = _side_match_rows()
+    assert [r["判定"] for r in res] == ["▲要確認（片側のみ一致）"] * 2
+    assert [r["一致"] for r in res] == ["片側一致"] * 2
+
+
+def test_route_choice_keys_include_one_side_matches():
+    from services.keihi_summary import build_route_choice_keys
+    pairs = build_route_choice_keys(_side_match_rows())
+    assert len(pairs) == 2
+    assert all(r["判定"].startswith("▲") for _k, r in pairs)
+
+
+def test_default_route_choice_keeps_applied_side_for_one_side_match():
+    """▲はシステムに判断材料が無いので勝手に動かさない＝申請どおりのまま。"""
+    from services.keihi_summary import default_route_choice
+    assert default_route_choice("▲要確認（片側のみ一致）", "通勤費", True) == "通勤費"
+    assert default_route_choice("▲要確認（片側のみ一致）", "移動交通費", True) == "移動交通費"
+    assert default_route_choice("▲要確認（片側のみ一致）", "対象外（顧客請求分）", False) == "対象外"
+
+
+def test_match_route_choices_requires_one_side_match_rows_too():
+    """▲行の選択が抜けていたら確定させない（★△と同じ全件必須ルール）。"""
+    from services.keihi_summary import build_route_choice_keys, match_route_choices
+    res = _side_match_rows()
+    pairs = build_route_choice_keys(res)
+    matched, errors = match_route_choices(res, [{"key": pairs[0][0], "choice": "通勤費"}])
+    assert errors
+    assert matched == []
+
+
+def test_route_check_sheets_put_one_side_matches_last_and_color_them(tmp_path):
+    from openpyxl import Workbook
+    from services.keihi_summary import add_route_check_sheets
+    commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "電車"}]
+    rows = [
+        _integrated_transit("2020001", "東京", "新宿", "交通費（電車・バス）"),  # ▲
+        _integrated_transit("2020001", "東京", "品川", "交通費（電車・バス）"),  # ★
+        _integrated_transit("2020001", "渋谷", "新宿", "通勤定期代"),            # △
+    ]
+    res = evaluate_route_check(rows, commute)
+    wb = Workbook()
+    summary = add_route_check_sheets(wb, res)
+    assert (summary["flagged_rows"], summary["rev_rows"], summary["side_rows"]) == (1, 1, 1)
+
+    ws = wb["要確認(経路突合)"]
+    verdicts = [ws.cell(row=r, column=14).value for r in range(2, 5)]
+    assert [v[0] for v in verdicts] == ["★", "△", "▲"]      # ★→△→▲の順
+    assert ws.cell(row=4, column=1).fill.fgColor.rgb.endswith("DDEBF7")
+
+
+def test_route_preview_counts_marks_separately(tmp_path):
+    """▲を△に混ぜて数えない（引き算でrev_rowsを出していた箇所の回帰）。"""
+    import csv
+    from services.keihi_summary import run_keihi_route_preview
+    jcsv = tmp_path / "jinjer.csv"
+    with open(jcsv, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(31)])
+        w.writerow(_jinjer_row(emp="2020001", trans="通勤定期代", total="8000",
+                               use="2026/07/01"))
+    commute = [{"社員番号": "2020001", "出発": "東京", "到着": "品川",
+                "経由1": "", "経由2": "", "通勤経路": "", "利用交通機関": "電車"}]
+    res = run_keihi_route_preview(jinjer_csv=jcsv, log_func=lambda m: None,
+                                  commute_rows=commute, travel_members={}, roster={})
+    assert res.ok is True
+    s = res.summary
+    assert s["flagged_rows"] + s["rev_rows"] + s["side_rows"] == s["review_rows"]
+
+
+# ----------------------------------------------------------------------
+# 経路突合・分類をオフにしたときの警告（2026-08-12 谷津さん決定）
+# ----------------------------------------------------------------------
+
+def _minimal_jinjer_csv(tmp_path):
+    import csv
+    jcsv = tmp_path / "jinjer.csv"
+    with open(jcsv, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(31)])
+        w.writerow(_jinjer_row(emp="2020001", trans="通勤定期代", total="8000"))
+    return jcsv
+
+
+@pytest.mark.parametrize("route_check,classify,expected", [
+    (False, True, ["経路突合がオフなので、経路内の移動交通費申請は立替金のままです"]),
+    (True, False, ["分類・集計がオフなのでレビュー・付け替えは行われません"]),
+    (False, False, ["経路突合がオフなので、経路内の移動交通費申請は立替金のままです",
+                    "分類・集計がオフなのでレビュー・付け替えは行われません"]),
+    (True, True, []),
+])
+def test_integration_warns_when_review_is_skipped(tmp_path, route_check, classify, expected):
+    """止めはしないが、付け替えが起きないことは必ず画面に出す。"""
+    from services.keihi_summary import run_keihi_integration
+    res = run_keihi_integration(
+        output_path=tmp_path / "out.xlsx", jinjer_csv=_minimal_jinjer_csv(tmp_path),
+        route_check=route_check, classify=classify, log_func=lambda m: None)
+    assert res.warnings == expected
 
 
 # ----------------------------------------------------------------------

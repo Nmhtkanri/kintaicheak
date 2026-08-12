@@ -576,7 +576,9 @@ def evaluate_route_check(
         elif match in ("一致なし", "通勤経路登録なし") and kikan in COMMUTE_TYPES:
             verdict = "△逆要確認（通勤系なのに登録経路と不一致）"
         elif match == "片側一致":
-            verdict = "参考（片側のみ一致）"
+            # 乗車・降車のどちらかだけが登録経路上。経路内とも経路外とも言い切れないので
+            # 人に判断してもらう（2026-08-12 谷津さん決定。以前は「参考」でレビューに出なかった）
+            verdict = "▲要確認（片側のみ一致）"
         else:
             verdict = "OK（経路外）"
 
@@ -602,6 +604,10 @@ def evaluate_route_check(
 # 選ばせずに黙って落とすと「表に出ていない行がある」ことに気づけないので、行は出して固定表示する。
 ROUTE_CHOICE_VALUES = ("通勤費", "移動交通費", "対象外")
 
+# レビュー表に出す判定の接頭辞。★=経路内なのに通勤系以外 / △=通勤系なのに経路外 /
+# ▲=片側のみ一致。この3つが「人が計上先を選ぶ行」で、OK系は出さない。
+REVIEW_MARKS = ("★", "△", "▲")
+
 
 def default_route_choice(verdict: str, side: str, movable: bool) -> str:
     """レビュー表のプルダウンの初期値を返す。**システムの判定結果に合わせる**。
@@ -614,8 +620,12 @@ def default_route_choice(verdict: str, side: str, movable: bool) -> str:
         → システムは通勤費とみている。初期値は「通勤費」。
     △逆要確認（通勤系なのに登録経路と不一致）
         → システムは通勤ではないとみている。初期値は「移動交通費」。
+    ▲要確認（片側のみ一致）
+        → システムに判断材料が無い。初期値は**申請どおり**（今の計上先のまま）。
+          勝手に動かさず、人が見て違うと思ったときだけ変えてもらう
+          （2026-08-12 谷津さん指定）。
 
-    どちらもシステムの推測なので、人が違うと思えばプルダウンで変えられる。
+    ★△はシステムの推測なので、人が違うと思えばプルダウンで変えられる。
     計上先を動かせない行（顧客請求分など）は「対象外」で固定。
     """
     if not movable:
@@ -634,7 +644,7 @@ def _route_row_label(r: dict) -> str:
 
 def build_route_choice_keys(route_results: list[dict],
                             travel_members: "dict | None" = None) -> list[tuple[str, dict]]:
-    """レビュー対象の★/△行に決定的なキーを振り [(キー, 行)] を返す。
+    """レビュー対象の★/△/▲行に決定的なキーを振り [(キー, 行)] を返す。
 
     キーは 社員番号|利用日|交通機関|金額|乗車場所|降車場所|連番。
     同じ内容の行が複数あっても連番（出現順＝統合一覧表の行順）で区別できる。
@@ -649,7 +659,7 @@ def build_route_choice_keys(route_results: list[dict],
     out: list[tuple[str, dict]] = []
     for r in route_results:
         verdict = str(r.get("判定") or "")
-        if not (verdict.startswith("★") or verdict.startswith("△")):
+        if not verdict.startswith(REVIEW_MARKS):
             continue
         if str(r.get("社員番号") or "") in travel_members:
             continue
@@ -792,8 +802,11 @@ _ROUTE_REVIEW_COLS = ["人間判定", "計上先変更"]
 
 
 def _write_route_sheet(ws, rows: list[dict]) -> None:
-    red = PatternFill("solid", fgColor="FFC7CE")
-    yellow = PatternFill("solid", fgColor="FFEB9C")
+    fills = {
+        "★": PatternFill("solid", fgColor="FFC7CE"),
+        "△": PatternFill("solid", fgColor="FFEB9C"),
+        "▲": PatternFill("solid", fgColor="DDEBF7"),
+    }
     # レビューを通した行があれば、人が何を選んだかを証跡として2列足す
     reviewed = any(k in r for r in rows for k in _ROUTE_REVIEW_COLS)
     cols = _ROUTE_COLS + (_ROUTE_REVIEW_COLS if reviewed else [])
@@ -802,13 +815,10 @@ def _write_route_sheet(ws, rows: list[dict]) -> None:
         c.font = Font(name=FONT, bold=True)
     for r in rows:
         ws.append([r.get(c, "") for c in cols])
-        verdict = r.get("判定", "")
-        if verdict.startswith("★"):
+        fill = fills.get(str(r.get("判定", ""))[:1])
+        if fill:
             for c in ws[ws.max_row]:
-                c.fill = red
-        elif verdict.startswith("△"):
-            for c in ws[ws.max_row]:
-                c.fill = yellow
+                c.fill = fill
     widths = [9, 12, 10, 18, 14, 12, 12, 40, 8, 6, 20, 40, 12, 34, 22, 30]
     for i, w in enumerate(widths[:len(cols)], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -826,9 +836,10 @@ def add_route_check_sheets(wb: Workbook, route_results: list[dict],
     """
     flagged = [x for x in route_results if x["判定"].startswith("★")]
     rev_flagged = [x for x in route_results if x["判定"].startswith("△")]
+    side_flagged = [x for x in route_results if x["判定"].startswith("▲")]
     ws1 = wb.create_sheet("要確認(経路突合)") if index is None \
         else wb.create_sheet("要確認(経路突合)", index)
-    _write_route_sheet(ws1, flagged + rev_flagged)
+    _write_route_sheet(ws1, flagged + rev_flagged + side_flagged)
     ws2 = wb.create_sheet("全交通費行(経路突合)") if index is None \
         else wb.create_sheet("全交通費行(経路突合)", index + 1)
     _write_route_sheet(ws2, route_results)
@@ -848,6 +859,8 @@ def add_route_check_sheets(wb: Workbook, route_results: list[dict],
     return {
         "flagged_rows": len(flagged), "flagged_emps": _emp_count(flagged), "flagged_amount": _sum(flagged),
         "rev_rows": len(rev_flagged), "rev_emps": _emp_count(rev_flagged),
+        "side_rows": len(side_flagged), "side_emps": _emp_count(side_flagged),
+        "side_amount": _sum(side_flagged),
         "total_rows": len(route_results),
     }
 
@@ -871,6 +884,7 @@ class KeihiResult:
     route_moves: list = field(default_factory=list)         # 通勤費↔立替金の付け替え明細
     import_csv_name: str = ""                               # 出力したインポートCSVのファイル名
     sap_dedup: dict = field(default_factory=dict)           # SAP台帳突合の統計（未実施なら空）
+    warnings: list = field(default_factory=list)            # 実行はできたが人に伝えるべきこと
     error: str = ""
     logs: list[str] = field(default_factory=list)
 
@@ -1054,18 +1068,23 @@ def run_keihi_route_preview(
             "移動額": int(round(float(entry.amount or 0))) if entry else 0,
             "既定選択": default_route_choice(r.get("判定", ""), side, movable),
         })
-    flagged = sum(1 for x in review if str(x["判定"]).startswith("★"))
+    # ★△▲はそれぞれ数える（引き算で出すと▲が△に混ざる）
+    def _mark_count(mark: str) -> int:
+        return sum(1 for x in review if str(x["判定"]).startswith(mark))
+
     result.review_rows = review
     result.summary = {
         "review_rows": len(review),
-        "flagged_rows": flagged,
-        "rev_rows": len(review) - flagged,
+        "flagged_rows": _mark_count("★"),
+        "rev_rows": _mark_count("△"),
+        "side_rows": _mark_count("▲"),
         "movable_rows": sum(1 for x in review if x["付替可"]),
         "travel_members": len(travel_members),
         "total_rows": len(route_results),
     }
     log_func(f"[info] 経路突合レビュー対象: {len(review)}行"
-             f"（★{flagged} / △{len(review) - flagged}）")
+             f"（★{result.summary['flagged_rows']} / △{result.summary['rev_rows']}"
+             f" / ▲{result.summary['side_rows']}）")
     result.ok = True
     return result
 
@@ -1121,6 +1140,18 @@ def run_keihi_integration(
         result.error = "少なくとも1つのソースCSVを指定してください。"
         log_func(f"[error] {result.error}")
         return result
+
+    # 経路突合・分類のどちらかを外すと付け替えが一切起きないまま実行できてしまう。
+    # 止めはしない（オフのまま実行する運用がある）が、黙って通すと
+    # 「レビューしたつもり」で立替金のまま投入してしまうので必ず伝える（2026-08-12 谷津さん）。
+    if not route_check:
+        result.warnings.append(
+            "経路突合がオフなので、経路内の移動交通費申請は立替金のままです")
+    if not classify:
+        result.warnings.append(
+            "分類・集計がオフなのでレビュー・付け替えは行われません")
+    for _w in result.warnings:
+        log_func(f"[warn] {_w}")
 
     # --- SAP重複除外: 取込済み費用シート台帳と突合（前々月分の再掲を取込前に落とす）---
     # 判定は3段階（2026-08-06 谷津さん決定）:

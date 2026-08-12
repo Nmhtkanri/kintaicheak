@@ -42,6 +42,8 @@ python -m PyInstaller ^
   --hidden-import services.employee_alias ^
   --hidden-import services.kotsuhi_seisa ^
   --hidden-import services.sap_import_ledger ^
+  --hidden-import services.keihi_import_ledger ^
+  --hidden-import services.shiwake_teiki_append ^
   --hidden-import services.health_hpm_excel ^
   --hidden-import services.health_hpm_master ^
   --hidden-import services.health_hpm_match ^

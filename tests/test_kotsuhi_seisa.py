@@ -7,8 +7,10 @@ import openpyxl
 import pytest
 
 from services.kotsuhi_seisa import (
+    CommuteMaster,
     apply_diff,
     build_limit_over_rows,
+    build_no_commute_rows,
     build_workdays,
     is_company_employee,
     load_limit_exempt_members,
@@ -232,3 +234,147 @@ def test_load_limit_exempt_members_reads_number_and_reason(tmp_path):
 def test_load_limit_exempt_members_returns_empty_when_missing(tmp_path):
     """リストが無くても精査は止めない（超過者が全員 要確認 に出るので気づける）。"""
     assert load_limit_exempt_members(tmp_path / "ない.csv") == {}
+
+
+# ----------------------------------------------------------------------
+# 通勤費申請なしリストの抽出条件
+# （2026-08-12 拡張: 実費申請日数＋テレワーク日数＝出勤日数 なら通過）
+# ----------------------------------------------------------------------
+
+NC_IDX = {"ステータス": 0, "交通機関": 1, "社員番号": 2, "利用日": 3}
+
+
+def _nc_row(kind, emp, date, status="承認完了"):
+    return [status, kind, emp, date]
+
+
+def _nc_workdays(emp="2020001", name="山田 太郎", work=20, tw=0):
+    return {emp: {"氏名": name, "出勤日数": work, "テレワーク日数": tw,
+                  "出社日数": work - tw, "テレワーク実施日": set()}}
+
+
+def _nc_master(*legs):
+    """(社員番号, 経路No, 出発, 到着, 交通機関, 支給間隔, 支給金額) から通勤費シートを作る。"""
+    rows = [("社員番号",) + ("",) * 14]
+    for emp, no, dep, arr, kind, interval, amount in legs:
+        rows.append((emp, "氏名", no, dep, arr, "", "", "", kind, interval, "", amount, "", "", ""))
+    return CommuteMaster(_Sheet(rows))
+
+
+def _no_commute(details, workdays, master=None, target_ids=(), excluded=None):
+    return build_no_commute_rows(details, NC_IDX, master or _nc_master(),
+                                 workdays, set(target_ids), excluded or {})
+
+
+def test_no_commute_excludes_people_who_applied_for_actual_cost_without_telework():
+    """テレワーク0の人は従来どおり、実費申請が1件でもあれば対象外。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", "2026/7/1")]
+    assert _no_commute(details, _nc_workdays(work=20, tw=0)) == []
+
+
+def test_no_commute_excludes_people_who_applied_for_a_commuter_pass():
+    """定期代の申請がある人は定期代突合シートの担当なので出さない（テレワーク有無を問わず）。"""
+    details = [_nc_row("通勤定期代", "2020001", "2026/7/1")]
+    assert _no_commute(details, _nc_workdays(work=20, tw=5)) == []
+
+
+def test_no_commute_keeps_zero_attendance_people():
+    """出勤0でも落とさない（代表取締役・打刻申請なしの人を取りこぼさないため）。"""
+    master = _nc_master(("2020001", 1, "自宅", "本社", "公共交通機関", "毎月", 18570))
+    got = _no_commute([], _nc_workdays(work=0, tw=0), master)
+    assert [(r["判定"], r["確認要否"]) for r in got] == [("マスタから支給", "情報")]
+
+
+def test_no_commute_flags_people_with_no_master_and_no_application():
+    master = _nc_master()
+    got = _no_commute([], _nc_workdays(work=20, tw=0), master)
+    assert got[0]["判定"] == "支給漏れの疑い"
+    assert got[0]["確認要否"] == "要確認"
+
+
+def test_no_commute_passes_when_actual_days_plus_telework_equals_workdays():
+    """実費申請日とテレワーク日で出勤日が全部埋まる人はリストから外す（拡張の本体）。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", f"2026/7/{d}") for d in range(1, 16)]
+    assert _no_commute(details, _nc_workdays(work=20, tw=5)) == []
+
+
+def test_no_commute_counts_round_trip_rows_of_the_same_day_once():
+    """往復で2行に分かれていても同じ利用日なら1日と数える。"""
+    details = []
+    for d in range(1, 16):
+        details += [_nc_row("通勤交通費（実費）", "2020001", f"2026/7/{d}")] * 2
+    assert _no_commute(details, _nc_workdays(work=20, tw=5)) == []
+
+
+def test_no_commute_passes_when_workdays_is_a_float():
+    """出勤日数が数式由来の float でも式判定が成立する。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", f"2026/7/{d}") for d in range(1, 16)]
+    assert _no_commute(details, _nc_workdays(work=20.0, tw=5.0)) == []
+
+
+def test_no_commute_surfaces_partial_telework_people_who_never_applied():
+    """テレワークありでも実費申請ゼロなら、これまで見えなかった支給漏れとして出す。"""
+    master = _nc_master()
+    got = _no_commute([], _nc_workdays(work=20, tw=5), master)
+    assert got[0]["判定"] == "支給漏れの疑い"
+    assert "テレワーク5日" in got[0]["説明"]
+
+
+def test_no_commute_shows_telework_context_for_master_paid_people():
+    master = _nc_master(("2020001", 1, "自宅", "本社", "公共交通機関", "毎月", 18570))
+    got = _no_commute([], _nc_workdays(work=20, tw=5), master)
+    assert got[0]["判定"] == "マスタから支給"
+    assert got[0]["区分"] == "通勤定期代"
+    assert "テレワーク5日" in got[0]["説明"]
+
+
+def test_no_commute_flags_actual_days_over_the_equation():
+    """実費申請＋テレワークが出勤日数を超える＝テレワーク日にも申請している疑い。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", f"2026/7/{d}") for d in range(1, 19)]
+    got = _no_commute(details, _nc_workdays(work=20, tw=5))
+    assert got[0]["判定"] == "実費申請の日数不一致"
+    assert got[0]["確認要否"] == "要確認"
+    assert "出勤20日・テレワーク5日・実費申請18日" in got[0]["説明"]
+    assert "重なっている疑い" in got[0]["説明"]
+
+
+def test_no_commute_flags_actual_days_under_the_equation():
+    """出社日の一部しか申請が無い＝申請漏れの可能性。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", f"2026/7/{d}") for d in range(1, 11)]
+    got = _no_commute(details, _nc_workdays(work=20, tw=5))
+    assert got[0]["判定"] == "実費申請の日数不一致"
+    assert "申請漏れの可能性" in got[0]["説明"]
+
+
+def test_no_commute_ignores_withdrawn_applications():
+    """取下げ・否認の申請は申請したことにしない（式にも申請済み判定にも入れない）。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", f"2026/7/{d}", status="取下げ")
+               for d in range(1, 16)]
+    got = _no_commute(details, _nc_workdays(work=20, tw=5))
+    assert got[0]["判定"] == "支給漏れの疑い"   # 申請ゼロ扱い
+
+
+def test_no_commute_sorts_mismatch_between_missing_and_no_attendance():
+    details = [_nc_row("通勤交通費（実費）", "2020002", "2026/7/1")]
+    workdays = {
+        "2020001": {"氏名": "支給漏れ", "出勤日数": 20, "テレワーク日数": 0,
+                    "出社日数": 20, "テレワーク実施日": set()},
+        "2020002": {"氏名": "日数不一致", "出勤日数": 20, "テレワーク日数": 5,
+                    "出社日数": 15, "テレワーク実施日": set()},
+        "2020003": {"氏名": "勤怠なし", "出勤日数": 0, "テレワーク日数": 0,
+                    "出社日数": 0, "テレワーク実施日": set()},
+        "2020004": {"氏名": "マスタ支給", "出勤日数": 20, "テレワーク日数": 0,
+                    "出社日数": 20, "テレワーク実施日": set()},
+    }
+    master = _nc_master(("2020004", 1, "自宅", "本社", "公共交通機関", "毎月", 18570))
+    got = _no_commute(details, workdays, master)
+    assert [r["判定"] for r in got] == [
+        "支給漏れの疑い", "実費申請の日数不一致", "勤怠実績なし", "マスタから支給"]
+
+
+def test_no_commute_diff_marks_the_new_judgment_rows():
+    """新判定の行も従来どおり前回比が付く（確認要否ベースなので追加改修が要らない）。"""
+    details = [_nc_row("通勤交通費（実費）", "2020001", "2026/7/1")]
+    rows = _no_commute(details, _nc_workdays(work=20, tw=5))
+    apply_diff("通勤費申請なし", rows, {"通勤費申請なし": {"通勤費申請なし|2020001"}}, "確認要否")
+    assert rows[0]["前回比"] == "継続"
