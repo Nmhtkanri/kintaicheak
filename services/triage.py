@@ -25,6 +25,9 @@ LEVEL_WARN = "WARN"
 
 # 出退勤の差異種別（quick_compare の DIFF_KIND_PUNCH_* と一致）
 _PUNCH_KINDS = ("出勤", "退勤")
+# スケジュール開始合わせ（quick_compare の DIFF_KIND_SCHED_START と一致）。
+# 実績が予定より早い日の出勤予定時刻を請求勤怠へ寄せる行＝既定は自動採用。
+_SCHED_START_KIND = "スケジュール開始"
 # 半休（全日のみ自動OK対象。AM/PM半休は要確認に残す）
 _HALF_DAY_TYPES = ("AM有休", "PM有休")
 _FULL_DAY = "全日"
@@ -77,7 +80,7 @@ def classify(
         return (TRIAGE_NEEDS_CHECK, "")
     if hol_type in _HALF_DAY_TYPES:
         return (TRIAGE_NEEDS_CHECK, "")
-    if kind in _PUNCH_KINDS:
+    if kind in _PUNCH_KINDS or kind == _SCHED_START_KIND:
         return (TRIAGE_AUTO_KINTAI, JUDGE_KINTAI)
     # INFOの休憩/総労働 等は手順3で書き戻せず判断対象外 → 参考のみ（要確認に積まない）
     return (TRIAGE_INFO_ONLY, "")

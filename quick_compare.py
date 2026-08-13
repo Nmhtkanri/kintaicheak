@@ -162,6 +162,11 @@ DIFF_KIND_UNMATCHED = "jinjer未登録"
 #   ・請求勤怠側にも勤務が無い欠勤日 → 行が無いので日単位の「欠勤」転記行を1行足す
 DIFF_KIND_ABSENCE = "欠勤"
 DIFF_KIND_NO_PUNCH = "未打刻"
+# 実績（請求勤怠の出勤）がスケジュール開始より早い日（2026-08-13 谷津さん指定）。
+# jinjer はスケジュール軸で集計する項目があるため、実際より遅い予定が残っていると
+# 早出分の扱いがずれる。書き戻し先は打刻ではなく「出勤予定時刻」のみ
+# （quick_export が種別で判別する）。遅刻方向（実績が遅い）はスケジュールを動かさない。
+DIFF_KIND_SCHED_START = "スケジュール開始"
 
 # 差異行を出さない日の条件（2026-07-10 谷津指定）:
 #   ・休日休暇名1 が振休/代休/年次有給の「全日」で、請求勤怠が記載なしまたは0
@@ -973,6 +978,7 @@ def compute_diffs(
 
         # ----- 出勤差異 -----
         diff_in = to_int_diff(krow.get("出勤差分(分)"))
+        punch_in_row_emitted = False   # 出勤の書き戻し行を出した日はスケジュール開始行を出さない
         if skip_in:
             pass
         elif diff_in is not None and diff_in != 0:
@@ -988,6 +994,7 @@ def compute_diffs(
                 **extra,
             ))
             next_id += 1
+            punch_in_row_emitted = True
         elif diff_in is None and k_in and not j_in:
             if missing_kind == DIFF_KIND_ABSENCE:
                 absence_punch_days.add((emp_id, date_iso))
@@ -1004,6 +1011,7 @@ def compute_diffs(
                 **extra,
             ))
             next_id += 1
+            punch_in_row_emitted = True
         elif diff_in is None and j_in and not k_in:
             # 逆向きの片側欠落: jinjer に打刻あり / 請求勤怠側に時刻なし。
             # 請求勤怠が正なら jinjer の打刻は余分なので空で上書きして消す（auto_fix_value=""）。
@@ -1020,6 +1028,34 @@ def compute_diffs(
                 **extra,
             ))
             next_id += 1
+
+        # ----- スケジュール開始が実績より遅い（早出の予定合わせ）-----
+        # 実績（請求勤怠の出勤）がスケジュール開始より早い日は、出勤予定時刻を請求勤怠に
+        # 合わせる行を出す（2026-08-13 谷津さん指定。既定は自動採用＝手順3で書き戻る）。
+        # 出勤の書き戻し行が出た日は出さない: 打刻の人間判断に連動して手順3が予定も
+        # 同期する（quick_export のおまけ同期）ので、別行を出すと判断が割れたとき矛盾する。
+        # 遅刻方向（実績がスケジュールより遅い）は動かさない＝遅刻が隠れるため。
+        if not skip_in and not punch_in_row_emitted and k_in:
+            sched_in_v = str(extra.get("sched_in") or "").strip()
+            sched_out_v = str(extra.get("sched_out") or "").strip()
+            k_in_min = parse_hhmm(k_in)
+            sched_in_min = parse_hhmm(sched_in_v) if sched_in_v else 0
+            # 退勤予定が空の行に出勤予定だけ書くと jinjer が行ごと弾くため、予定が揃う日に限る
+            if sched_out_v and k_in_min and sched_in_min and k_in_min < sched_in_min:
+                rows.append(DiffRow(
+                    row_id=next_id, emp_id=emp_id, name=name, target_date=date_iso,
+                    kind=DIFF_KIND_SCHED_START,
+                    kintai_value=k_in, jinjer_value=sched_in_v,
+                    diff_minutes=str(k_in_min - sched_in_min),
+                    warn_level=LEVEL_INFO,
+                    warn_reason=(f"実績の開始 {k_in} がスケジュール開始 {sched_in_v} より早い"
+                                 " / 出勤予定時刻を請求勤怠に合わせる（打刻は触らない）"),
+                    auto_fix_value=k_in,
+                    finalized=finalized,
+                    source_file=source_file,
+                    **extra,
+                ))
+                next_id += 1
 
         # ----- 退勤差異 -----
         diff_out = to_int_diff(krow.get("退勤差分(分)"))
@@ -1429,6 +1465,11 @@ STRIPE_FILL = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="s
 
 
 def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry], month_label: str) -> None:
+    # スケジュール開始合わせは差異一覧のシートに出さない（確認対象を増やさない・
+    # 2026-08-13 谷津さん指定）。別シートに参考として記録し、手順3が黙って
+    # 出勤予定時刻を合わせる（人間判断は不要）。
+    sched_aligns = [r for r in diff_rows if r.kind == DIFF_KIND_SCHED_START]
+    diff_rows = [r for r in diff_rows if r.kind != DIFF_KIND_SCHED_START]
     # トリアージ区分で並べ替え（要確認を上へ。同区分内は元の順序を保持＝安定ソート）
     diff_rows = sorted(diff_rows, key=lambda r: TRIAGE_ORDER.get(r.triage, 9))
     needs_cnt = sum(1 for r in diff_rows if r.triage == TRIAGE_NEEDS_CHECK)
@@ -1448,6 +1489,7 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         ("自動採用(請求勤怠) 件数", auto_kintai_cnt),
         ("参考のみ 件数（判断不要）", info_only_cnt),
         ("出勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_IN)),
+        ("スケジュール開始合わせ件数（別シート・自動反映）", len(sched_aligns)),
         ("退勤差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_PUNCH_OUT)),
         ("総労働時間差異件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_TOTAL)),
         ("欠勤件数", sum(1 for r in diff_rows if r.kind == DIFF_KIND_ABSENCE)),
@@ -1573,6 +1615,32 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     }
     for i, header in enumerate(DIFF_COLUMNS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width_map.get(header, 14)
+
+    # スケジュール開始合わせ（参考シート。手順3が読んで出勤予定時刻を自動で合わせる）
+    if sched_aligns:
+        ws_sa = wb.create_sheet("スケジュール開始合わせ")
+        sa_headers = ["従業員ID", "氏名", "対象日付", "現在の予定開始",
+                      "新しい開始(請求勤怠)", "説明"]
+        for c_idx, h in enumerate(sa_headers, start=1):
+            c = ws_sa.cell(row=1, column=c_idx, value=h)
+            c.fill = HEADER_FILL
+            c.font = Font(bold=True)
+        for r_idx, r in enumerate(sched_aligns, start=2):
+            ws_sa.cell(row=r_idx, column=1, value=r.emp_id)
+            ws_sa.cell(row=r_idx, column=2, value=r.name)
+            ws_sa.cell(row=r_idx, column=3, value=r.target_date)
+            ws_sa.cell(row=r_idx, column=4, value=r.jinjer_value)
+            c5 = ws_sa.cell(row=r_idx, column=5, value=r.kintai_value)
+            c5.number_format = "@"   # Excelの時刻型変換を防ぐ（手入力列と同じ理由）
+            ws_sa.cell(row=r_idx, column=6, value=r.warn_reason)
+        for i, w in enumerate([12, 16, 12, 14, 18, 60], start=1):
+            ws_sa.column_dimensions[get_column_letter(i)].width = w
+        ws_sa.freeze_panes = "A2"
+        note = ws_sa.cell(row=len(sched_aligns) + 3, column=1,
+                          value="※このシートの確認・編集は不要です。手順3の書き戻しが"
+                                "出勤予定時刻だけを上の値に自動で合わせます（打刻は触りません）。"
+                                "合わせたくない行は削除してください。")
+        note.font = Font(color="808080")
 
     # 取込ログ
     ws_log = wb.create_sheet("取込ログ")

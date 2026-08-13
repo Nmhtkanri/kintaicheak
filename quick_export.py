@@ -78,6 +78,11 @@ DIFF_KIND_TOTAL = "総労働時間"
 # 警告理由で解決できない「欠勤」は日単位の転記行＝書き戻し対象外。
 DIFF_KIND_ABSENCE = "欠勤"
 DIFF_KIND_NO_PUNCH = "未打刻"
+DIFF_KIND_SCHED_START = "スケジュール開始"  # 出勤予定時刻のみ書き戻す（quick_compare と一致）
+# スケジュール開始合わせの参考シート名（quick_compare.write_excel と一致）。
+# 差異一覧の行としては出さず（確認対象を増やさない・2026-08-13 谷津さん指定）、
+# このシートを読んで出勤予定時刻を黙って合わせる。
+SCHED_ALIGN_SHEET = "スケジュール開始合わせ"
 
 # 人間判断の値。新ラベル: 「請求勤怠」=請求勤怠を正としてjinjerへ書き戻す（旧「承認」）/
 # 「jinjer勤怠」=jinjerを正（書き戻さない・旧「却下」）/「保留」。
@@ -149,10 +154,12 @@ class Stats:
     approved_punch_out: int = 0
     approved_break: int = 0
     approved_total: int = 0
+    approved_sched_start: int = 0  # スケジュール開始合わせの採用行
     # 実際の上書き処理結果
     overwritten_punch_in: int = 0
     overwritten_punch_out: int = 0
     overwritten_sched_in: int = 0  # 出勤採用に合わせてスケジュール開始（出勤予定時刻）も更新した件数
+    overwritten_sched_start: int = 0  # 「スケジュール開始」行の反映＝出勤予定時刻のみ更新（打刻は触らない）
     skipped_break: int = 0  # 承認されたが上書きしなかった
     skipped_total: int = 0
     overwritten_break_start: int = 0
@@ -508,7 +515,9 @@ def load_approved_rows(
         ))
 
         # 種別別集計
-        if kind == DIFF_KIND_PUNCH_IN:
+        if kind == DIFF_KIND_SCHED_START:
+            stats.approved_sched_start += 1
+        elif kind == DIFF_KIND_PUNCH_IN:
             stats.approved_punch_in += 1
         elif kind == DIFF_KIND_PUNCH_OUT:
             stats.approved_punch_out += 1
@@ -638,6 +647,77 @@ def build_jinjer_row_index(
 # CSV 上書き
 # ----------------------------------------------------------------------
 
+def load_sched_aligns(diff_xlsx: Path) -> list[dict]:
+    """「スケジュール開始合わせ」シートを読む（無ければ空＝旧フォーマット互換）。
+
+    戻り値: [{"emp", "date_iso", "new_start", "name"}, ...]
+    """
+    xl = pd.ExcelFile(diff_xlsx)
+    if SCHED_ALIGN_SHEET not in xl.sheet_names:
+        return []
+    df = pd.read_excel(xl, sheet_name=SCHED_ALIGN_SHEET, dtype=object)
+    out: list[dict] = []
+    for _, row in df.iterrows():
+        emp = clean_excel_text(row.get("従業員ID"))
+        date_iso = normalize_date_iso(row.get("対象日付"))
+        new_start = clean_excel_text(row.get("新しい開始(請求勤怠)"))
+        if emp and date_iso and new_start:
+            out.append({"emp": emp, "date_iso": date_iso, "new_start": new_start,
+                        "name": clean_excel_text(row.get("氏名"))})
+    return out
+
+
+def apply_sched_aligns(
+    headers: list[str],
+    rows: list[list],
+    row_index: dict,
+    aligns: list[dict],
+    held_days: set[tuple[str, str]],
+    stats: "Stats",
+    changed_days: set[tuple[str, str]],
+) -> None:
+    """スケジュール開始合わせを jinjer 行へ反映する（出勤予定時刻のみ・打刻は触らない）。
+
+    方向ガード: 新しい開始が現在の予定より早いときだけ書く（遅刻方向は動かさない、
+    という検知時のルールを適用時にも守る＝差異一覧が古い場合の保険）。
+    保留の日は書かない（jinjer手修正の保護と同じ扱い）。
+    """
+    sched_in_col = headers.index(JINJER_COL_SCHED_IN) if JINJER_COL_SCHED_IN in headers else None
+    sched_out_col = headers.index(JINJER_COL_SCHED_OUT) if JINJER_COL_SCHED_OUT in headers else None
+    if sched_in_col is None or sched_out_col is None:
+        if aligns:
+            stats.warnings.append(
+                f"スケジュール開始合わせ {len(aligns)} 件がありますが、jinjer CSV に "
+                f"出勤予定時刻/退勤予定時刻の列が無いため反映できません")
+        return
+    for a in aligns:
+        key = (a["emp"], a["date_iso"])
+        if key in held_days:
+            continue   # 保留日はツールで触らない（既存の保護と同じ）
+        idx = row_index.get(key)
+        if idx is None:
+            stats.not_matched += 1
+            stats.warnings.append(
+                f"スケジュール開始合わせ: jinjer CSV に該当行なし "
+                f"(emp={a['emp']} date={a['date_iso']} {a['name']})")
+            continue
+        cur = _hhmm_to_minutes(rows[idx][sched_in_col])
+        new = _hhmm_to_minutes(a["new_start"])
+        if new is None:
+            stats.warnings.append(
+                f"スケジュール開始合わせ: 時刻を解釈できません {a['new_start']!r} "
+                f"(emp={a['emp']} date={a['date_iso']} {a['name']})")
+            continue
+        # 退勤予定が空の行に出勤予定だけ書くと jinjer が行ごと弾く
+        if not (rows[idx][sched_out_col] or "").strip():
+            continue
+        if cur is None or new >= cur:
+            continue   # 予定が既に同じ/より早い・遅刻方向 → 動かさない
+        rows[idx][sched_in_col] = a["new_start"]
+        stats.overwritten_sched_start += 1
+        changed_days.add(key)
+
+
 def apply_approved_rows(
     headers: list[str],
     rows: list[list[str]],
@@ -737,6 +817,39 @@ def apply_approved_rows(
                 stats.warnings.append(
                     f"行ID={app.source_diff_row_id} 総労働時間差異が承認されましたが、自動反映はスキップしました "
                     f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
+                )
+            continue
+
+        if app.kind == DIFF_KIND_SCHED_START:
+            # 実績（請求勤怠の出勤）がスケジュール開始より早い日の予定合わせ。
+            # 打刻には一切触らず、出勤予定時刻だけを採用値へ書き換える（2026-08-13 谷津さん指定）。
+            key = (app.emp_id, app.target_date_iso)
+            idx = row_index.get(key)
+            if idx is None:
+                stats.not_matched += 1
+                stats.warnings.append(
+                    f"行ID={app.source_diff_row_id} jinjer CSV に該当行なし "
+                    f"(emp={app.emp_id} date={app.target_date_iso} {app.name})"
+                )
+                continue
+            new_sched = app.manual_fix_value or app.auto_fix_value
+            _warn_if_not_hhmm(stats, app.source_diff_row_id, "出勤予定時刻への書込値", new_sched,
+                              app.emp_id, app.target_date_iso, app.name)
+            # 退勤予定が空の行に出勤予定だけ書くと jinjer が行ごと弾くため、揃っている行に限る
+            # （quick_compare 側でも同条件で行を出すが、二重の防御）
+            if (
+                new_sched and sched_in_col is not None
+                and sched_out_col is not None
+                and (rows[idx][sched_out_col] or "").strip()
+            ):
+                rows[idx][sched_in_col] = new_sched
+                stats.overwritten_sched_start += 1
+                changed_days.add(key)
+            else:
+                stats.warnings.append(
+                    f"行ID={app.source_diff_row_id} 出勤予定時刻を更新できません"
+                    f"（退勤予定が空 か 予定列なし）"
+                    f" (emp={app.emp_id} date={app.target_date_iso} {app.name})"
                 )
             continue
 
@@ -918,6 +1031,7 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"{mode} ===== 実際の上書き結果 =====")
     print(f"  出勤1 上書き         : {stats.overwritten_punch_in}")
     print(f"  └ 出勤予定時刻も更新 : {stats.overwritten_sched_in}")
+    print(f"  スケジュール開始合わせ: {stats.overwritten_sched_start}（出勤予定時刻のみ・打刻は触らない）")
     print(f"  退勤1 上書き         : {stats.overwritten_punch_out}")
     print(f"  休憩1 上書き         : {stats.overwritten_break_start}")
     print(f"  復帰1 上書き         : {stats.overwritten_break_end}")
@@ -1009,6 +1123,18 @@ def run_quick_export(
     log_func(f"[info] (従業員ID, 年月日) インデックス {len(row_index)} 件")
 
     changed_days = apply_approved_rows(headers, rows, row_index, approved, stats, manual_breaks)
+
+    # スケジュール開始合わせ（別シート）: 実績が予定より早い日の出勤予定時刻を黙って合わせる。
+    # 差異一覧の行ではないので人間判断は無い＝保留日だけ除外して自動反映する。
+    try:
+        sched_aligns = load_sched_aligns(diff_xlsx)
+    except Exception as e:  # noqa: BLE001 — 参考シートの読み損ねで全体を止めない
+        sched_aligns = []
+        stats.warnings.append(f"スケジュール開始合わせシートの読み込みに失敗: {e}")
+    if sched_aligns:
+        apply_sched_aligns(headers, rows, row_index, sched_aligns, held_days, stats, changed_days)
+        log_func(f"[info] スケジュール開始合わせ: {stats.overwritten_sched_start} 件を反映"
+                 f"（出勤予定時刻のみ・打刻は触らない）")
 
     # 変更した日の行だけを出力する（無変更行はjinjer側の既存不整合で弾かれて
     # エラー通知が汚れるだけ。保留の日も変更されないので自然に出力から外れる＝
