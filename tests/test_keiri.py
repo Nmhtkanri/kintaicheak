@@ -303,6 +303,42 @@ class ChoseiTeateMoveTests(unittest.TestCase):
         self.assertEqual(calc_zantei(pi, self._master(key)), 25000)
 
 
+class MinashiKyuMonthCutoffTests(unittest.TestCase):
+    """時給制の「みなし給」(allowance2) は 2026-08 支給分から暫定に含める。
+
+    2026-08 に jinjer 側で時給制の支給項目を 1つずつ後ろへずらした際、空いた allowance2 に
+    「みなし給」という名前が付いた（時給制→月給制へ体系変更した人に入る項目・谷津さん確認）。
+    ただし 2026-07 以前の同じスロットには旧「前月超過勤務」の金額が残っている
+    （2026-07 実測 29名 394,777円）ので、月で切らないと過去月の再生成で過大計上になる。
+    """
+
+    def _pi(self, value, label="みなし給"):
+        return {"salary_items": [{"id": "allowance2", "value": value,
+                                  "salary_system_label": label}]}
+
+    def _master(self):
+        return {"z_jinkenhi": [{"source_key": "salary_items:allowance2"}]}
+
+    def test_counted_from_202608(self):
+        for month in ("2026-08", "2026-09", "2027-01"):
+            self.assertEqual(calc_zantei(self._pi(30000), self._master(), month=month),
+                             30000, month)
+
+    def test_not_counted_before_202608(self):
+        for month in ("2026-07", "2026-01", "2025-12"):
+            self.assertEqual(calc_zantei(self._pi(30000), self._master(), month=month),
+                             0, month)
+
+    def test_month_unknown_falls_back_to_excluded(self):
+        """月が分からないときは過去月の再現側に倒す（入れない）。"""
+        self.assertEqual(calc_zantei(self._pi(30000), self._master()), 0)
+
+    def test_monthly_minashi_unaffected_by_cutoff(self):
+        """月給制のみなし手当は従来どおり月に関係なく暫定に入る。"""
+        pi = self._pi(30000, label="当月みなし時間外手当")
+        self.assertEqual(calc_zantei(pi, self._master(), month="2026-01"), 30000)
+
+
 class MasterChoseiTeateRowTests(unittest.TestCase):
     """マッピングマスタ側も両方の id を暫定・人件費へ向けておく（落ちた原因はマスタ側）。"""
 

@@ -178,6 +178,11 @@ ZANTEI_FIXED_KEYS = {
 }
 # allowance2 だけは体系で意味が変わるので体系別名で判定する
 ZANTEI_LABELS = {"当月みなし時間外手当", "みなし手当", "当月みなし深夜手当"}
+# 支給月で切り替わる暫定ラベル {体系別名: この支給月以降だけ暫定に含める}。
+#   時給制の「みなし給」は 2026-08 支給分から使われる項目で、時給制→月給制へ体系変更した
+#   人に入る（谷津さん 2026-08-13）。同じ allowance2 の 2026-07 以前には旧「前月超過勤務」の
+#   金額が残っている（2026-07 実測: 29名 394,777円）ため、月で切らずに含めると過大計上になる。
+ZANTEI_LABELS_FROM = {"みなし給": "2026-08"}
 # 支給項目だが freee には計上しない（体系別名で判定）
 #   前月超過勤務・基礎時給 … 時給制の情報項目（freee 実データでも未計上）
 # ⚠ ここが「前月」始まりの名前に依存している。jinjer 側で時給制の項目を別 ID へ移すときは
@@ -407,11 +412,19 @@ def item_label(item):
             or str(item.get("label") or "").strip())
 
 
-def is_zantei_item(item, source_key):
-    """暫定支給額（基本給＋みなし時間外＋みなし深夜＋調整＋リーダー＋役職）に含める項目か。"""
+def is_zantei_item(item, source_key, month=None):
+    """暫定支給額（基本給＋みなし時間外＋みなし深夜＋調整＋リーダー＋役職）に含める項目か。
+
+    month（支給月 'YYYY-MM'）を渡すと ZANTEI_LABELS_FROM の月切り替えが効く。
+    渡さないと月依存のラベルは含めない（過去月をそのまま再現する側に倒す）。
+    """
     if source_key in ZANTEI_FIXED_KEYS:
         return True
-    return item_label(item) in ZANTEI_LABELS
+    label = item_label(item)
+    if label in ZANTEI_LABELS:
+        return True
+    since = ZANTEI_LABELS_FROM.get(label)
+    return bool(since and month and str(month) >= since)
 
 
 def is_skip_item(item):
@@ -443,12 +456,12 @@ def sagaku_dupe_keys(pi):
     return {k for k, v in nonzero.items() if abs(v - sagaku) < 0.5}
 
 
-def calc_zantei(pi, master, detail=None):
+def calc_zantei(pi, master, detail=None, month=None):
     """暫定支給額（基本給＋みなし時間外＋みなし深夜＋調整＋リーダー＋役職）を返す。"""
     total = 0.0
     for r in master["z_jinkenhi"]:
         it = pi_item(pi, r["source_key"])
-        if it is None or not is_zantei_item(it, r["source_key"]):
+        if it is None or not is_zantei_item(it, r["source_key"], month):
             continue
         v = to_number(it.get("value")) or 0.0
         total += v
@@ -758,7 +771,7 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
         # （月中異動者は異動後の部門になる。稲田2026009・柳場2026010 の 7/16 異動で確認）
         bumon_m = resolver.bumon(emp, month_end_m, f"{month}暫定")
         rows = []
-        base = calc_zantei(pi, master)
+        base = calc_zantei(pi, master, month=month)
         if base:
             rows.append(detail_row(jinkenhi_account(emp), "対象外", base,
                                    resolver.jinkenhi_item(emp, month_end_m), bumon_m, name))
@@ -828,7 +841,7 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
             if it is None:
                 continue
             v = to_number(it.get("value")) or 0.0
-            if not v or is_zantei_item(it, r["source_key"]) or is_skip_item(it):
+            if not v or is_zantei_item(it, r["source_key"], month) or is_skip_item(it):
                 continue
             key = r["source_key"]
             if key in dupes:
