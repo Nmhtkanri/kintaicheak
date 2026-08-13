@@ -53,6 +53,7 @@ from quick_compare import run_quick_compare
 from quick_export import run_quick_export
 from services.kintai_import_runner import run_api_import
 from services.schedule_import_runner import run_schedule_api_import
+from services.schedule_start_edit import run_schedule_start_edit
 from services.batch_runner import run_batch_compare
 from services.expense_check import run_telework_export
 from services.keihi_summary import run_keihi_integration, run_keihi_route_preview
@@ -1660,6 +1661,74 @@ def route_schedule_api_import():
     threading.Thread(target=_worker, daemon=True).start()
     logger.info("schedule_api_import job %s 開始 (files=%s month=%s execute=%s)",
                 job_id, csv_filenames, month, execute_flag)
+    return jsonify({"success": True, "job_id": job_id})
+
+
+# ----------------------------------------------------------------------
+# スケジュール開始時刻のピンポイント修正（2026-08-13 谷津さん依頼）
+#   「書く」階層: dry-run既定 → fingerprint一致でのみ実行 → 実行ログ保存。
+#   ジョブ辞書・ロックは他のAPI投入と共有し、jinjer側の同時予約1件制限が
+#   モード横断で効くようにする。ステータス取得も /api_import_status を共用。
+# ----------------------------------------------------------------------
+@app.route("/schedule_start_edit", methods=["POST"])
+def route_schedule_start_edit():
+    """「社員番号, 日付, 新開始時刻」の複数行を受けて開始時刻だけを書き換える。
+
+    フォーム:
+      - edits       : 複数行テキスト（1行 = 社員番号, 日付, 新開始時刻）
+      - execute     : "1" なら投入、未指定/0 はプレビュー（dry-run）
+      - fingerprint : execute=1 のとき必須。プレビューが返した値
+    """
+    edits_text = request.form.get("edits") or ""
+    execute_flag = request.form.get("execute") == "1"
+    fingerprint = (request.form.get("fingerprint") or "").strip()
+    if not edits_text.strip():
+        return jsonify({"success": False, "errors": ["編集する行が入力されていません"]}), 400
+    if execute_flag and not fingerprint:
+        return jsonify({"success": False,
+                        "errors": ["書き込みにはプレビューのfingerprintが必要です。"
+                                   "先に①プレビューを実行してください"]}), 400
+
+    with _api_import_guard:
+        if any(not j["done"] for j in _api_import_jobs.values()):
+            return jsonify({"success": False,
+                            "errors": ["別のAPI投入が実行中です（jinjer側も同時予約1件の"
+                                       "制限があります）。完了を待ってください"]}), 409
+        job_id = uuid.uuid4().hex
+        job = {"done": False, "ok": False, "log": [], "result": None}
+        _api_import_jobs[job_id] = job
+
+    def _worker():
+        try:
+            r = run_schedule_start_edit(
+                edits_text,
+                dry_run=not execute_flag,
+                expected_fingerprint=fingerprint if execute_flag else "",
+                executor_id=Config.JINJER_IMPORT_EXECUTOR_ID,
+                output_dir=_Path(Config.OUTPUT_FOLDER),
+                log_func=lambda m: job["log"].append(m),
+            )
+            snap = os.path.basename(r.snapshot_path) if r.snapshot_path else ""
+            job["ok"] = r.ok
+            job["result"] = {
+                "mode": "schedule_start_edit",
+                "dry_run": r.dry_run,
+                "preview": r.preview[:300],
+                "errors": r.errors,
+                "change_count": r.change_count,
+                "fingerprint": r.fingerprint,
+                "import_status": r.import_status,
+                "verify_ng": r.verify_ng,
+                "snapshot_url": f"/download/{snap}" if snap else None,
+            }
+        except Exception as e:  # noqa: BLE001 — ジョブ内の失敗はログで返す
+            logger.exception("schedule_start_edit failed")
+            job["log"].append(f"[ERROR] {e}")
+        finally:
+            job["done"] = True
+
+    threading.Thread(target=_worker, daemon=True).start()
+    logger.info("schedule_start_edit job %s 開始 (execute=%s)", job_id, execute_flag)
     return jsonify({"success": True, "job_id": job_id})
 
 

@@ -287,6 +287,34 @@
     </div>
 
     <!-- ============================================================ -->
+    <!-- スケジュール開始時刻のピンポイント修正（csv_export モードの独立カード） -->
+    <!--   「書く」階層: プレビュー→fingerprint一致でのみ実行。            -->
+    <!--   開始だけ差し替え、退勤予定・休憩予定は現状維持で送る（丸ごと置換対策）-->
+    <!-- ============================================================ -->
+    <div class="workflow-card mode-accent acc-schedule" id="sse-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-schedule">🕘</span>
+            <div>
+                <div class="card-title">スケジュール開始時刻の修正（ピンポイント）</div>
+                <p class="card-lead">「社員番号, 日付, 新しい開始時刻」を1行1件で入力。開始だけを書き換え、退勤予定・休憩予定はそのまま維持します（雛形は使いません）。休暇がある日はエラーで止まります。</p>
+            </div>
+        </div>
+        <textarea id="sse-edits" rows="5" style="width:100%; font-family:Consolas,monospace"
+                  placeholder="2020001, 2026/8/14, 9:30&#10;2023016, 2026/8/15, 10:00"></textarea>
+        <div style="margin-top:8px">
+            <button type="button" id="sse-preview-btn" class="btn">① プレビュー（jinjerの現状と突き合わせ）</button>
+            <button type="button" id="sse-execute-btn" class="btn btn-primary" disabled>② この内容で書き込む</button>
+            <span id="sse-status" style="margin-left:8px"></span>
+        </div>
+        <div id="sse-error-area" class="alert alert-danger" style="display:none; margin-top:8px"></div>
+        <div id="sse-preview-area" style="display:none; margin-top:8px">
+            <div class="table-wrap"><table id="sse-preview-table"></table></div>
+        </div>
+        <pre id="sse-log" style="display:none; margin-top:8px; max-height:180px; overflow:auto; background:#f7f7f7; padding:8px"></pre>
+        <div id="sse-result" style="display:none; margin-top:8px"></div>
+    </div>
+
+    <!-- ============================================================ -->
     <!-- 一括モード — batch_compare（差異一覧を一発生成）                 -->
     <!-- ============================================================ -->
     <div class="workflow-card mode-accent acc-match" id="batch-compare-card">
@@ -1501,6 +1529,97 @@
             qeApiBtn.disabled = false;
         }
     });
+
+    // ----- スケジュール開始時刻のピンポイント修正 -----
+    //   プレビューで返る fingerprint を実行時に添えて送る（承認後に jinjer 側が
+    //   変わっていたらサーバが弾く）。入力を書き換えたら fingerprint を無効化して
+    //   「プレビューし直さないと実行できない」状態に戻す。
+    const sseEdits = document.getElementById('sse-edits');
+    const ssePreviewBtn = document.getElementById('sse-preview-btn');
+    const sseExecuteBtn = document.getElementById('sse-execute-btn');
+    let sseFingerprint = '';
+    async function runSse(execute) {
+        hideError('sse-error-area');
+        const statusEl = document.getElementById('sse-status');
+        const logEl = document.getElementById('sse-log');
+        const resultEl = document.getElementById('sse-result');
+        const prevArea = document.getElementById('sse-preview-area');
+        if (execute && !sseFingerprint) return;
+        if (execute && !confirm('プレビューの内容で jinjer のスケジュール開始時刻を書き換えます。\n' +
+                                '（変更前の控えは実行ログCSVに残ります）\n\nよろしいですか？')) return;
+        ssePreviewBtn.disabled = true; sseExecuteBtn.disabled = true;
+        statusEl.textContent = execute ? '書き込み中…（反映確認まで数分かかります）' : 'プレビュー作成中…';
+        logEl.style.display = 'none'; logEl.textContent = '';
+        resultEl.style.display = 'none';
+        try {
+            const fd = new FormData();
+            fd.append('edits', sseEdits.value);
+            if (execute) { fd.append('execute', '1'); fd.append('fingerprint', sseFingerprint); }
+            const res = await fetch('/schedule_start_edit', {method: 'POST', body: fd});
+            const data = await res.json();
+            if (!data.success) {
+                showError('sse-error-area', data.errors || ['開始に失敗しました']);
+                statusEl.textContent = '';
+                ssePreviewBtn.disabled = false;
+                sseExecuteBtn.disabled = !sseFingerprint;
+                return;
+            }
+            const timer = setInterval(async () => {
+                try {
+                    const sres = await fetch('/api_import_status/' + data.job_id);
+                    const s = await sres.json();
+                    if (!s.success) return;
+                    if ((s.log || []).length) {
+                        logEl.style.display = 'block';
+                        logEl.textContent = (s.log || []).join('\n');
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+                    if (!s.done) return;
+                    clearInterval(timer);
+                    ssePreviewBtn.disabled = false;
+                    const r = s.result || {};
+                    if ((r.errors || []).length) showError('sse-error-area', r.errors);
+                    if ((r.preview || []).length) {
+                        const cols = ['従業員ID', '氏名', '日付', '現在の開始', '新しい開始',
+                                      '終了(維持)', '休憩(維持)', '状態'];
+                        document.getElementById('sse-preview-table').innerHTML =
+                            '<tr>' + cols.map(c => '<th>' + c + '</th>').join('') + '</tr>' +
+                            r.preview.map(row =>
+                                '<tr>' + cols.map(c => '<td>' + (row[c] ?? '') + '</td>').join('') + '</tr>'
+                            ).join('');
+                        prevArea.style.display = 'block';
+                    }
+                    if (!execute) {
+                        sseFingerprint = (s.ok && (r.change_count || 0) > 0) ? (r.fingerprint || '') : '';
+                        sseExecuteBtn.disabled = !sseFingerprint;
+                        statusEl.textContent = s.ok
+                            ? `プレビューOK: 変更 ${r.change_count} 件。表を確認して②を押してください`
+                            : '⚠️ エラーを直して、もう一度プレビューしてください';
+                    } else {
+                        sseFingerprint = ''; sseExecuteBtn.disabled = true;
+                        statusEl.textContent = s.ok ? '✅ 書き込み完了（反映検証OK）' : '⚠️ 完了（要確認あり）';
+                        let html = `インポート結果: ${r.import_status === '1' ? '成功' : (r.import_status || '不明')}`;
+                        if ((r.verify_ng || []).length) html += '<br>⚠️ ' + r.verify_ng.join('<br>⚠️ ');
+                        if (r.snapshot_url) {
+                            html += `<br><a class="btn btn-download" style="margin-top:6px" href="${r.snapshot_url}">` +
+                                    '📥 実行ログ（変更前の控え）をダウンロード</a>';
+                        }
+                        resultEl.innerHTML = html;
+                        resultEl.style.display = 'block';
+                    }
+                } catch (e) { /* ポーリング失敗は次回に任せる */ }
+            }, 2500);
+        } catch (e) {
+            showError('sse-error-area', ['通信エラー: ' + e.message]);
+            statusEl.textContent = '';
+            ssePreviewBtn.disabled = false;
+        }
+    }
+    if (ssePreviewBtn) {
+        ssePreviewBtn.addEventListener('click', () => runSse(false));
+        sseExecuteBtn.addEventListener('click', () => runSse(true));
+        sseEdits.addEventListener('input', () => { sseFingerprint = ''; sseExecuteBtn.disabled = true; });
+    }
 
     // ----- 経費チェック（テレワーク日数）-----
     const exRunBtn = document.getElementById('ex-run-btn');

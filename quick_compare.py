@@ -1421,6 +1421,11 @@ TRIAGE_FILL = {
     TRIAGE_AUTO_KINTAI: PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"),
     TRIAGE_INFO_ONLY: PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"),
 }
+# 行の縞模様（先頭データ行から 緑→白 の繰り返し）。横に長いシートで行を目で
+# 追いやすくする（2026-08-13 谷津さん要望）。警告理由・確認区分など意味のある色は
+# 縞を塗ったあとに個別セルへ上塗りするので、そちらが優先で残る。
+# 緑はトリアージの E2EFDA / INFO の C6EFCE と紛れない薄さにしてある。
+STRIPE_FILL = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
 
 
 def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry], month_label: str) -> None:
@@ -1468,8 +1473,9 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         c.font = Font(bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center")
     ws.auto_filter.ref = f"A1:{get_column_letter(len(DIFF_COLUMNS))}1"
-    # 識別4列(従業員ID/氏名/対象日付/差異種別=A〜D)とヘッダー行を固定。右に行っても誰の行か見失わない。
-    ws.freeze_panes = "E2"
+    # A〜G列(従業員ID/氏名/対象日付/差異種別/請求勤怠値/jinjer値/差分(分))とヘッダー行を固定。
+    # 右へスクロールしても差異の中身ごと見える（2026-08-13 谷津さん要望で E2 → H2 に拡大）。
+    ws.freeze_panes = "H2"
 
     # データ行（列名→値の対応で書き込み、列順の変更に強くする）
     for r_idx, drow in enumerate(diff_rows, start=2):
@@ -1506,6 +1512,8 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         for c_idx, header in enumerate(DIFF_COLUMNS, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=row_values.get(header, ""))
             cell.alignment = Alignment(vertical="center")
+            if r_idx % 2 == 0:   # 先頭データ行(2行目)が緑、次が白…の縞
+                cell.fill = STRIPE_FILL
         # 深刻さ（DANGER/WARN/INFO）は「警告理由」セルの色で表す（警告レベル列は廃止）
         fill = LEVEL_FILL.get(drow.warn_level)
         if fill:

@@ -142,6 +142,7 @@ function applyModeUI(mode) {
     const keiriCard = document.getElementById('keiri-card');
     const mailCard = document.getElementById('mail-card');
     const healthCard = document.getElementById('health-card');
+    const sseCard = document.getElementById('sse-card');
 
     const isSchedule = mode === 'csv_export';
     const isExpense = mode === 'expense';
@@ -165,6 +166,8 @@ function applyModeUI(mode) {
     if (targetYearInput) targetYearInput.disabled = !isSchedule;
     if (targetMonthInput) targetMonthInput.disabled = !isSchedule;
     if (scheduleStepHeader) scheduleStepHeader.style.display = isSchedule ? '' : 'none';
+    // スケジュール開始時刻のピンポイント修正カードもスケジュールモードのみ
+    if (sseCard) sseCard.style.display = isSchedule ? '' : 'none';
 
     // ①フォームの実行ボタンはスケジュールモードのみ（スケジュールCSV作成）
     if (runBtn) {
