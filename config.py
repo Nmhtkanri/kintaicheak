@@ -169,6 +169,32 @@ class Config:
     # 生成物の置き場（氏名・給与額を含むのでローカル）
     SHAROUSHI_OUTPUT_DIR = os.environ.get("SHAROUSHI_OUTPUT_DIR", "outputs/sharoushi")
 
+    # ------------------------------------------------------------------
+    # 標準報酬月額チェック（定時決定・保険料突合。jinjer は GET のみ・CLI起動）
+    # ------------------------------------------------------------------
+    # 等級表（料率と等級レンジのマスタExcel）。翌年度は .env でファイルを差し替えるだけ。
+    # 年度が合わないと ShahoMasterError で停止する。
+    SHAHO_GRADE_TABLE_XLSX = os.environ.get(
+        "SHAHO_GRADE_TABLE_XLSX",
+        r"Z:\API連携\標準月額資料\令和8年度_標準報酬月額表_関東IT健保_協会けんぽ東京比較.xlsx")
+    # 報酬分類マスタ（どの支給項目を報酬月額の算定に入れるか＋固定的賃金フラグ）。
+    # 初期版は tools/build_shaho_class_master.py が作り、谷津さんのレビューで確定する。
+    SHAHO_CLASS_MASTER_CSV = os.environ.get(
+        "SHAHO_CLASS_MASTER_CSV", r"Z:\API連携\docs\標報チェック_報酬分類マスタ.csv")
+    # 生成物の置き場（氏名・給与額を含むのでローカル）
+    SHAHO_OUTPUT_DIR = os.environ.get("SHAHO_OUTPUT_DIR", "outputs/shaho")
+    # 保険者: its=関東IT健保（実測で確定） / kyokai_tokyo=協会けんぽ東京
+    SHAHO_INSURER = os.environ.get("SHAHO_INSURER", "its")
+    # 本人控除は前月分（jinjer設定「翌月徴収」）。m月分の保険料は (m+lag)月支給の控除と比べる
+    SHAHO_DEDUCTION_LAG_MONTHS = int(os.environ.get("SHAHO_DEDUCTION_LAG_MONTHS", "1"))
+    # 円未満の丸め: 50sen(50銭以下切捨て・超切上げ) / floor / round / ceil
+    SHAHO_ROUNDING = os.environ.get("SHAHO_ROUNDING", "50sen")
+    # 丸め方式が確定できない間の許容差（円）
+    SHAHO_PREMIUM_TOLERANCE = int(os.environ.get("SHAHO_PREMIUM_TOLERANCE", "1"))
+    # 支払基礎日数の閾値（原則17日・短時間労働者11日）
+    SHAHO_BASE_DAYS_THRESHOLD = int(os.environ.get("SHAHO_BASE_DAYS_THRESHOLD", "17"))
+    SHAHO_BASE_DAYS_THRESHOLD_SHORT = int(os.environ.get("SHAHO_BASE_DAYS_THRESHOLD_SHORT", "11"))
+
     # 手順③ API直接投入（kintai-imports）
     # executor = jinjer標準の完了通知メール宛先。
     # ⚠️ 明示指定できるのは「勤怠管理者権限ロール」を持つ社員番号のみ。
