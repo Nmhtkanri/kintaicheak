@@ -49,6 +49,7 @@ python -m PyInstaller ^
   --hidden-import services.health_hpm_match ^
   --hidden-import services.health_hpm_csv ^
   --hidden-import services.health_hpm_pdf ^
+  --hidden-import services.sharoushi_export ^
   launcher.py
 
 if errorlevel 1 goto :build_failed

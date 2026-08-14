@@ -22,6 +22,10 @@
             <input type="radio" name="mode" value="keiri">
             <span class="mode-tab-face">経理</span>
         </label>
+        <label class="mode-tab" title="給与明細から社労士（前田事務所）へ渡すCSVを作る">
+            <input type="radio" name="mode" value="sharoushi">
+            <span class="mode-tab-face">社労士CSV</span>
+        </label>
         <label class="mode-tab" title="シフト表を読み取って jinjer へ登録する">
             <input type="radio" name="mode" value="csv_export">
             <span class="mode-tab-face">スケジュールアップロード</span>
@@ -584,6 +588,74 @@
             <div id="keiri-pane-diff" class="keiri-pane md-view" style="display:none"></div>
         </div>
         <div id="keiri-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- ==== 社労士モード: 前田事務所へ渡す給与CSV（60列・cp932）==== -->
+    <div class="workflow-card mode-accent acc-keiri" id="sharoushi-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keiri">📄</span>
+            <div>
+                <div class="card-title">
+                    社労士へ渡す給与CSVを作る
+                    <span class="tag tag-safe">読み取りのみ・jinjerには書きません</span>
+                </div>
+                <p class="card-lead">支給月を入れると、jinjer の給与明細から <b>前田事務所さん向けの60列CSV</b> を作ります。</p>
+            </div>
+        </div>
+
+        <div class="fields">
+            <label class="field field-inline">
+                <span class="field-label">支給月 <span class="tag tag-req">必須</span></span>
+                <input type="text" id="sharoushi-month" placeholder="2026-08" style="width:150px">
+                <span class="field-sub">その月の給与明細だけを使います（前月分は不要）</span>
+            </label>
+            <div class="field">
+                <span class="field-label">あわせて行うこと</span>
+                <div class="check-row">
+                    <label><input type="checkbox" id="sharoushi-refresh"> 給与明細をAPIから取り直す</label>
+                </div>
+                <span class="field-sub">
+                    立替金は<b>総支給額と口座1振込額から引き</b>、差引支給額からは引きません。
+                    給与計算後に発生した支給は追加支給台帳に書けば反映されます。
+                </span>
+            </div>
+            <details class="field">
+                <summary class="field-label" style="cursor:pointer">使うファイルを指定する（通常は空欄のまま）</summary>
+                <div style="margin-top:8px">
+                    <label class="field">
+                        <span class="field-label">列マッピングCSV</span>
+                        <input type="text" id="sharoushi-mapping-csv" placeholder="Z:\API連携\docs\社労士モード_列マッピング.csv">
+                    </label>
+                    <label class="field">
+                        <span class="field-label">追加支給台帳CSV</span>
+                        <input type="text" id="sharoushi-ledger-csv" placeholder="Z:\API連携\docs\社労士モード_追加支給台帳.csv">
+                    </label>
+                </div>
+            </details>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="sharoushi-run-btn">📄 社労士CSVを作成</button>
+            <span id="sharoushi-status" class="status-text"></span>
+        </div>
+
+        <div id="sharoushi-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:10px">
+                <div class="summary-card"><div class="card-label">出力人数</div><div class="card-value" id="sharoushi-cnt-rows">0</div></div>
+                <div class="summary-card"><div class="card-label">対象外</div><div class="card-value" id="sharoushi-cnt-excluded">0</div></div>
+                <div class="summary-card"><div class="card-label">台帳の反映</div><div class="card-value" id="sharoushi-cnt-ledger">0</div></div>
+                <div class="summary-card"><div class="card-label">要確認</div><div class="card-value" id="sharoushi-cnt-warn">0</div></div>
+            </div>
+            <div id="sharoushi-file" style="margin-bottom:10px"></div>
+            <div id="sharoushi-warn-area" style="display:none; margin-bottom:10px"></div>
+            <div id="sharoushi-detail" style="margin-bottom:10px"></div>
+            <div style="margin-top:10px">
+                <div class="section-title" style="font-size:13px; margin-bottom:4px">先頭10人ぶんのプレビュー</div>
+                <pre id="sharoushi-preview" class="md-view" style="overflow-x:auto; font-size:11px; line-height:1.5"></pre>
+            </div>
+        </div>
+        <div id="sharoushi-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
     {% raw %}

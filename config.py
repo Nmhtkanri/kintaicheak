@@ -147,6 +147,22 @@ class Config:
     # 生成物と API キャッシュの置き場（個人情報を含むのでローカル）
     KEIRI_OUTPUT_DIR = os.environ.get("KEIRI_OUTPUT_DIR", "outputs/keiri")
 
+    # ------------------------------------------------------------------
+    # 社労士モード（前田事務所へ渡す給与CSVの生成）
+    # ------------------------------------------------------------------
+    # 列の対応は給与体系ごとに変わる。谷津さんが直せるよう共有フォルダに置き、
+    # 直したら再ビルドなしで次回実行から効く。無ければコード内の既定表で動く。
+    # 列: 列番号, 列名, 給与体系, source_key, 体系別名条件, 備考
+    SHAROUSHI_COLUMN_MAPPING_CSV = os.environ.get(
+        "SHAROUSHI_COLUMN_MAPPING_CSV", r"Z:\API連携\docs\社労士モード_列マッピング.csv")
+    # 給与計算のあとに発生した支給（jinjer に入っていない分）を足すための台帳。
+    # 台帳の額は差引支給額と立替金列に加算し、口座1振込額と総支給額は据え置く。
+    # 列: 支給月, 社員番号, 氏名, 項目, 金額, メモ
+    SHAROUSHI_EXTRA_LEDGER_CSV = os.environ.get(
+        "SHAROUSHI_EXTRA_LEDGER_CSV", r"Z:\API連携\docs\社労士モード_追加支給台帳.csv")
+    # 生成物の置き場（氏名・給与額を含むのでローカル）
+    SHAROUSHI_OUTPUT_DIR = os.environ.get("SHAROUSHI_OUTPUT_DIR", "outputs/sharoushi")
+
     # 手順③ API直接投入（kintai-imports）
     # executor = jinjer標準の完了通知メール宛先。
     # ⚠️ 明示指定できるのは「勤怠管理者権限ロール」を持つ社員番号のみ。

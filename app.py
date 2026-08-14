@@ -2796,6 +2796,99 @@ def keiri_download(ym, filename):
 
 
 # =============================================================================
+# 社労士モード — jinjer給与明細 → 前田事務所へ渡す給与CSV（60列・cp932）
+# =============================================================================
+
+SHAROUSHI_PREVIEW_ROWS = 10
+
+
+@app.route("/sharoushi_run", methods=["POST"])
+def route_sharoushi_run():
+    """支給月ぶんの社労士CSVを作る。jinjer へは読みに行くだけで書き込まない。
+
+    列マッピングと追加支給台帳は共有フォルダ（Config.SHAROUSHI_*）を読むので、
+    表を直せば exe の再ビルドなしで次回実行から効く。
+
+    フォーム:
+      - month         : 支給月 YYYY-MM（必須）
+      - mapping_csv   : 列マッピングCSVのパス（空欄なら既定）
+      - ledger_csv    : 追加支給台帳CSVのパス（空欄なら既定）
+      - refresh       : "1" なら給与明細を API から取り直す
+      - allow_unknown : "1" なら未知項目があっても止めずに出力する
+    """
+    from services.jinjer_api_client import JinjerAPIError
+    from services.sharoushi_export import (CSV_COLUMNS, SharoushiExportError, format_cell,
+                                           generate)
+
+    month = (request.form.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["支給月は YYYY-MM 形式で入力してください（例: 2026-08）"]}), 400
+
+    kwargs = {
+        "mapping_csv": _clean_path_input(request.form.get("mapping_csv")) or None,
+        "ledger_csv": _clean_path_input(request.form.get("ledger_csv")) or None,
+        "refresh": (request.form.get("refresh") or "") == "1",
+        "allow_unknown": (request.form.get("allow_unknown") or "") == "1",
+    }
+    for key in ("mapping_csv", "ledger_csv"):
+        path = kwargs[key]
+        if path and not os.path.exists(path):
+            return jsonify({"success": False,
+                            "errors": [f"指定されたファイルがありません: {path}"]}), 400
+
+    try:
+        result = generate(month, **kwargs)
+    except SharoushiExportError as e:
+        # 未知項目の検出はここに来る。画面で中身を見てから「承知のうえ出力」を選べる。
+        return jsonify({"success": False, "errors": [str(e)],
+                        "can_force": "マッピングに無い" in str(e)}), 400
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except (ValueError, FileNotFoundError) as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except Exception as e:
+        logger.exception("sharoushi_run failed")
+        return jsonify({"success": False, "errors": [f"生成に失敗しました: {e}"]}), 500
+
+    with open(result["path"], "r", encoding="cp932", newline="") as f:
+        preview = [next(f, "").rstrip("\r\n") for _ in range(SHAROUSHI_PREVIEW_ROWS + 1)]
+    logger.info("sharoushi_run: month=%s rows=%d unknown=%d ledger=%d -> %s",
+                month, result["rows"], len(result["unknown"]),
+                len(result["ledger_applied"]), result["filename"])
+    return jsonify({
+        "success": True,
+        "month": month,
+        "ym": month.replace("-", ""),
+        "filename": result["filename"],
+        "out_dir": os.path.abspath(result["out_dir"]),
+        "rows": result["rows"],
+        "columns": len(CSV_COLUMNS),
+        "systems": result["systems"],
+        "excluded": result["excluded"],
+        "unknown": [dict(u, 金額=format_cell(u["金額"])) for u in result["unknown"]],
+        "ledger_applied": [dict(a, 金額=format_cell(a["金額"]))
+                           for a in result["ledger_applied"]],
+        "multi_statement": result["multi_statement"],
+        "unmapped_systems": result["unmapped_systems"],
+        "mapping_path": result["mapping_path"] or "（コード内の既定表）",
+        "mapping_rows": result["mapping_rows"],
+        "ledger_path": result["ledger_path"],
+        "preview": [line for line in preview if line],
+    })
+
+
+@app.route("/sharoushi_download/<ym>/<path:filename>")
+def sharoushi_download(ym, filename):
+    """社労士モードの生成物をダウンロードする（outputs/sharoushi/{YYYYMM}/ 配下のみ）。"""
+    safe_ym = os.path.basename(ym)
+    if not re.fullmatch(r"\d{6}", safe_ym):
+        return jsonify({"error": "月の指定が不正です"}), 400
+    folder = os.path.abspath(os.path.join(Config.SHAROUSHI_OUTPUT_DIR, safe_ym))
+    return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
+
+
+# =============================================================================
 # メール下書きモード — 一覧表×テンプレート×メール台帳 → Outlook 下書き
 # =============================================================================
 # 作るのは下書きまで（直接送信のルートは存在しない）。送信は人が Outlook で行う。

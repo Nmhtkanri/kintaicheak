@@ -108,6 +108,7 @@ const MODE_HINTS = {
     match:      '請求勤怠と jinjer の差異を洗い出す',
     csv_export: 'シフト表を読み取って jinjer へ登録する',
     keiri:      'freee 取引インポート用の4CSVを作る',
+    sharoushi:  '社労士へ渡す給与CSVを作る（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
     mail:       '下書きのみ作成・送信はしません',
     health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
@@ -140,6 +141,7 @@ function applyModeUI(mode) {
     const expenseCard = document.getElementById('expense-card');
     const kiCard = document.getElementById('ki-card');
     const keiriCard = document.getElementById('keiri-card');
+    const sharoushiCard = document.getElementById('sharoushi-card');
     const mailCard = document.getElementById('mail-card');
     const healthCard = document.getElementById('health-card');
     const sseCard = document.getElementById('sse-card');
@@ -147,9 +149,11 @@ function applyModeUI(mode) {
     const isSchedule = mode === 'csv_export';
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
+    const isSharoushi = mode === 'sharoushi';
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
-    const isMatch = !isSchedule && !isExpense && !isKeiri && !isMail && !isHealthHpm;
+    const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
+        && !isMail && !isHealthHpm;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -185,6 +189,8 @@ function applyModeUI(mode) {
     if (kiCard) kiCard.style.display = isExpense ? '' : 'none';
     // 経理モード: 仕訳CSV生成カードのみ表示
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
+    // 社労士モード: 社労士CSV生成カードのみ表示
+    if (sharoushiCard) sharoushiCard.style.display = isSharoushi ? '' : 'none';
     // メール下書きモード: メールカードのみ表示（初回表示時にテンプレ一覧を読み込む）
     if (mailCard) {
         mailCard.style.display = isMail ? '' : 'none';
@@ -2692,3 +2698,136 @@ function setupHealthHpmMode() {
 }
 
 setupHealthHpmMode();
+
+// =============================================================================
+// 社労士モード — 前田事務所へ渡す給与CSV（60列・cp932）
+// =============================================================================
+function sharoushiShowError(msgs, canForce) {
+    const el = document.getElementById('sharoushi-error-area');
+    if (!el) return;
+    const list = Array.isArray(msgs) ? msgs : [msgs];
+    let html = list.map(m => '<div>' + escapeHtml(m) + '</div>').join('');
+    if (canForce) {
+        // 未知項目が出たとき。中身を確かめたうえで、承知のうえ出力できる逃げ道を出す。
+        html += '<div style="margin-top:8px">'
+            + '<button type="button" class="btn" id="sharoushi-force-btn">'
+            + '内容を確認したので、このまま出力する</button></div>';
+    }
+    el.innerHTML = html;
+    el.style.display = list.length ? 'block' : 'none';
+}
+
+function sharoushiRenderResult(data) {
+    document.getElementById('sharoushi-cnt-rows').textContent = data.rows;
+    document.getElementById('sharoushi-cnt-excluded').textContent = (data.excluded || []).length;
+    document.getElementById('sharoushi-cnt-ledger').textContent =
+        (data.ledger_applied || []).length;
+    const warnCount = (data.unknown || []).length + (data.unmapped_systems || []).length
+        + (data.multi_statement || []).length;
+    document.getElementById('sharoushi-cnt-warn').textContent = warnCount;
+
+    const dl = '/sharoushi_download/' + encodeURIComponent(data.ym) + '/'
+        + encodeURIComponent(data.filename);
+    document.getElementById('sharoushi-file').innerHTML =
+        '<table class="keiri-md-table"><tr><th>ファイル</th><th>人数</th><th>列数</th><th></th></tr>'
+        + '<tr><td>' + escapeHtml(data.filename) + '</td><td>' + data.rows + '</td><td>'
+        + data.columns + '</td><td><a class="btn btn-sm" href="' + dl + '">ダウンロード</a></td></tr>'
+        + '</table>'
+        + '<div class="hint" style="margin-top:4px">保存先: ' + escapeHtml(data.out_dir) + '</div>';
+
+    // 要確認（未知項目・想定外の給与体系・複数明細）
+    const warn = document.getElementById('sharoushi-warn-area');
+    let wh = '';
+    if ((data.unknown || []).length) {
+        wh += '<div class="alert alert-warning"><b>マッピングに無い支給・控除項目に金額があります'
+            + '（' + data.unknown.length + '件）</b>'
+            + '<div class="hint">jinjer 側で項目が移設された可能性があります。'
+            + '列マッピングCSVに追記してください。</div>'
+            + '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th>'
+            + '<th>項目ID</th><th>項目名</th><th>金額</th></tr>'
+            + data.unknown.map(u => '<tr><td>' + escapeHtml(u['社員番号']) + '</td><td>'
+                + escapeHtml(u['氏名']) + '</td><td>' + escapeHtml(u.source_key) + '</td><td>'
+                + escapeHtml(u.label) + '</td><td>' + escapeHtml(u['金額']) + '</td></tr>').join('')
+            + '</table></div>';
+    }
+    if ((data.unmapped_systems || []).length) {
+        wh += '<div class="alert alert-warning">勤怠列のマッピングが無い給与体系があります: '
+            + escapeHtml(data.unmapped_systems.join('、'))
+            + '<div class="hint">その体系の人は勤怠列が空のまま出ます。</div></div>';
+    }
+    if ((data.multi_statement || []).length) {
+        wh += '<div class="alert alert-warning">同じ月に給与明細が複数ある人: '
+            + escapeHtml(data.multi_statement.join('、'))
+            + '<div class="hint">基本給が入っている明細を採用しました。</div></div>';
+    }
+    warn.innerHTML = wh;
+    warn.style.display = wh ? 'block' : 'none';
+
+    // 内訳（給与体系別・対象外・台帳の反映）
+    let dh = '<div class="hint">給与体系: '
+        + Object.entries(data.systems || {}).map(([k, v]) => escapeHtml(k) + ' ' + v + '人').join(' / ')
+        + '</div>';
+    if ((data.ledger_applied || []).length) {
+        dh += '<div style="margin-top:6px"><b>追加支給台帳を反映しました</b>'
+            + '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th>'
+            + '<th>項目</th><th>金額</th><th>メモ</th></tr>'
+            + data.ledger_applied.map(a => '<tr><td>' + escapeHtml(a['社員番号']) + '</td><td>'
+                + escapeHtml(a['氏名']) + '</td><td>' + escapeHtml(a['項目']) + '</td><td>'
+                + escapeHtml(a['金額']) + '</td><td>' + escapeHtml(a['メモ'] || '') + '</td></tr>').join('')
+            + '</table></div>';
+    }
+    if ((data.excluded || []).length) {
+        dh += '<div class="hint" style="margin-top:6px">対象外: '
+            + data.excluded.map(e => escapeHtml(e['社員番号']) + '（' + escapeHtml(e['理由']) + '）')
+                .join(' / ') + '</div>';
+    }
+    dh += '<div class="hint" style="margin-top:6px">列マッピング: '
+        + escapeHtml(data.mapping_path) + '（' + data.mapping_rows + '行）<br>追加支給台帳: '
+        + escapeHtml(data.ledger_path || '（未設定）') + '</div>';
+    document.getElementById('sharoushi-detail').innerHTML = dh;
+
+    document.getElementById('sharoushi-preview').textContent = (data.preview || []).join('\n');
+    document.getElementById('sharoushi-result-area').style.display = 'block';
+}
+
+const sharoushiRunBtn = document.getElementById('sharoushi-run-btn');
+if (sharoushiRunBtn) {
+    const sharoushiRun = async (allowUnknown) => {
+        const status = document.getElementById('sharoushi-status');
+        const month = (document.getElementById('sharoushi-month').value || '').trim();
+        sharoushiShowError([]);
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+            sharoushiShowError('支給月は YYYY-MM 形式で入力してください（例: 2026-08）');
+            return;
+        }
+        const fd = new FormData();
+        fd.append('month', month);
+        fd.append('mapping_csv', document.getElementById('sharoushi-mapping-csv').value);
+        fd.append('ledger_csv', document.getElementById('sharoushi-ledger-csv').value);
+        fd.append('refresh', document.getElementById('sharoushi-refresh').checked ? '1' : '0');
+        if (allowUnknown) fd.append('allow_unknown', '1');
+
+        sharoushiRunBtn.disabled = true;
+        status.textContent = '生成中…（給与明細の取得に数分かかることがあります）';
+        document.getElementById('sharoushi-result-area').style.display = 'none';
+        try {
+            const res = await fetch('/sharoushi_run', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) {
+                sharoushiShowError(data.errors || ['生成に失敗しました'], data.can_force);
+                const forceBtn = document.getElementById('sharoushi-force-btn');
+                if (forceBtn) forceBtn.addEventListener('click', () => sharoushiRun(true));
+                status.textContent = '';
+                return;
+            }
+            sharoushiRenderResult(data);
+            status.textContent = '完了（' + data.month + '）';
+        } catch (e) {
+            sharoushiShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            sharoushiRunBtn.disabled = false;
+        }
+    };
+    sharoushiRunBtn.addEventListener('click', () => sharoushiRun(false));
+}
