@@ -8,10 +8,13 @@ r"""社労士モード: jinjer 給与明細 → 社労士（前田事務所）�
 Z:\API連携\docs\社労士モード_列マッピング.csv に外出ししてあり、直せば exe の再ビルド
 なしで次回実行から効く。ファイルが無いときはこのモジュール内の既定表で動く。
 
-⚠ 立替金の扱い（2026-08-14 谷津さん指示・2026-07 実データ 231 行で検証済み）
-    総支給額     = 雇用保険対象額(other5) ＋ その他(allowance52)   ← 立替金は元々 other5 に入らない
-    口座1振込額  = 口座1振込額(payment2) − 立替金(a51) − 立替金（顧客請求分）(a50)
-    差引支給額   = 差引支給額(payment1) そのまま（**立替金を引かない**。マイナスも据え置き）
+⚠ 立替金・その他の扱い（2026-08-14 谷津さん指示・2026-07 実データ 231 行で検証済み）
+    総支給額     = 雇用保険対象額(other5) そのまま
+                   ← 立替金2種・その他は元々 other5 に入らないので、これだけで報酬計になる
+    口座1振込額  = 口座1振込額(payment2) − 立替金(a51) − 立替金（顧客請求分）(a50) − その他(a52)
+    差引支給額   = 差引支給額(payment1) そのまま（**何も引かない**。マイナスも据え置き）
+  立替金2種と「その他」（経費精算）は報酬ではないので、総支給額と口座1振込額の両方から外す。
+  差引支給額には乗ったままなので、この3つを引いた額が実際の振込額になる。
   社宅家賃・貸付金返済・社保調整には専用列が無く、社会保険料計／控除合計の中にだけ乗る。
 
 ⚠ 給与計算後に発生した追加支給（jinjer に入っていない）は追加支給台帳 CSV で足す。
@@ -524,13 +527,14 @@ def build_row(emp, basic_info, payroll_info, mapping, ledger_entries=None):
             row[col] = total
 
     # --- 計算で埋める列 ---
-    # 総支給額は雇用保険対象額（＝立替金2種・その他を含まない支給計）＋その他。
-    # 立替金が引かれた形になるのはこのため。
-    row[COL_SOUSHIKYU] = g(K_KOYO_TAISHO) + g(K_SONOTA)
+    # 総支給額は雇用保険対象額そのもの。jinjer の雇用保険対象額は 立替金2種・その他 を
+    # 含まないので、それだけで「報酬でないものを除いた支給計」になっている。
+    row[COL_SOUSHIKYU] = g(K_KOYO_TAISHO)
     row[COL_SHAHO_KEI] = sum(g(k) for k in SHAHO_KEI_KEYS)
     row[COL_KOJO_GOKEI] = row[COL_SHAHO_KEI] + sum(g(k) for k in KOJO_GOKEI_KEYS)
     row[COL_SASHIHIKI] = g(K_PAYMENT1)
-    row[COL_KOZA1] = g(K_PAYMENT2) - g(K_TATEKAE) - g(K_TATEKAE_KYAKU)
+    # 差引支給額には 立替金2種・その他 が乗っているので、実際の振込額はそれらを引いた額。
+    row[COL_KOZA1] = g(K_PAYMENT2) - g(K_TATEKAE) - g(K_TATEKAE_KYAKU) - g(K_SONOTA)
 
     # --- 追加支給台帳（jinjer に無い後追いの支給） ---
     applied = []

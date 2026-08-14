@@ -54,7 +54,7 @@ def _row(system="月給制1", **kw):
 
 
 class TatekaeTests(unittest.TestCase):
-    """立替金は総支給額と口座1から引き、差引支給額からは引かない（谷津さん指示）。"""
+    """立替金と「その他」は総支給額と口座1から外し、差引支給額からは引かない（谷津さん指示）。"""
 
     def test_tatekae_excluded_from_total_and_transfer_but_not_from_net(self):
         """2026-07 友納2008003 の形: 立替金 229,292 が口座1だけ減らす。"""
@@ -78,11 +78,27 @@ class TatekaeTests(unittest.TestCase):
         )
         self.assertEqual(built["row"][COL_KOZA1], 395923 - 11982 - 398)
 
-    def test_sonota_is_added_to_total_but_not_in_koyo_taisho(self):
-        """総支給額 ＝ 雇用保険対象額 ＋ その他（allowance52）。"""
+    def test_sonota_is_not_counted_as_pay(self):
+        """「その他」は経費精算なので報酬ではない。総支給額に入れず、口座1からも引く。"""
         built = _row(shikyu={"allowance1": 230540, "allowance52": 16500},
-                     sonota={"other5": 280920})
-        self.assertEqual(built["row"][COL_SOUSHIKYU], 297420)
+                     sonota={"other5": 280920},
+                     payment={"payment1": 244155, "payment2": 244155})
+        r = built["row"]
+        self.assertEqual(r[COL_SOUSHIKYU], 280920)              # その他を足さない
+        self.assertEqual(r[58], 16500)                          # 明細列には出す
+        self.assertEqual(r[COL_SASHIHIKI], 244155)              # 差引支給額からは引かない
+        self.assertEqual(r[COL_KOZA1], 244155 - 16500)          # 口座1からは引く
+
+    def test_tatekae_and_sonota_are_both_subtracted_from_transfer(self):
+        """2026-07 矢嶋2018016 の形: 立替金（顧客請求分）840 と その他 550 の両方を引く。"""
+        built = _row(
+            shikyu={"allowance1": 349575, "allowance50": 840, "allowance52": 550},
+            sonota={"other5": 420649},
+            payment={"payment1": 327816, "payment2": 327816},
+        )
+        r = built["row"]
+        self.assertEqual(r[COL_SOUSHIKYU], 420649)
+        self.assertEqual(r[COL_KOZA1], 327816 - 840 - 550)
 
     def test_negative_net_pay_is_kept_and_transfer_stays_zero(self):
         """休職などで差引支給額がマイナスの人。口座1は jinjer の 0 のまま。"""
@@ -467,7 +483,11 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(self.sample[0], CSV_COLUMNS)
 
     def test_reproduces_sample_except_agreed_changes(self):
-        """差分は 2026-08-14 の決定によるものだけ（職能手当→調整手当、テスト社員2名の除外）。"""
+        """差分は 2026-08-14 の決定によるものだけ。
+
+        ①職能手当→調整手当 ②テスト社員2名の除外 ③「その他」を報酬から外した分
+        （見本は総支給額に足して口座1から引いていなかったので、その人だけ2列ずれる）。
+        """
         ledger = {("2026-07", "2017012"): [
             {"項目": "立替金（顧客請求分）", "金額": 3280.0, "メモ": "給与計算後の申請"}]}
         built = build_rows(self.data, "2026-07", MAPPING, ledger)
@@ -476,6 +496,12 @@ class RegressionTests(unittest.TestCase):
         by_emp = {r[0]: r for r in built["rows"]}
 
         expected = {("2017012", 26), ("2017012", 29)}      # 職能手当 → 調整手当
+        # 「その他」がある人は 総支給額(41) と 口座1(55) が見本と変わる
+        sonota_emps = {r[0] for r in built["rows"] if r[58]}
+        self.assertTrue(sonota_emps, "「その他」がある人が1人もいない")
+        for emp in sonota_emps:
+            expected.add((emp, COL_SOUSHIKYU))
+            expected.add((emp, COL_KOZA1))
         diffs = set()
         for row in self.sample[1:]:
             emp = row[0].strip()
