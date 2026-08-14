@@ -2726,12 +2726,17 @@ function sharoushiRenderResult(data) {
         + (data.multi_statement || []).length;
     document.getElementById('sharoushi-cnt-warn').textContent = warnCount;
 
-    const dl = '/sharoushi_download/' + encodeURIComponent(data.ym) + '/'
-        + encodeURIComponent(data.filename);
+    const dlUrl = (fn) => '/sharoushi_download/' + encodeURIComponent(data.ym) + '/'
+        + encodeURIComponent(fn);
+    const bikoN = (data.biko_rows || []).length;
     document.getElementById('sharoushi-file').innerHTML =
-        '<table class="keiri-md-table"><tr><th>ファイル</th><th>人数</th><th>列数</th><th></th></tr>'
-        + '<tr><td>' + escapeHtml(data.filename) + '</td><td>' + data.rows + '</td><td>'
-        + data.columns + '</td><td><a class="btn btn-sm" href="' + dl + '">ダウンロード</a></td></tr>'
+        '<table class="keiri-md-table"><tr><th>ファイル</th><th>内容</th><th></th></tr>'
+        + '<tr><td>' + escapeHtml(data.filename) + '</td><td>' + data.rows + '人 / '
+        + data.columns + '列</td><td><a class="btn btn-sm" href="' + dlUrl(data.filename)
+        + '">ダウンロード</a></td></tr>'
+        + '<tr><td>' + escapeHtml(data.biko_filename || '') + '</td><td>イレギュラー発生分の理由 '
+        + bikoN + '件</td><td><a class="btn btn-sm" href="' + dlUrl(data.biko_filename)
+        + '">ダウンロード</a></td></tr>'
         + '</table>'
         + '<div class="hint" style="margin-top:4px">保存先: ' + escapeHtml(data.out_dir) + '</div>';
 
@@ -2760,8 +2765,15 @@ function sharoushiRenderResult(data) {
             + escapeHtml(data.multi_statement.join('、'))
             + '<div class="hint">基本給が入っている明細を採用しました。</div></div>';
     }
+    if ((data.biko_pending || []).length) {
+        wh += '<div class="alert alert-warning">イレギュラー発生分のうち <b>'
+            + data.biko_pending.length + '件</b> の理由が未入力です'
+            + '<div class="hint">下の「イレギュラー発生分の理由」で入れてから渡してください。'
+            + '未入力のままでも備考CSVは出ますが、理由欄が空になります。</div></div>';
+    }
     warn.innerHTML = wh;
     warn.style.display = wh ? 'block' : 'none';
+    sharoushiRenderBiko(data);
 
     // 内訳（給与体系別・対象外・台帳の反映）
     let dh = '<div class="hint">給与体系: '
@@ -2788,6 +2800,46 @@ function sharoushiRenderResult(data) {
 
     document.getElementById('sharoushi-preview').textContent = (data.preview || []).join('\n');
     document.getElementById('sharoushi-result-area').style.display = 'block';
+}
+
+function sharoushiRenderBiko(data) {
+    const area = document.getElementById('sharoushi-biko-area');
+    const rows = data.biko_rows || [];
+    if (!area) return;
+    if (!rows.length) { area.style.display = 'none'; return; }
+    document.getElementById('sharoushi-biko-path').textContent =
+        '台帳: ' + (data.biko_ledger_path || '（未設定）');
+    let html = '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th>'
+        + '<th>項目</th><th style="text-align:right">金額</th><th>理由</th></tr>';
+    rows.forEach((r, i) => {
+        const need = !String(r['理由'] || '').trim();
+        html += '<tr' + (need ? ' style="background:#FFF6F6"' : '') + '>'
+            + '<td data-biko-emp="' + escapeHtml(r['社員番号']) + '">' + escapeHtml(r['社員番号']) + '</td>'
+            + '<td data-biko-name="' + escapeHtml(r['氏名']) + '">' + escapeHtml(r['氏名']) + '</td>'
+            + '<td data-biko-item="' + escapeHtml(r['項目']) + '">' + escapeHtml(r['項目']) + '</td>'
+            + '<td style="text-align:right">' + escapeHtml(r['金額']) + '</td>'
+            + '<td><input type="text" class="biko-reason" data-idx="' + i
+            + '" style="width:100%" placeholder="' + (need ? '理由を入れてください' : '')
+            + '" value="' + escapeHtml(r['理由'] || '') + '"></td></tr>';
+    });
+    html += '</table>';
+    document.getElementById('sharoushi-biko-rows').innerHTML = html;
+    area.style.display = 'block';
+}
+
+function sharoushiCollectBiko() {
+    const entries = [];
+    document.querySelectorAll('#sharoushi-biko-rows tr').forEach(tr => {
+        const input = tr.querySelector('.biko-reason');
+        if (!input) return;
+        entries.push({
+            '社員番号': tr.querySelector('[data-biko-emp]').dataset.bikoEmp,
+            '氏名': tr.querySelector('[data-biko-name]').dataset.bikoName,
+            '項目': tr.querySelector('[data-biko-item]').dataset.bikoItem,
+            '理由': input.value.trim(),
+        });
+    });
+    return entries;
 }
 
 const sharoushiRunBtn = document.getElementById('sharoushi-run-btn');
@@ -2830,4 +2882,37 @@ if (sharoushiRunBtn) {
         }
     };
     sharoushiRunBtn.addEventListener('click', () => sharoushiRun(false));
+
+    const bikoSaveBtn = document.getElementById('sharoushi-biko-save-btn');
+    if (bikoSaveBtn) {
+        bikoSaveBtn.addEventListener('click', async () => {
+            const status = document.getElementById('sharoushi-biko-status');
+            const month = (document.getElementById('sharoushi-month').value || '').trim();
+            const entries = sharoushiCollectBiko();
+            sharoushiShowError([]);
+            if (!entries.length) { sharoushiShowError('保存する行がありません'); return; }
+            bikoSaveBtn.disabled = true;
+            status.textContent = '保存中…';
+            try {
+                const res = await fetch('/sharoushi_biko_save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ month, entries }),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    sharoushiShowError(data.errors || ['保存に失敗しました']);
+                    status.textContent = '';
+                    return;
+                }
+                status.textContent = '保存しました（理由あり ' + data.saved + '/' + data.total + '）。作り直しています…';
+                await sharoushiRun(false);       // 台帳を反映した備考CSVを作り直す
+            } catch (e) {
+                sharoushiShowError('通信に失敗しました: ' + e);
+                status.textContent = '';
+            } finally {
+                bikoSaveBtn.disabled = false;
+            }
+        });
+    }
 }

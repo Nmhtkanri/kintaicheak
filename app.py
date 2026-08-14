@@ -2817,8 +2817,8 @@ def route_sharoushi_run():
       - allow_unknown : "1" なら未知項目があっても止めずに出力する
     """
     from services.jinjer_api_client import JinjerAPIError
-    from services.sharoushi_export import (CSV_COLUMNS, SharoushiExportError, format_cell,
-                                           generate)
+    from services.sharoushi_export import (BIKO_ITEMS, CSV_COLUMNS, SharoushiExportError,
+                                           format_cell, generate)
 
     month = (request.form.get("month") or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}", month):
@@ -2875,7 +2875,51 @@ def route_sharoushi_run():
         "mapping_rows": result["mapping_rows"],
         "ledger_path": result["ledger_path"],
         "preview": [line for line in preview if line],
+        # 備考CSV（イレギュラー5項目の発生理由）
+        "biko_filename": result["biko_filename"],
+        "biko_rows": [dict(r, 金額=format_cell(r["金額"])) for r in result["biko_rows"]],
+        "biko_pending": [dict(r, 金額=format_cell(r["金額"])) for r in result["biko_pending"]],
+        "biko_ledger_path": result["biko_ledger_path"],
+        "biko_items": list(BIKO_ITEMS),
     })
+
+
+@app.route("/sharoushi_biko_save", methods=["POST"])
+def route_sharoushi_biko_save():
+    """イレギュラー5項目の発生理由を備考台帳へ保存する（金額は保存しない）。
+
+    保存するだけでCSVは作らない。画面はこの後で /sharoushi_run をもう一度呼ぶ。
+    台帳は共有フォルダなので、Excel で開いたままだと書けずにエラーになる。
+
+    JSON: {"month": "2026-08",
+           "entries": [{"社員番号","氏名","項目","理由"}, ...]}
+    """
+    from services.sharoushi_export import SharoushiExportError, save_biko_ledger
+
+    payload = request.get_json(silent=True) or {}
+    month = (payload.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["支給月は YYYY-MM 形式で入力してください（例: 2026-08）"]}), 400
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return jsonify({"success": False, "errors": ["entries が配列ではありません"]}), 400
+
+    try:
+        path = save_biko_ledger(month, entries)
+    except SharoushiExportError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except OSError as e:
+        return jsonify({"success": False,
+                        "errors": [f"台帳に書き込めませんでした（Excelで開いていませんか）: {e}"]}), 400
+    except Exception as e:
+        logger.exception("sharoushi_biko_save failed")
+        return jsonify({"success": False, "errors": [f"保存に失敗しました: {e}"]}), 500
+
+    saved = sum(1 for e in entries if str(e.get("理由") or "").strip())
+    logger.info("sharoushi_biko_save: month=%s 理由あり=%d/%d -> %s",
+                month, saved, len(entries), path)
+    return jsonify({"success": True, "path": path, "saved": saved, "total": len(entries)})
 
 
 @app.route("/sharoushi_download/<ym>/<path:filename>")

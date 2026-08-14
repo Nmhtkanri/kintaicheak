@@ -12,11 +12,13 @@ import os
 import tempfile
 import unittest
 
-from services.sharoushi_export import (CSV_COLUMNS, COL_KOJO_GOKEI, COL_KOZA1, COL_SASHIHIKI,
-                                       COL_SHAHO_KEI, COL_SOUSHIKYU, DEFAULT_COLUMN_MAPPING,
-                                       SharoushiExportError, build_row, build_rows,
-                                       export_default_mapping, format_cell, load_column_mapping,
-                                       load_extra_ledger, write_csv)
+from services.sharoushi_export import (BIKO_ITEMS, CSV_COLUMNS, COL_KOJO_GOKEI, COL_KOZA1,
+                                       COL_SASHIHIKI, COL_SHAHO_KEI, COL_SOUSHIKYU,
+                                       DEFAULT_COLUMN_MAPPING, SharoushiExportError,
+                                       build_biko_rows, build_row, build_rows,
+                                       export_default_mapping, format_cell, load_biko_ledger,
+                                       load_column_mapping, load_extra_ledger, save_biko_ledger,
+                                       write_biko_csv, write_csv)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(REPO, "outputs", "keiri", "raw", "salary_statements_2026-07.json")
@@ -272,6 +274,98 @@ class ExtraLedgerTests(unittest.TestCase):
 
     def test_missing_file_is_empty(self):
         self.assertEqual(load_extra_ledger(os.path.join(tempfile.gettempdir(), "no_such.csv")), {})
+
+
+class BikoTests(unittest.TestCase):
+    """イレギュラー5項目の発生理由。金額は jinjer が正、理由だけを台帳に持たせる。"""
+
+    def _person(self, emp, shikyu=None, kojo=None, system="月給制1", name=("山田", "太郎")):
+        return {"employee_id": emp,
+                "statements": [{"basic_info": _basic(system, *name),
+                                "payroll_info": _pi(shikyu=shikyu, kojo=kojo)}]}
+
+    def test_collects_all_five_items(self):
+        data = [self._person("2020001",
+                             shikyu={"allowance19": 30000, "allowance20": 60435,
+                                     "allowance53": 5280, "allowance54": 174969},
+                             kojo={"deduction4": -802})]
+        got = build_biko_rows(data, "2026-08")
+        self.assertEqual([r["項目"] for r in got["rows"]], list(BIKO_ITEMS))
+        self.assertEqual([r["金額"] for r in got["rows"]],
+                         [30000, 60435, 5280, 174969, -802])
+
+    def test_zero_amount_is_not_listed(self):
+        data = [self._person("2020001", shikyu={"allowance19": 0, "allowance53": 1000})]
+        got = build_biko_rows(data, "2026-08")
+        self.assertEqual([r["項目"] for r in got["rows"]], ["現物支給"])
+
+    def test_sonota_teate_sums_both_ids(self):
+        data = [self._person("2020001", shikyu={"allowance20": 1000, "allowance21": 2000})]
+        self.assertEqual(build_biko_rows(data, "2026-08")["rows"][0]["金額"], 3000)
+
+    def test_reason_comes_from_ledger_and_pending_lists_the_rest(self):
+        data = [self._person("2020001", shikyu={"allowance19": 30000, "allowance53": 5280})]
+        ledger = {("2026-08", "2020001", "定常外業務対応手当"): "夜間対応の臨時発生"}
+        got = build_biko_rows(data, "2026-08", ledger)
+        self.assertEqual(got["rows"][0]["理由"], "夜間対応の臨時発生")
+        self.assertEqual([r["項目"] for r in got["pending"]], ["現物支給"])
+
+    def test_reason_is_scoped_to_the_month(self):
+        """別の月に入れた理由を引っ張ってこない。"""
+        data = [self._person("2020001", shikyu={"allowance19": 30000})]
+        ledger = {("2026-07", "2020001", "定常外業務対応手当"): "先月の理由"}
+        got = build_biko_rows(data, "2026-08", ledger)
+        self.assertEqual(got["rows"][0]["理由"], "")
+        self.assertEqual(len(got["pending"]), 1)
+
+    def test_excludes_non_target_employees(self):
+        data = [self._person("9999999", shikyu={"allowance19": 1000}),
+                self._person("2020001", shikyu={"allowance19": 1000}, system="テスト")]
+        self.assertEqual(build_biko_rows(data, "2026-08")["rows"], [])
+
+    def test_ledger_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "biko.csv")
+            save_biko_ledger("2026-08", [
+                {"社員番号": "2020001", "氏名": "山田 太郎",
+                 "項目": "現物支給", "理由": "カタログギフト"},
+                {"社員番号": "2020002", "氏名": "鈴木 花子",
+                 "項目": "社保調整", "理由": "資格取得月の調整"},
+            ], path)
+            self.assertEqual(load_biko_ledger(path), {
+                ("2026-08", "2020001", "現物支給"): "カタログギフト",
+                ("2026-08", "2020002", "社保調整"): "資格取得月の調整",
+            })
+
+    def test_empty_reason_removes_the_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "biko.csv")
+            save_biko_ledger("2026-08", [
+                {"社員番号": "2020001", "氏名": "山田 太郎", "項目": "現物支給", "理由": "初回"}], path)
+            save_biko_ledger("2026-08", [
+                {"社員番号": "2020001", "氏名": "山田 太郎", "項目": "現物支給", "理由": ""}], path)
+            self.assertEqual(load_biko_ledger(path), {})
+
+    def test_rejects_unknown_item(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "biko.csv")
+            with self.assertRaises(SharoushiExportError):
+                save_biko_ledger("2026-08", [
+                    {"社員番号": "2020001", "項目": "役職手当", "理由": "x"}], path)
+
+    def test_missing_ledger_file_is_empty(self):
+        self.assertEqual(load_biko_ledger(os.path.join(tempfile.gettempdir(), "nope.csv")), {})
+
+    def test_biko_csv_is_cp932_crlf(self):
+        rows = [{"社員番号": "2020001", "氏名": "山田 太郎", "給与体系": "月給制1",
+                 "項目": "現物支給", "金額": 5280.0, "理由": "カタログギフト"}]
+        with tempfile.TemporaryDirectory() as d:
+            path = write_biko_csv(rows, os.path.join(d, "備考.csv"))
+            raw = open(path, "rb").read()
+            self.assertIn(b"\r\n", raw)
+            text = raw.decode("cp932")
+            self.assertIn("社員番号,氏名,給与体系,項目,金額,理由", text)
+            self.assertIn("2020001,山田 太郎,月給制1,現物支給,5280,カタログギフト", text)
 
 
 class MappingCsvTests(unittest.TestCase):

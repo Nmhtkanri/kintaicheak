@@ -197,6 +197,24 @@ LEDGER_COLS = ["支給月", "社員番号", "氏名", "項目", "金額", "メ�
 # 追加支給台帳で指定できる項目 → 列番号。差引支給額にも同額を足す
 LEDGER_ITEM_COLUMNS = {"立替金（顧客請求分）": 56, "立替金": 57}
 
+# ---------------------------------------------------------------------------
+# 備考（イレギュラー発生分の理由）
+# ---------------------------------------------------------------------------
+# 経費チェックモードの「イレギュラー経費」から手入力する5項目
+# （services/keihi_payroll_import.py の MANUAL_ITEM_KEYS と同じ並び）。
+# 金額は jinjer が正、理由は台帳が正。社労士は金額だけ見ても理由が分からないので、
+# 本体CSVとは別ファイルの備考CSVに「誰の・何が・いくら・なぜ」を並べて渡す。
+BIKO_ITEMS = {
+    "定常外業務対応手当": ("salary_items:allowance19",),
+    # その他手当は jinjer に2つあり、着地先はテンプレート設定次第（→ 34列目と同じ扱い）
+    "その他手当": ("salary_items:allowance20", "salary_items:allowance21"),
+    "現物支給": ("salary_items:allowance53",),
+    "支給過不足調整": ("salary_items:allowance54",),
+    "社保調整": ("salary_deduction_items:deduction4",),   # これだけ控除項目
+}
+BIKO_LEDGER_COLS = ["支給月", "社員番号", "氏名", "項目", "理由"]
+BIKO_CSV_COLS = ["社員番号", "氏名", "給与体系", "項目", "金額", "理由"]
+
 # 未知項目を見張る配列（金額が動く項目だけ。勤怠・会社負担・定額減税は情報項目なので見ない）
 WATCHED_ARRAYS = ("salary_items", "salary_deduction_items")
 
@@ -328,6 +346,120 @@ def load_extra_ledger(path=None):
                 f"{path} {i}行目: {emp} の金額 '{_txt(r.get('金額'))}' が数値ではありません")
         out[(ym, emp)].append({"項目": item, "金額": amount, "メモ": _txt(r.get("メモ"))})
     return dict(out)
+
+
+def load_biko_ledger(path=None):
+    """備考台帳を {(支給月, 社員番号, 項目): 理由} で読む。
+
+    同じキーの行が複数あるときは**最後の行**を採る（画面からは追記していくため）。
+    ファイルが無ければ空を返す＝台帳を使わなくても本体CSVは従来どおり作れる。
+    """
+    path = path if path is not None else Config.SHAROUSHI_BIKO_LEDGER_CSV
+    if not path or not os.path.exists(path):
+        return {}
+    out = {}
+    for i, r in enumerate(_read_csv_rows(path), start=2):
+        ym, emp, item = _txt(r.get("支給月")), _txt(r.get("社員番号")), _txt(r.get("項目"))
+        if not ym or not emp:
+            continue
+        if item not in BIKO_ITEMS:
+            raise SharoushiExportError(
+                f"{path} {i}行目: 項目 '{item}' は備考台帳では扱えません"
+                f"（使えるのは {' / '.join(BIKO_ITEMS)}）")
+        out[(ym, emp, item)] = _txt(r.get("理由"))
+    return out
+
+
+def save_biko_ledger(month, entries, path=None):
+    """画面で入れた理由を備考台帳へ書く（同じ 支給月×社員番号×項目 は置き換え）。
+
+    理由が空の行は台帳から**消す**（画面で空にしたら取り消せるようにするため）。
+    項目名が不正な行が1つでもあれば1行も書かずに SharoushiExportError にする。
+    Returns: 書き込んだ台帳のパス
+    """
+    path = path if path is not None else Config.SHAROUSHI_BIKO_LEDGER_CSV
+    cleaned = []
+    for e in entries or []:
+        emp, item = _txt(e.get("社員番号")), _txt(e.get("項目"))
+        if not emp:
+            raise SharoushiExportError("社員番号が空の行があります")
+        if item not in BIKO_ITEMS:
+            raise SharoushiExportError(
+                f"{emp}: 項目 '{item}' は備考台帳では扱えません")
+        cleaned.append({"支給月": month, "社員番号": emp, "氏名": _txt(e.get("氏名")),
+                        "項目": item, "理由": _txt(e.get("理由"))})
+    ledger = load_biko_ledger(path)
+    names = {}
+    for r in cleaned:
+        key = (r["支給月"], r["社員番号"], r["項目"])
+        if r["理由"]:
+            ledger[key] = r["理由"]
+        else:
+            ledger.pop(key, None)
+        names[(r["支給月"], r["社員番号"])] = r["氏名"]
+    # 既存行の氏名は読み直せないので、書き出し時に画面から来た氏名で補う
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=BIKO_LEDGER_COLS)
+        w.writeheader()
+        for (ym, emp, item) in sorted(ledger):
+            w.writerow({"支給月": ym, "社員番号": emp,
+                        "氏名": names.get((ym, emp), ""), "項目": item,
+                        "理由": ledger[(ym, emp, item)]})
+    return path
+
+
+def build_biko_rows(data, month, biko_ledger=None):
+    """イレギュラー5項目の発生分を {行, 理由待ち} で返す。
+
+    金額は jinjer が正（台帳には金額を持たせない＝二重管理にしない）。
+    理由が入っていない行は pending として画面へ返し、社労士へ渡す前に気づけるようにする。
+    """
+    biko_ledger = biko_ledger or {}
+    rows, pending = [], []
+    for person in data or []:
+        emp = _txt(person.get("employee_id"))
+        if classify_employee(emp) != "target":
+            continue
+        st = pick_statement(person.get("statements") or [])
+        if st is None:
+            continue
+        basic_info = st.get("basic_info") or {}
+        system = _txt((basic_info.get("salary_system") or {}).get("name"))
+        if system in EXCLUDED_SALARY_SYSTEMS:
+            continue
+        flat = flatten_payroll(st.get("payroll_info") or {})
+        name = ("%s %s" % (_txt(basic_info.get("last_name")),
+                           _txt(basic_info.get("first_name")))).strip()
+        for item, keys in BIKO_ITEMS.items():
+            amount = sum(flat.get(k, 0.0) for k in keys)
+            if not amount:
+                continue
+            reason = biko_ledger.get((month, emp, item), "")
+            row = {"社員番号": emp, "氏名": name, "給与体系": system,
+                   "項目": item, "金額": amount, "理由": reason}
+            rows.append(row)
+            if not reason:
+                pending.append(row)
+    rows.sort(key=lambda r: (r["社員番号"], list(BIKO_ITEMS).index(r["項目"])))
+    pending.sort(key=lambda r: (r["社員番号"], list(BIKO_ITEMS).index(r["項目"])))
+    return {"rows": rows, "pending": pending}
+
+
+def write_biko_csv(rows, out_path):
+    """備考CSVを cp932・CRLF で書く（本体CSVと同じ体裁）。"""
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="cp932", newline="", errors="replace") as f:
+        w = csv.writer(f, lineterminator="\r\n")
+        w.writerow(BIKO_CSV_COLS)
+        for r in rows:
+            w.writerow([format_cell(r[c]) if c == "金額" else r[c] for c in BIKO_CSV_COLS])
+    return out_path
+
+
+def default_biko_filename(today=None):
+    stamp = (today or datetime.date.today()).strftime("%Y%m%d")
+    return "備考%s.csv" % stamp
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +682,8 @@ def default_filename(month, today=None):
 
 
 def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
-             client=None, refresh=False, allow_unknown=False, filename=None):
+             client=None, refresh=False, allow_unknown=False, filename=None,
+             biko_csv=None):
     """指定支給月（'YYYY-MM'）の社労士CSVを作る。
 
     未知の支給・控除項目に金額が入っていたら **既定では例外で止める**
@@ -581,11 +714,20 @@ def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
             "列マッピングCSVに追記してから実行し直してください。")
     out_dir = os.path.join(out_base, ym_compact(month))
     path = write_csv(built["rows"], os.path.join(out_dir, filename or default_filename(month)))
+    # 備考CSV（イレギュラー5項目の発生理由）。理由が空でも行は出し、pending で画面に知らせる。
+    biko = build_biko_rows(data, month, load_biko_ledger(biko_csv))
+    biko_path = write_biko_csv(biko["rows"], os.path.join(out_dir, default_biko_filename()))
     return {
         "month": month,
         "path": path,
         "filename": os.path.basename(path),
         "out_dir": out_dir,
+        "biko_path": biko_path,
+        "biko_filename": os.path.basename(biko_path),
+        "biko_rows": biko["rows"],
+        "biko_pending": biko["pending"],
+        "biko_ledger_path": (biko_csv if biko_csv is not None
+                             else Config.SHAROUSHI_BIKO_LEDGER_CSV),
         "rows": len(built["rows"]),
         "systems": built["systems"],
         "unknown": built["unknown"],

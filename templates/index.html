@@ -649,6 +649,23 @@
             </div>
             <div id="sharoushi-file" style="margin-bottom:10px"></div>
             <div id="sharoushi-warn-area" style="display:none; margin-bottom:10px"></div>
+            <div id="sharoushi-biko-area" style="display:none; margin-bottom:10px; padding:10px;
+                 border:1px solid #d6c48a; background:#FAF6EA; border-radius:4px">
+                <div class="section-title" style="font-size:13px; margin-bottom:2px">
+                    イレギュラー発生分の理由
+                </div>
+                <div class="hint" style="margin-bottom:6px">
+                    定常外業務対応手当・その他手当・現物支給・支給過不足調整・社保調整が発生した人です。
+                    金額は jinjer が正なので、ここには<b>理由だけ</b>を入れます。
+                    保存すると備考CSVに反映されます（空にすると台帳から消えます）。
+                    <span id="sharoushi-biko-path" style="display:block; margin-top:2px; opacity:.8"></span>
+                </div>
+                <div id="sharoushi-biko-rows"></div>
+                <div style="margin-top:8px">
+                    <button type="button" class="btn btn-primary" id="sharoushi-biko-save-btn">💾 理由を保存して作り直す</button>
+                    <span id="sharoushi-biko-status" class="status-text"></span>
+                </div>
+            </div>
             <div id="sharoushi-detail" style="margin-bottom:10px"></div>
             <div style="margin-top:10px">
                 <div class="section-title" style="font-size:13px; margin-bottom:4px">先頭10人ぶんのプレビュー</div>

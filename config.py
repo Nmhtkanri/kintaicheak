@@ -160,6 +160,12 @@ class Config:
     # 列: 支給月, 社員番号, 氏名, 項目, 金額, メモ
     SHAROUSHI_EXTRA_LEDGER_CSV = os.environ.get(
         "SHAROUSHI_EXTRA_LEDGER_CSV", r"Z:\API連携\docs\社労士モード_追加支給台帳.csv")
+    # イレギュラー発生5項目（定常外業務対応手当・その他手当・現物支給・支給過不足調整・
+    # 社保調整）の発生理由。金額は jinjer が正で、ここには理由だけを持たせる。
+    # 画面から入力するが、共有フォルダなので Excel で直接直しても次回実行から効く。
+    # 列: 支給月, 社員番号, 氏名, 項目, 理由
+    SHAROUSHI_BIKO_LEDGER_CSV = os.environ.get(
+        "SHAROUSHI_BIKO_LEDGER_CSV", r"Z:\API連携\docs\社労士モード_備考台帳.csv")
     # 生成物の置き場（氏名・給与額を含むのでローカル）
     SHAROUSHI_OUTPUT_DIR = os.environ.get("SHAROUSHI_OUTPUT_DIR", "outputs/sharoushi")
 
