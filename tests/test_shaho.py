@@ -440,6 +440,45 @@ class TeijiKetteiTests(_ClassMasterMixin, unittest.TestCase):
         self.assertTrue(tk.approx_used)
 
 
+class PremiumTests(unittest.TestCase):
+    """保険料の丸めと対象区分。"""
+
+    def test_rounding_modes(self):
+        from services.shaho_check import round_premium
+        self.assertEqual(round_premium(100.5, "50sen"), 100)    # 50銭ちょうど→切捨て
+        self.assertEqual(round_premium(100.51, "50sen"), 101)   # 50銭超→切上げ
+        self.assertEqual(round_premium(100.49, "50sen"), 100)
+        self.assertEqual(round_premium(100.9, "floor"), 100)
+        self.assertEqual(round_premium(100.1, "ceil"), 101)
+        self.assertEqual(round_premium(100.5, "round"), 101)
+
+    def test_premiums_respect_classifications(self):
+        from services.shaho_check import calc_premiums
+        master = load_from_workbook(build_workbook())
+        bi = {"health_insurance_calculation_classification": {"name": "被保険者（対象）"},
+              "care_insurance_calculation_classification": {"name": "第2号被保険者"},
+              "employees_pension": {"calculation_classification": {"name": "被保険者（対象）"}}}
+        p = calc_premiums(620000, 620000, bi, master, "50sen")
+        self.assertEqual(p["kenpo"], 28737)                     # 実測値の再現
+        self.assertEqual(p["konen"], 56730)
+        self.assertEqual(p["kaigo"], 5580)
+        bi2 = dict(bi, care_insurance_calculation_classification={"name": "対象外"},
+                   employees_pension={"calculation_classification": {"name": "70歳以上（対象外）"}})
+        p2 = calc_premiums(620000, 620000, bi2, master, "50sen")
+        self.assertEqual((p2["kaigo"], p2["konen"]), (0, 0))    # 介護外・70歳以上は0
+        self.assertEqual(p2["kenpo"], 28737)                    # 健保だけは続く
+        bi3 = dict(bi, health_insurance_calculation_classification={"name": "対象外"})
+        self.assertEqual(calc_premiums(620000, 620000, bi3, master, "50sen"),
+                         {"kenpo": 0, "kodomo": 0, "kaigo": 0, "konen": 0})
+
+    def test_status_priority_merge(self):
+        from services.shaho_check import merge_status
+        self.assertEqual(merge_status("OK", "DIFFERENCE"), "DIFFERENCE")
+        self.assertEqual(merge_status("EXEMPTION_REVIEW", "DIFFERENCE"), "EXEMPTION_REVIEW")
+        self.assertEqual(merge_status("NOT_APPLICABLE", "OK"), "OK")
+        self.assertEqual(merge_status("PROVISIONAL_OK", "OK"), "PROVISIONAL_OK")
+
+
 class RealFileTests(unittest.TestCase):
     """実在の令和8年度Excelを読む（共有フォルダが無ければスキップ）。"""
 
