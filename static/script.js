@@ -109,6 +109,7 @@ const MODE_HINTS = {
     csv_export: 'シフト表を読み取って jinjer へ登録する',
     keiri:      'freee 取引インポート用の4CSVを作る',
     sharoushi:  '社労士へ渡す給与CSVを作る（jinjerには書きません）',
+    shaho:      '標準報酬月額の検算と保険料突合（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
     mail:       '下書きのみ作成・送信はしません',
     health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
@@ -142,6 +143,7 @@ function applyModeUI(mode) {
     const kiCard = document.getElementById('ki-card');
     const keiriCard = document.getElementById('keiri-card');
     const sharoushiCard = document.getElementById('sharoushi-card');
+    const shahoCard = document.getElementById('shaho-card');
     const mailCard = document.getElementById('mail-card');
     const healthCard = document.getElementById('health-card');
     const sseCard = document.getElementById('sse-card');
@@ -150,10 +152,11 @@ function applyModeUI(mode) {
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
     const isSharoushi = mode === 'sharoushi';
+    const isShaho = mode === 'shaho';
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isMail && !isHealthHpm;
+        && !isShaho && !isMail && !isHealthHpm;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -191,6 +194,8 @@ function applyModeUI(mode) {
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
     // 社労士モード: 社労士CSV生成カードのみ表示
     if (sharoushiCard) sharoushiCard.style.display = isSharoushi ? '' : 'none';
+    // 標準報酬チェック: 検算カードのみ表示
+    if (shahoCard) shahoCard.style.display = isShaho ? '' : 'none';
     // メール下書きモード: メールカードのみ表示（初回表示時にテンプレ一覧を読み込む）
     if (mailCard) {
         mailCard.style.display = isMail ? '' : 'none';
@@ -2915,4 +2920,61 @@ if (sharoushiRunBtn) {
             }
         });
     }
+}
+
+// =============================================================================
+// 標準報酬チェック — 定時決定の検算と保険料突合
+// =============================================================================
+function shahoShowError(msgs) {
+    const el = document.getElementById('shaho-error-area');
+    if (!el) return;
+    const list = Array.isArray(msgs) ? msgs : [msgs];
+    el.innerHTML = list.map(m => '<div>' + escapeHtml(m) + '</div>').join('');
+    el.style.display = list.length ? 'block' : 'none';
+}
+
+const shahoRunBtn = document.getElementById('shaho-run-btn');
+if (shahoRunBtn) {
+    shahoRunBtn.addEventListener('click', async () => {
+        const status = document.getElementById('shaho-status');
+        shahoShowError([]);
+        const fd = new FormData();
+        fd.append('year', document.getElementById('shaho-year').value.trim());
+        fd.append('check_month', document.getElementById('shaho-check-month').value.trim());
+        shahoRunBtn.disabled = true;
+        status.textContent = '検算中…（30秒ほどかかります）';
+        document.getElementById('shaho-result-area').style.display = 'none';
+        try {
+            const res = await fetch('/shaho_run', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) {
+                shahoShowError(data.errors || ['実行に失敗しました']);
+                status.textContent = '';
+                return;
+            }
+            document.getElementById('shaho-cnt-n').textContent = data.n;
+            document.getElementById('shaho-cnt-review').textContent = data.review_n;
+            document.getElementById('shaho-statuses').innerHTML =
+                '<table class="keiri-md-table"><tr><th>判定</th><th>人数</th></tr>'
+                + data.statuses.map(s => '<tr' + (s.review ? ' style="background:#FFF6F6"' : '')
+                    + '><td>' + (s.review ? '⚠ ' : '') + escapeHtml(s.label) + '</td><td>'
+                    + s.count + '名</td></tr>').join('')
+                + '</table>';
+            const dl = (fn) => '/shaho_download/' + data.year + '/' + encodeURIComponent(fn);
+            document.getElementById('shaho-files').innerHTML =
+                '<a class="btn btn-sm" href="' + dl(data.xlsx) + '">📊 Excelをダウンロード</a> '
+                + '<a class="btn btn-sm" href="' + dl(data.json) + '">JSON</a>'
+                + '<div class="hint" style="margin-top:4px">'
+                + escapeHtml(data.year + '年4〜6月支給 → 9月適用予定 / 突合月 ' + data.check_month)
+                + '<br>保存先: ' + escapeHtml(data.out_dir)
+                + '（個人情報を含むため共有フォルダへ置かないでください）</div>';
+            document.getElementById('shaho-result-area').style.display = 'block';
+            status.textContent = '完了';
+        } catch (e) {
+            shahoShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            shahoRunBtn.disabled = false;
+        }
+    });
 }

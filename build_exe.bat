@@ -50,6 +50,10 @@ python -m PyInstaller ^
   --hidden-import services.health_hpm_csv ^
   --hidden-import services.health_hpm_pdf ^
   --hidden-import services.sharoushi_export ^
+  --hidden-import services.shaho_master ^
+  --hidden-import services.shaho_engine ^
+  --hidden-import services.shaho_check ^
+  --hidden-import services.shaho_report ^
   launcher.py
 
 if errorlevel 1 goto :build_failed

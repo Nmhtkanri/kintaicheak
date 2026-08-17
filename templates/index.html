@@ -26,6 +26,10 @@
             <input type="radio" name="mode" value="sharoushi">
             <span class="mode-tab-face">社労士CSV</span>
         </label>
+        <label class="mode-tab" title="4〜6月の報酬から9月適用の標準報酬月額を検算する">
+            <input type="radio" name="mode" value="shaho">
+            <span class="mode-tab-face">標準報酬</span>
+        </label>
         <label class="mode-tab" title="シフト表を読み取って jinjer へ登録する">
             <input type="radio" name="mode" value="csv_export">
             <span class="mode-tab-face">スケジュールアップロード</span>
@@ -673,6 +677,50 @@
             </div>
         </div>
         <div id="sharoushi-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- ==== 標準報酬チェック: 定時決定の検算と保険料突合 ==== -->
+    <div class="workflow-card mode-accent acc-keiri" id="shaho-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keiri">🧮</span>
+            <div>
+                <div class="card-title">
+                    標準報酬月額を検算する
+                    <span class="tag tag-safe">読み取りのみ・jinjerには書きません</span>
+                </div>
+                <p class="card-lead">4〜6月支給の報酬から <b>9月適用予定の標準報酬月額</b> を計算し、jinjer の登録値・保険料控除と突合します。</p>
+            </div>
+        </div>
+        <div class="fields">
+            <label class="field field-inline">
+                <span class="field-label">算定年</span>
+                <input type="text" id="shaho-year" placeholder="2026" style="width:100px">
+                <span class="field-sub">空欄なら自動（7月以降=当年）。{年}年4〜6月支給 → 9月適用</span>
+            </label>
+            <label class="field field-inline">
+                <span class="field-label">突合月</span>
+                <input type="text" id="shaho-check-month" placeholder="2026-07" style="width:130px">
+                <span class="field-sub">空欄ならキャッシュの最新月。この月の控除＝前月分の社保と比べます</span>
+            </label>
+            <div class="hint">
+                給与明細は経理モードと共用のキャッシュを読みます（APIは叩きません）。
+                要確認が0にならないのは正常です — 「差異」は9月に改定されるべき人のリストです。
+            </div>
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="shaho-run-btn">🧮 検算を実行</button>
+            <span id="shaho-status" class="status-text"></span>
+        </div>
+        <div id="shaho-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:10px">
+                <div class="summary-card"><div class="card-label">対象人数</div><div class="card-value" id="shaho-cnt-n">0</div></div>
+                <div class="summary-card"><div class="card-label">要確認</div><div class="card-value" id="shaho-cnt-review">0</div></div>
+            </div>
+            <div id="shaho-statuses" style="margin-bottom:10px"></div>
+            <div id="shaho-files"></div>
+        </div>
+        <div id="shaho-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
     {% raw %}

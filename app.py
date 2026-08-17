@@ -2933,6 +2933,83 @@ def sharoushi_download(ym, filename):
 
 
 # =============================================================================
+# 標準報酬チェック — 定時決定の検算と保険料突合（jinjerはGETのみ）
+# =============================================================================
+
+@app.route("/shaho_run", methods=["POST"])
+def route_shaho_run():
+    """4〜6月支給の報酬から9月適用予定の標準報酬月額を計算し、控除実績と突合する。
+
+    フォーム:
+      - year        : 算定年（省略時は 7月以降=当年）
+      - check_month : 控除突合の支給月 YYYY-MM（省略時はキャッシュの最新月）
+    """
+    from services.shaho_check import REVIEW_STATUSES, STATUS_JA, run_check
+    from services.shaho_master import ShahoMasterError
+    from services.shaho_report import write_reports
+
+    year_text = (request.form.get("year") or "").strip()
+    if year_text and not re.fullmatch(r"\d{4}", year_text):
+        return jsonify({"success": False, "errors": ["算定年は西暦4桁で入力してください"]}), 400
+    if year_text:
+        year = int(year_text)
+    else:
+        import datetime as _datetime
+        today = _datetime.date.today()
+        year = today.year if today.month >= 7 else today.year - 1
+
+    check_month = (request.form.get("check_month") or "").strip()
+    if check_month and not re.fullmatch(r"\d{4}-\d{2}", check_month):
+        return jsonify({"success": False,
+                        "errors": ["突合月は YYYY-MM 形式で入力してください"]}), 400
+    if not check_month:
+        raw = os.path.join(Config.KEIRI_OUTPUT_DIR, "raw")
+        cached = sorted(f[len("salary_statements_"):-len(".json")]
+                        for f in os.listdir(raw)
+                        if f.startswith("salary_statements_")) if os.path.isdir(raw) else []
+        if not cached:
+            return jsonify({"success": False,
+                            "errors": ["給与明細のキャッシュがありません"
+                                       "（先に経理モードを実行してください）"]}), 400
+        check_month = cached[-1]
+
+    try:
+        check = run_check(year, check_month)
+        out = write_reports(check)
+    except ShahoMasterError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except Exception as e:
+        logger.exception("shaho_run failed")
+        return jsonify({"success": False, "errors": [f"実行に失敗しました: {e}"]}), 500
+
+    counts = {}
+    for r in check["results"]:
+        counts[r.total_status] = counts.get(r.total_status, 0) + 1
+    logger.info("shaho_run: year=%d check=%s n=%d review=%d",
+                year, check_month, out["n"], out["review_n"])
+    return jsonify({
+        "success": True, "year": year, "check_month": check_month,
+        "n": out["n"], "review_n": out["review_n"],
+        "statuses": [{"status": st, "label": STATUS_JA[st], "count": counts[st],
+                      "review": st in REVIEW_STATUSES}
+                     for st in STATUS_JA if counts.get(st)],
+        "xlsx": os.path.basename(out["xlsx"]),
+        "json": os.path.basename(out["json"]),
+        "out_dir": os.path.abspath(os.path.dirname(out["xlsx"])),
+    })
+
+
+@app.route("/shaho_download/<year>/<path:filename>")
+def shaho_download(year, filename):
+    """標準報酬チェックの生成物をダウンロードする（outputs/shaho/{YYYY}/ 配下のみ）。"""
+    safe_year = os.path.basename(year)
+    if not re.fullmatch(r"\d{4}", safe_year):
+        return jsonify({"error": "年の指定が不正です"}), 400
+    folder = os.path.abspath(os.path.join(Config.SHAHO_OUTPUT_DIR, safe_year))
+    return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
+
+
+# =============================================================================
 # メール下書きモード — 一覧表×テンプレート×メール台帳 → Outlook 下書き
 # =============================================================================
 # 作るのは下書きまで（直接送信のルートは存在しない）。送信は人が Outlook で行う。
