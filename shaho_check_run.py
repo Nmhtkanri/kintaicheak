@@ -68,6 +68,10 @@ def main() -> int:
         print(f"[NG] {e}")
         return 1
 
+    if out["open_months"]:
+        print("⚠ 給与が未確定の月があります: "
+              + "、".join(f"{ym}（{n}名）" for ym, n in sorted(out["open_months"].items())))
+        print("  その月を含む人は情報不足に落としています。確定してから再実行してください。")
     counts = {}
     for r in check["results"]:
         counts[r.total_status] = counts.get(r.total_status, 0) + 1

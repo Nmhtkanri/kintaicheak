@@ -372,15 +372,51 @@ class BaseDaysTests(unittest.TestCase):
         self.assertEqual((bd.days, bd.basis, bd.approx), (30, "暦日", False))
         self.assertEqual(payment_base_days(_pi_shaho(), "月給制2", "2026-05").days, 31)
 
-    def test_monthly_with_absence_is_approximate(self):
-        bd = payment_base_days(_pi_shaho(kintai={"kintai11": 20}), "月給制3", "2026-06")
-        self.assertEqual(bd.days, 10)
-        self.assertTrue(bd.approx)
-
     def test_hourly_uses_working_plus_paid_leave(self):
-        bd = payment_base_days(_pi_shaho(kintai={"kintai10": 15, "kintai13": 3}),
+        bd = payment_base_days(_pi_shaho(kintai={"kintai10": 15, "kintai13": 3},
+                                         labels={"kintai10": "出勤日数",
+                                                 "kintai13": "前月有休消化日数"}),
                                "時給制1", "2026-04")
         self.assertEqual((bd.days, bd.approx), (18, False))
+
+    def test_hourly_reads_by_label_not_id(self):
+        """項目IDは月で意味が変わる。2026-04 は kintai6=出勤日数・kintai8=前月有給消化日数。"""
+        bd = payment_base_days(_pi_shaho(kintai={"kintai6": 23, "kintai8": 0},
+                                         labels={"kintai6": "出勤日数",
+                                                 "kintai8": "前月有給消化日数"}),
+                               "時給制1", "2026-04")
+        self.assertEqual(bd.days, 23)
+
+    def test_paid_leave_label_variants(self):
+        """「有給」「有休」の表記ゆれを両方拾う。"""
+        for label in ("前月有給消化日数", "前月有休消化日数"):
+            bd = payment_base_days(_pi_shaho(kintai={"a": 10, "b": 5},
+                                             labels={"a": "出勤日数", "b": label}),
+                                   "時給制1", "2026-05")
+            self.assertEqual(bd.days, 15, label)
+
+    def test_zero_attendance_with_pay_is_treated_as_missing(self):
+        """出勤日数0なのに報酬が出ている＝未入力を疑い、0日として除外しない。
+
+        2026-05 支給分は時給制49名全員が出勤日数ゼロだった（体系移行月の入力漏れ）。
+        """
+        bd = payment_base_days(_pi_shaho(kintai={"a": 0}, labels={"a": "出勤日数"},
+                                         other={"other5": 480000}),
+                               "時給制1", "2026-05")
+        self.assertIsNone(bd.days)
+        self.assertIn("未入力", bd.basis)
+
+    def test_zero_attendance_without_pay_is_really_zero(self):
+        """報酬も0なら本当に稼働ゼロ（休職など）。0日として扱う。"""
+        bd = payment_base_days(_pi_shaho(kintai={"a": 0}, labels={"a": "出勤日数"},
+                                         other={"other5": 0}),
+                               "時給制1", "2026-05")
+        self.assertEqual(bd.days, 0)
+
+    def test_monthly_absence_read_by_label(self):
+        bd = payment_base_days(_pi_shaho(kintai={"x": 20}, labels={"x": "欠勤日数"}),
+                               "月給制3", "2026-06")
+        self.assertEqual((bd.days, bd.approx), (10, True))
 
     def test_hourly_without_kintai_is_unknown(self):
         bd = payment_base_days(_pi_shaho(), "時給制1", "2026-04")
@@ -394,9 +430,9 @@ class TeijiKetteiTests(_ClassMasterMixin, unittest.TestCase):
     def _master(self):
         return load_from_workbook(build_workbook())
 
-    def _assess(self, ym, base, days_kintai=None, system="月給制1"):
+    def _assess(self, ym, base, days_kintai=None, system="月給制1", labels=None):
         pi = _pi_shaho(shikyu={"allowance1": base}, kintai=days_kintai,
-                       other={"other5": base})
+                       other={"other5": base}, labels=labels)
         return assess_month(ym, pi, system, self.cm, threshold=17)
 
     def test_average_is_floored_and_graded(self):
@@ -412,7 +448,8 @@ class TeijiKetteiTests(_ClassMasterMixin, unittest.TestCase):
     def test_low_base_days_month_is_excluded(self):
         """17日未満の月は平均から除外（時給14日→除外）。"""
         a = [self._assess("2026-04", 68000),
-             self._assess("2026-05", 30000, days_kintai={"kintai10": 14}, system="時給制1"),
+             self._assess("2026-05", 30000, days_kintai={"k": 14},
+                          labels={"k": "出勤日数"}, system="時給制1"),
              self._assess("2026-06", 68000)]
         tk = calc_teiji_kettei(a, self._master())
         self.assertEqual(tk.adopted_n, 2)
@@ -420,19 +457,21 @@ class TeijiKetteiTests(_ClassMasterMixin, unittest.TestCase):
         self.assertIn("14日", a[1].reason)
 
     def test_short_time_worker_threshold_11(self):
-        pi = _pi_shaho(shikyu={"allowance1": 30000}, kintai={"kintai10": 12},
-                       other={"other5": 30000})
+        pi = _pi_shaho(shikyu={"allowance1": 30000}, kintai={"k": 12},
+                       other={"other5": 30000}, labels={"k": "出勤日数"})
         ma = assess_month("2026-05", pi, "時給制1", self.cm, threshold=11)
         self.assertTrue(ma.adopted)
 
     def test_all_months_excluded_gives_no_average(self):
-        a = [self._assess("2026-04", 30000, days_kintai={"kintai10": 5}, system="時給制1")]
+        a = [self._assess("2026-04", 30000, days_kintai={"k": 5},
+                          labels={"k": "出勤日数"}, system="時給制1")]
         tk = calc_teiji_kettei(a, self._master())
         self.assertEqual(tk.adopted_n, 0)
         self.assertIsNone(tk.average)
 
     def test_gate_and_approx_flags_bubble_up(self):
-        pi = _pi_shaho(shikyu={"allowance1": 68000}, kintai={"kintai11": 3},
+        pi = _pi_shaho(shikyu={"allowance1": 68000}, kintai={"k": 3},
+                       labels={"k": "欠勤日数"},
                        other={"other5": 99999})     # ゲート割れ＋欠勤概算
         a = [assess_month("2026-04", pi, "月給制1", self.cm, threshold=17)]
         tk = calc_teiji_kettei(a, self._master())
@@ -477,6 +516,34 @@ class PremiumTests(unittest.TestCase):
         self.assertEqual(merge_status("EXEMPTION_REVIEW", "DIFFERENCE"), "EXEMPTION_REVIEW")
         self.assertEqual(merge_status("NOT_APPLICABLE", "OK"), "OK")
         self.assertEqual(merge_status("PROVISIONAL_OK", "OK"), "PROVISIONAL_OK")
+
+
+class ClosedMonthTests(unittest.TestCase):
+    """給与が未確定の月は値がまだ動くので、その月を含む人は信用しない。"""
+
+    def _map(self, closed_flags):
+        return {emp: {"basic_info": {}, "payroll_info": {"is_payroll_closed": c},
+                      "n_nonzero": 1}
+                for emp, c in closed_flags.items()}
+
+    def test_counts_open_and_closed(self):
+        from services.shaho_check import month_closed_stats
+        st = month_closed_stats(self._map({"2020001": True, "2020002": False,
+                                           "2020003": True}))
+        self.assertEqual((st["closed"], st["open"]), (2, 1))
+        self.assertEqual(st["open_emps"], ["2020002"])
+
+    def test_all_closed_reports_none_open(self):
+        from services.shaho_check import month_closed_stats
+        st = month_closed_stats(self._map({"2020001": True, "2020002": True}))
+        self.assertEqual((st["closed"], st["open"], st["open_emps"]), (2, 0, []))
+
+    def test_missing_flag_counts_as_open(self):
+        """フラグ自体が無い明細は「未確定」に倒す（安全側）。"""
+        from services.shaho_check import month_closed_stats
+        st = month_closed_stats({"2020001": {"basic_info": {}, "payroll_info": {},
+                                             "n_nonzero": 1}})
+        self.assertEqual(st["open"], 1)
 
 
 class RealFileTests(unittest.TestCase):

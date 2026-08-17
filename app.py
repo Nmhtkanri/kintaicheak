@@ -2990,6 +2990,7 @@ def route_shaho_run():
     return jsonify({
         "success": True, "year": year, "check_month": check_month,
         "n": out["n"], "review_n": out["review_n"],
+        "open_months": out["open_months"],
         "statuses": [{"status": st, "label": STATUS_JA[st], "count": counts[st],
                       "review": st in REVIEW_STATUSES}
                      for st in STATUS_JA if counts.get(st)],

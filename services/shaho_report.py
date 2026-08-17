@@ -68,6 +68,15 @@ def build_workbook(check: dict) -> Workbook:
         ("⚠ 9月適用前の「差異」は「改定予定」の意味",
          "9月のjinjer更新後にもう一度実行して答え合わせする"),
     ]]
+    # 給与が未確定の月（あるとスナップショットがまだ動くので結果を信用しない）
+    for ym, st in sorted(check.get("month_status", {}).items()):
+        rows.append({
+            "項目": f"給与の確定状況: {ym}",
+            "値": (f"確定 {st['closed']}名"
+                  + (f" / ⚠未確定 {st['open']}名（{'、'.join(st['open_emps'][:5])}）"
+                     if st["open"] else "")),
+            "区分": "要確認" if st["open"] else "",
+        })
     for st in [s for s in STATUS_JA if counts.get(s)]:
         rows.append({"項目": f"総合判定: {STATUS_JA[st]}（{st}）", "値": f"{counts[st]}名",
                      "区分": _kubun(st)})
@@ -162,7 +171,8 @@ def write_reports(check: dict) -> dict:
         "meta": {"year": check["year"], "check_month": check["check_month"],
                  "insurer": check["insurer"], "generated_at": stamp,
                  "grade_table": check["master"].path,
-                 "class_master": check["class_master"]["path"]},
+                 "class_master": check["class_master"]["path"],
+                 "month_status": check.get("month_status", {})},
         "employees": [{
             "emp": r.emp, "name": r.name, "system": r.system,
             "teiji_status": r.teiji_status, "check_status": r.check_status,
@@ -179,5 +189,7 @@ def write_reports(check: dict) -> dict:
     with open(jsn, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
     review_n = sum(1 for r in check["results"] if r.total_status in REVIEW_STATUSES)
+    open_months = {ym: st["open"] for ym, st in check.get("month_status", {}).items()
+                   if st["open"]}
     return {"xlsx": xlsx, "json": jsn, "review_n": review_n,
-            "n": len(check["results"])}
+            "n": len(check["results"]), "open_months": open_months}

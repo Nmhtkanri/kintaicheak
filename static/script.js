@@ -2954,6 +2954,14 @@ if (shahoRunBtn) {
             }
             document.getElementById('shaho-cnt-n').textContent = data.n;
             document.getElementById('shaho-cnt-review').textContent = data.review_n;
+            const openMonths = Object.entries(data.open_months || {});
+            document.getElementById('shaho-open-months').innerHTML = openMonths.length
+                ? '<div class="alert alert-warning"><b>給与が未確定の月があります: '
+                    + escapeHtml(openMonths.map(([m, n]) => m + '（' + n + '名）').join('、'))
+                    + '</b><div class="hint">未確定の月は報酬額も登録標準報酬月額もまだ動きます。'
+                    + 'その月を含む人は情報不足に落としています。給与を確定してから実行し直してください。'
+                    + '</div></div>'
+                : '';
             document.getElementById('shaho-statuses').innerHTML =
                 '<table class="keiri-md-table"><tr><th>判定</th><th>人数</th></tr>'
                 + data.statuses.map(s => '<tr' + (s.review ? ' style="background:#FFF6F6"' : '')

@@ -124,6 +124,22 @@ def _parse_date(s):
         return None
 
 
+def month_closed_stats(month_map: dict) -> dict:
+    """その月の給与確定状況（payroll_info.is_payroll_closed）。
+
+    **未確定の月は登録標準報酬月額も報酬額もまだ動く**ので、その月を含む算定・突合は
+    信用しない。確定済みの月は値が凍結される（2026-06 を3週間後に再取得して実社員232名が
+    完全一致することを実測。動いたのは未確定のテスト社員1名だけ）。
+    """
+    closed, open_emps = 0, []
+    for emp, rec in month_map.items():
+        if (rec.get("payroll_info") or {}).get("is_payroll_closed"):
+            closed += 1
+        else:
+            open_emps.append(emp)
+    return {"closed": closed, "open": len(open_emps), "open_emps": sorted(open_emps)}
+
+
 def judge_person(emp, months_data, check_pair, year, master, class_master, cfg) -> PersonResult:
     """1人分の判定。months_data={ym: rec}（4〜6月）、check_pair=(C−1月rec, C月rec)。"""
     res = PersonResult(emp=emp)
@@ -163,8 +179,14 @@ def judge_person(emp, months_data, check_pair, year, master, class_master, cfg) 
         res.teiji = tk
         menjo = _menjo_months(calc_months, months_data)
         multi = any(r["n_nonzero"] > 1 for r in recs if r)
-        if tk.gate_ng or tk.unclassified or multi or tk.adopted_n == 0:
+        # 給与が未確定の算定月は報酬額がまだ動くので、その人の算定は信用しない
+        open_calc = [m for m in calc_months
+                     if emp in (cfg.get("open_months") or {}).get(m, [])]
+        if tk.gate_ng or tk.unclassified or multi or tk.adopted_n == 0 or open_calc:
             res.teiji_status = "INSUFFICIENT_DATA"
+            if open_calc:
+                res.notes.append("算定月の給与が未確定（" + "、".join(open_calc)
+                                 + "）。確定してから再実行してください")
             if tk.gate_ng:
                 res.notes.append("検算ゲート不一致の月がある（報酬計≠雇用保険対象額）")
             if tk.unclassified:
@@ -206,7 +228,13 @@ def judge_person(emp, months_data, check_pair, year, master, class_master, cfg) 
     res.premiums = calc_premiums(base_kenpo, base_konen, base_bi, master, cfg["rounding"])
 
     actual_sum = sum(res.actuals.values())
-    if base_kenpo == 0 and actual_sum == 0:
+    open_check = [m for m in (ym_add(cfg["check_month"], -cfg["lag"]), cfg["check_month"])
+                  if emp in (cfg.get("open_months") or {}).get(m, [])]
+    if open_check:
+        res.check_status = "INSUFFICIENT_DATA"
+        res.notes.append("突合に使う月の給与が未確定（" + "、".join(open_check)
+                         + "）。確定してから再実行してください")
+    elif base_kenpo == 0 and actual_sum == 0:
         res.check_status = "NOT_APPLICABLE"
     elif prev_rec and is_shaho_menjo_prev(prev_rec["payroll_info"], c_pi):
         res.check_status = "EXEMPTION_REVIEW"
@@ -331,6 +359,10 @@ def run_check(year: int, check_month: str, insurer: str = None, out_base: str = 
                 "経理モードで取得するか shaho_check_run.py --fetch-missing を使ってください")
         months_all[ym] = load_statements_full(Config.KEIRI_OUTPUT_DIR, ym)
 
+    # 給与が未確定の月が混じっていないか（混じっているとスナップショットがまだ動く）
+    month_status = {ym: month_closed_stats(m) for ym, m in months_all.items()}
+    cfg["open_months"] = {ym: s["open_emps"] for ym, s in month_status.items() if s["open"]}
+
     everyone = sorted(set().union(*[set(v) for v in months_all.values()]))
     prev_m, c_m = need[3], need[4]
     results = []
@@ -342,4 +374,5 @@ def run_check(year: int, check_month: str, insurer: str = None, out_base: str = 
     revisions = detect_revisions(months_all)
     return {"year": year, "check_month": check_month, "insurer": insurer,
             "master": master, "class_master": class_master, "cfg": cfg,
-            "results": results, "revisions": revisions, "out_base": out_base}
+            "results": results, "revisions": revisions, "out_base": out_base,
+            "month_status": month_status}

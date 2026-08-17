@@ -20,6 +20,7 @@ r"""標準報酬月額チェックのエンジン（報酬集計・支払基礎�
 from __future__ import annotations
 
 import calendar
+import unicodedata
 from dataclasses import dataclass, field
 
 from services.keiri_engine import fetch_statements, pi_item, to_number
@@ -27,10 +28,15 @@ from services.shaho_master import ShahoMaster, resolve_class
 
 # 検算の基準（雇用保険対象額。0円のときは労災対象額で代用）
 GROSS_KEYS = ("salary_other_items:other5", "salary_other_items:other6")
-# 支払基礎日数の材料
-K_SHUKKIN = "salary_attendance_items:kintai10"      # 出勤日数
-K_KEKKIN = "salary_attendance_items:kintai11"       # 欠勤日数
-K_YUKYU = "salary_attendance_items:kintai13"        # 前月有休消化日数
+# 支払基礎日数の材料は **ラベルで引く**。項目IDは月によって意味が変わるため。
+#   2026-04（旧体系）: kintai6=出勤日数 / kintai7=欠勤日数 / kintai8=前月有給消化日数
+#   2026-05以降      : kintai10=出勤日数 / kintai11=欠勤日数 / kintai13=前月有休消化日数
+# IDで引くと4月が全員「出勤日数0日」になり、時給制の4月が丸ごと算定から外れる
+# （2026-08-17 に実データで発覚。齋藤2011001・MAHARJAN2022002 ほか7名の等級ズレの原因）。
+# 「有給」と「有休」の表記ゆれもあるので、正規化して部分一致で拾う。
+LABEL_SHUKKIN = ("出勤日数",)
+LABEL_KEKKIN = ("欠勤日数",)
+LABEL_YUKYU = ("前月有給消化日数", "前月有休消化日数", "有給消化日数", "有休消化日数")
 # 登録済みの標準報酬月額（basic_info。円）
 BI_KENPO_SMR = "health_insurance"
 BI_KONEN_SMR = "employee_pension"
@@ -180,32 +186,54 @@ class BaseDays:
     approx: bool = False                   # 概算（所定日数がAPIに無いための代用）
 
 
-def _kintai_value(pi, key):
-    """勤怠項目の値。項目自体が無ければ None（0とは区別する）。"""
-    it = pi_item(pi, key)
-    if it is None:
-        return None
-    n = to_number(it.get("value"))
-    return 0.0 if n is None else n
+def _kintai_by_label(pi, labels) -> float | None:
+    """勤怠項目をラベルで引く。該当の項目が1つも無ければ None（0とは区別する）。"""
+    wanted = {unicodedata.normalize("NFKC", s).replace(" ", "") for s in labels}
+    for it in (pi or {}).get("salary_attendance_items") or []:
+        if not isinstance(it, dict):
+            continue
+        label = (str(it.get("salary_system_label") or "").strip()
+                 or str(it.get("label") or "").strip())
+        if unicodedata.normalize("NFKC", label).replace(" ", "") in wanted:
+            n = to_number(it.get("value"))
+            return 0.0 if n is None else n
+    return None
 
 
 def payment_base_days(pi, system: str, ym: str) -> BaseDays:
-    """支払基礎日数。月給者=暦日数（欠勤があれば−欠勤の概算）、時給者=出勤＋有休。"""
+    """支払基礎日数。月給者=暦日数（欠勤があれば−欠勤の概算）、時給者=出勤＋有休。
+
+    材料はすべてラベルで引く（項目IDは月で意味が変わるため。上の定数のコメント参照）。
+    """
     year, month = int(ym[:4]), int(ym[5:7])
     calendar_days = calendar.monthrange(year, month)[1]
     if system in MONTHLY_SYSTEMS:
-        kekkin = _kintai_value(pi, K_KEKKIN) or 0.0
+        kekkin = _kintai_by_label(pi, LABEL_KEKKIN) or 0.0
         if kekkin > 0:
             # 正確には「就業規則の所定日数 − 欠勤日数」だが、所定日数は API に無い。
             # 暦日数−欠勤で代用し、概算フラグを立てる（採用しても最高 PROVISIONAL_OK）。
             return BaseDays(days=calendar_days - kekkin, basis="暦日-欠勤(概算)", approx=True)
         return BaseDays(days=calendar_days, basis="暦日")
     if system in HOURLY_SYSTEMS:
-        shukkin = _kintai_value(pi, K_SHUKKIN)
-        yukyu = _kintai_value(pi, K_YUKYU)
+        shukkin = _kintai_by_label(pi, LABEL_SHUKKIN)
+        yukyu = _kintai_by_label(pi, LABEL_YUKYU)
         if shukkin is None and yukyu is None:
             return BaseDays(days=None, basis="不明（勤怠項目なし）")
-        return BaseDays(days=(shukkin or 0.0) + (yukyu or 0.0), basis="出勤+有給")
+        days = (shukkin or 0.0) + (yukyu or 0.0)
+        # 出勤日数ゼロなのに報酬が出ている＝「0日働いた」ではなく jinjer 側の未入力を疑う。
+        # 2026-05 支給分は時給制49名**全員**が出勤日数ゼロだった（体系移行月の入力漏れ）。
+        # 0日として除外すると静かに算定から落ちるので、判定不能にして人の目に上げる。
+        if days == 0:
+            gross = 0.0
+            for gk in GROSS_KEYS:
+                it = pi_item(pi, gk)
+                n = to_number((it or {}).get("value"))
+                if n:
+                    gross = n
+                    break
+            if gross > 0:
+                return BaseDays(days=None, basis="不明（出勤日数が未入力の疑い）")
+        return BaseDays(days=days, basis="出勤+有給")
     # 未知の給与体系。勝手に暦日扱いにせず「不明」で返す（判定側で要確認へ）
     return BaseDays(days=None, basis=f"不明（給与体系 {system or '空'}）")
 
