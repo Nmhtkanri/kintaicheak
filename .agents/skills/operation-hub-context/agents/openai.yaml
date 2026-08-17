@@ -1,0 +1,4 @@
+interface:
+  display_name: "Operation Hub Context"
+  short_description: "Retrieve operating guidance and status safely"
+  default_prompt: "Use $operation-hub-context to prepare a safe change for Operation Hub."
