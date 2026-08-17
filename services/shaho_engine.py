@@ -37,6 +37,26 @@ GROSS_KEYS = ("salary_other_items:other5", "salary_other_items:other6")
 LABEL_SHUKKIN = ("出勤日数",)
 LABEL_KEKKIN = ("欠勤日数",)
 LABEL_YUKYU = ("前月有給消化日数", "前月有休消化日数", "有給消化日数", "有休消化日数")
+
+# ⚠ 2026-05 支給分の時給制だけは**ラベルすら信用できない**。
+# 体系移行の途中で、値は旧配置のままラベルだけ新体系に差し替わっている:
+#   kintai6  ラベル「内前月実績超過勤怠時間60時間以上」だが中身は **出勤日数**
+#            （46名・中央値20.0日。4月の出勤日数と同じ分布。kintai10 は空のまま）
+#   kintai8  ラベル「前月の法定休日労働時間」だが中身は **前月有給消化日数**（kintai13と完全一致）
+#   kintai9  ラベルなしだが中身は **有給休暇残**（kintai14と完全一致）
+#   kintai11 ラベル「欠勤日数」だが中身は **総法定外残業時間**（最大60。日数ではない）
+# 有休まわりは新スロットへコピーされたのに出勤日数だけ取り残された移行漏れ。
+# 過去month なので値はもう動かない。該当月だけスロットを明示して読む。
+SLOT_OVERRIDES = {
+    ("2026-05", "時給制"): {"出勤": "kintai6", "欠勤": None, "有休": "kintai13"},
+}
+
+
+def _slot_override(system: str, ym: str):
+    for (o_ym, o_sys), slots in SLOT_OVERRIDES.items():
+        if ym == o_ym and system.startswith(o_sys):
+            return slots
+    return None
 # 登録済みの標準報酬月額（basic_info。円）
 BI_KENPO_SMR = "health_insurance"
 BI_KONEN_SMR = "employee_pension"
@@ -186,6 +206,15 @@ class BaseDays:
     approx: bool = False                   # 概算（所定日数がAPIに無いための代用）
 
 
+def _kintai_value(pi, kintai_id) -> float | None:
+    """勤怠項目をスロットID直接で読む（ラベルが信用できない月の補正用）。"""
+    it = pi_item(pi, "salary_attendance_items:%s" % kintai_id)
+    if it is None:
+        return None
+    n = to_number(it.get("value"))
+    return 0.0 if n is None else n
+
+
 def _kintai_by_label(pi, labels) -> float | None:
     """勤怠項目をラベルで引く。該当の項目が1つも無ければ None（0とは区別する）。"""
     wanted = {unicodedata.normalize("NFKC", s).replace(" ", "") for s in labels}
@@ -215,6 +244,15 @@ def payment_base_days(pi, system: str, ym: str) -> BaseDays:
             return BaseDays(days=calendar_days - kekkin, basis="暦日-欠勤(概算)", approx=True)
         return BaseDays(days=calendar_days, basis="暦日")
     if system in HOURLY_SYSTEMS:
+        override = _slot_override(system, ym)
+        if override:
+            # ラベルが当てにならない月。スロットを直接指定して読む
+            shukkin = _kintai_value(pi, override["出勤"]) if override["出勤"] else None
+            yukyu = _kintai_value(pi, override["有休"]) if override["有休"] else None
+            days = (shukkin or 0.0) + (yukyu or 0.0)
+            if shukkin is None and yukyu is None:
+                return BaseDays(days=None, basis="不明（勤怠項目なし）")
+            return BaseDays(days=days, basis="出勤+有給（%s の配置ずれを補正）" % ym)
         shukkin = _kintai_by_label(pi, LABEL_SHUKKIN)
         yukyu = _kintai_by_label(pi, LABEL_YUKYU)
         if shukkin is None and yukyu is None:

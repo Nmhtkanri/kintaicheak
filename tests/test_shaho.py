@@ -392,8 +392,31 @@ class BaseDaysTests(unittest.TestCase):
         for label in ("前月有給消化日数", "前月有休消化日数"):
             bd = payment_base_days(_pi_shaho(kintai={"a": 10, "b": 5},
                                              labels={"a": "出勤日数", "b": label}),
-                                   "時給制1", "2026-05")
+                                   "時給制1", "2026-06")
             self.assertEqual(bd.days, 15, label)
+
+    def test_may_2026_slot_override(self):
+        """2026-05 の時給制はラベルすら当てにならないので、スロット直読みで補正する。
+
+        実データでは kintai6 のラベルが「内前月実績超過勤怠時間60時間以上」なのに
+        中身は出勤日数、kintai10（ラベル=出勤日数）は空、という移行漏れが起きていた。
+        """
+        pi = _pi_shaho(
+            kintai={"kintai6": 21.5, "kintai10": 0, "kintai13": 0.5, "kintai11": 60},
+            labels={"kintai6": "内前月実績超過勤怠時間60時間以上", "kintai10": "出勤日数",
+                    "kintai13": "前月有休消化日数", "kintai11": "欠勤日数"},
+            other={"other5": 480000})
+        bd = payment_base_days(pi, "時給制1", "2026-05")
+        self.assertEqual(bd.days, 22.0)                 # 21.5 出勤 + 0.5 有休
+        self.assertIn("配置ずれ", bd.basis)
+
+    def test_other_months_still_use_labels(self):
+        """補正は2026-05だけ。他の月はラベルで引く（同じ形でも kintai6 を出勤日数にしない）。"""
+        pi = _pi_shaho(
+            kintai={"kintai6": 21.5, "kintai10": 18},
+            labels={"kintai6": "内前月実績超過勤怠時間60時間以上", "kintai10": "出勤日数"},
+            other={"other5": 480000})
+        self.assertEqual(payment_base_days(pi, "時給制1", "2026-06").days, 18)
 
     def test_zero_attendance_with_pay_is_treated_as_missing(self):
         """出勤日数0なのに報酬が出ている＝未入力を疑い、0日として除外しない。
@@ -402,7 +425,7 @@ class BaseDaysTests(unittest.TestCase):
         """
         bd = payment_base_days(_pi_shaho(kintai={"a": 0}, labels={"a": "出勤日数"},
                                          other={"other5": 480000}),
-                               "時給制1", "2026-05")
+                               "時給制1", "2026-06")
         self.assertIsNone(bd.days)
         self.assertIn("未入力", bd.basis)
 
@@ -410,7 +433,7 @@ class BaseDaysTests(unittest.TestCase):
         """報酬も0なら本当に稼働ゼロ（休職など）。0日として扱う。"""
         bd = payment_base_days(_pi_shaho(kintai={"a": 0}, labels={"a": "出勤日数"},
                                          other={"other5": 0}),
-                               "時給制1", "2026-05")
+                               "時給制1", "2026-06")
         self.assertEqual(bd.days, 0)
 
     def test_monthly_absence_read_by_label(self):
@@ -448,9 +471,9 @@ class TeijiKetteiTests(_ClassMasterMixin, unittest.TestCase):
     def test_low_base_days_month_is_excluded(self):
         """17日未満の月は平均から除外（時給14日→除外）。"""
         a = [self._assess("2026-04", 68000),
-             self._assess("2026-05", 30000, days_kintai={"k": 14},
+             self._assess("2026-06", 30000, days_kintai={"k": 14},
                           labels={"k": "出勤日数"}, system="時給制1"),
-             self._assess("2026-06", 68000)]
+             self._assess("2026-07", 68000)]
         tk = calc_teiji_kettei(a, self._master())
         self.assertEqual(tk.adopted_n, 2)
         self.assertEqual(tk.average, 68000)
@@ -459,7 +482,7 @@ class TeijiKetteiTests(_ClassMasterMixin, unittest.TestCase):
     def test_short_time_worker_threshold_11(self):
         pi = _pi_shaho(shikyu={"allowance1": 30000}, kintai={"k": 12},
                        other={"other5": 30000}, labels={"k": "出勤日数"})
-        ma = assess_month("2026-05", pi, "時給制1", self.cm, threshold=11)
+        ma = assess_month("2026-06", pi, "時給制1", self.cm, threshold=11)
         self.assertTrue(ma.adopted)
 
     def test_all_months_excluded_gives_no_average(self):
