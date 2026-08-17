@@ -68,9 +68,15 @@ SEED_BY_KEY = {
     "salary_items:allowance50": ("対象外", "", "立替金（顧客請求分）＝実費弁償"),
     "salary_items:allowance51": ("対象外", "", "立替金＝実費弁償"),
     "salary_items:allowance52": ("対象外", "", "その他＝経費精算（実費弁償）"),
-    "salary_items:allowance53": ("現物", "0", "現物給与として報酬に数える（2026-08-14 谷津さん「恐らく対象」・"
-                                              "前田事務所へ確認中。対象外なら class を書き換えるだけ）。"
-                                              "other5に不算入＝現金総支給の外側なので検算からは除外"),
+    # 現物支給は月で性格が分かれる（2026-08-14 谷津さん確認）:
+    #   〜2026-04 = 労務の対象 → 現物給与として報酬に数える
+    #   2026-05〜 = Amazonギフトカード（恩恵的）→ 報酬対象外
+    "salary_items:allowance53": [
+        ("現物", "0", "", "2026-04",
+         "4月発生分は労務の対象＝現物給与として報酬に数える（2026-08-14 谷津さん確認）"),
+        ("対象外", "", "2026-05", "",
+         "2026-05以降はAmazonギフトカード＝恩恵的給付で報酬対象外（2026-08-14 谷津さん確認）"),
+    ],
     "salary_items:allowance54": ("対象", "0", "支給過不足調整（実測: other5に算入＝実支給。2026-05/06 で30人月）"),
     "salary_items:allowance8":  ("対象外", "", "暫定支給額の再掲（2026-03/04のみ使用・総支給額に入らない情報項目。"
                                               "経理の最終CSVでも13名全員未計上。2026-04実測: other5に不算入）"),
@@ -145,13 +151,16 @@ def collect_items(months, fetch=False):
 
 
 def seed_for(key, group):
-    """(key, グループ) のシード行リスト。期間つきエントリはそのまま複数行になる。"""
+    """(key, グループ) のシード行リスト。期間つきエントリ（リスト）はそのまま複数行になる。"""
     if group:
         seeded = SEED_BY_LABEL.get((key, group))
         if seeded:
             return seeded
     if key in SEED_BY_KEY:
-        cls, fixed, reason = SEED_BY_KEY[key]
+        v = SEED_BY_KEY[key]
+        if isinstance(v, list):
+            return v
+        cls, fixed, reason = v
         return [(cls, fixed, "", "", reason)]
     return [("未設定", "", "", "", "実データに出現。分類を決めてください")]
 
