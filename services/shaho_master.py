@@ -353,7 +353,12 @@ def _load_konen_bands(wb) -> list[tuple[int, int, int, int | None]]:
 # 2026-08 支給分からは実額の支給になった（経理モードの ZANTEI_LABELS_FROM と同じ事象）。
 CLASS_MASTER_COLS = ["source_key", "salary_system_label", "label", "class", "fixed",
                      "適用開始月", "適用終了月", "note"]
-CLASS_VALUES = ("対象", "対象外", "未設定")
+# 対象   = 通貨の報酬（検算ゲートの基準＝雇用保険対象額に入っている）
+# 現物   = 現物給与。報酬には数えるが、現金の総支給額の**外側**なので検算からは除く
+#          （実測: allowance53 は other5 に不算入）
+# 対象外 = 報酬に数えない（実費弁償・再掲・情報項目）
+# 未設定 = 判断待ち。金額が出たらその人は要確認へ落ちる
+CLASS_VALUES = ("対象", "現物", "対象外", "未設定")
 
 
 @dataclass(frozen=True)

@@ -105,13 +105,19 @@ def registered_smr(basic_info) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 @dataclass
 class Remuneration:
-    total: float = 0.0                     # 分類=対象の合計 ＝ その月の報酬
+    cash_total: float = 0.0                # 分類=対象（通貨報酬）の合計
+    genbutsu_total: float = 0.0            # 分類=現物（現物給与）の合計
     fixed_total: float = 0.0               # うち固定的賃金（fixed=1）の合計
     gross_ref: float = 0.0                 # 検算基準（other5、0なら other6）
-    gate_diff: float = 0.0                 # total − gross_ref（±0.5超は信用しない）
+    gate_diff: float = 0.0                 # cash_total − gross_ref（±0.5超は信用しない）
     breakdown: list = field(default_factory=list)      # [(source_key, label, 金額, class, fixed)]
     unclassified: list = field(default_factory=list)   # 金額があるのに分類できない項目
     unresolved_fixed: list = field(default_factory=list)   # 対象なのに fixed が空の項目
+
+    @property
+    def total(self) -> float:
+        """その月の報酬 ＝ 通貨 ＋ 現物。"""
+        return self.cash_total + self.genbutsu_total
 
     @property
     def gate_ok(self) -> bool:
@@ -139,7 +145,12 @@ def collect_remuneration(pi, class_master, ym: str = "9999-99") -> Remuneration:
         if rule.cls == "対象外":
             rem.breakdown.append((key, label, value, "対象外", rule.fixed))
             continue
-        rem.total += value
+        if rule.cls == "現物":
+            # 現物給与は報酬に数えるが、現金の総支給額の外側なので検算からは除く
+            rem.genbutsu_total += value
+            rem.breakdown.append((key, label, value, "現物", rule.fixed))
+            continue
+        rem.cash_total += value
         rem.breakdown.append((key, label, value, "対象", rule.fixed))
         if rule.fixed == "1":
             rem.fixed_total += value
@@ -153,7 +164,7 @@ def collect_remuneration(pi, class_master, ym: str = "9999-99") -> Remuneration:
             gross = n
             break
     rem.gross_ref = gross
-    rem.gate_diff = rem.total - gross
+    rem.gate_diff = rem.cash_total - gross
     return rem
 
 

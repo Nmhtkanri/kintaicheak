@@ -280,7 +280,8 @@ class _ClassMasterMixin:
            "salary_items:allowance18,,テレワーク手当,対象,0,,,\n"
            "salary_items:allowance5,,前月実績分,対象外,,,,\n"
            "salary_items:allowance51,,立替金,対象外,,,,\n"
-           "salary_items:allowance53,,現物支給,未設定,,,,\n")
+           "salary_items:allowance53,,現物支給,現物,0,,,\n"
+           "salary_items:allowance55,,謎の現物枠,未設定,,,,\n")
 
     @classmethod
     def setUpClass(cls):
@@ -333,12 +334,23 @@ class RemunerationTests(_ClassMasterMixin, unittest.TestCase):
         self.assertFalse(collect_remuneration(pi2, self.cm).gate_ok)
 
     def test_unclassified_item_with_amount_is_flagged(self):
-        pi = _pi_shaho(shikyu={"allowance1": 400000, "allowance53": 5280, "allowance99": 100},
+        pi = _pi_shaho(shikyu={"allowance1": 400000, "allowance55": 5280, "allowance99": 100},
                        other={"other5": 400000})
         rem = collect_remuneration(pi, self.cm)
         reasons = {u["source_key"]: u["理由"] for u in rem.unclassified}
-        self.assertEqual(reasons, {"salary_items:allowance53": "未設定",
+        self.assertEqual(reasons, {"salary_items:allowance55": "未設定",
                                    "salary_items:allowance99": "マスタに行が無い"})
+
+    def test_genbutsu_counts_as_pay_but_not_in_gate(self):
+        """現物支給は報酬に数えるが、現金グロスの外側なので検算からは除く。"""
+        pi = _pi_shaho(shikyu={"allowance1": 400000, "allowance53": 3000},
+                       other={"other5": 400000})       # 現物はother5に乗らない（実測どおり）
+        rem = collect_remuneration(pi, self.cm)
+        self.assertTrue(rem.gate_ok)                    # 検算は現金だけで成立
+        self.assertEqual(rem.cash_total, 400000)
+        self.assertEqual(rem.genbutsu_total, 3000)
+        self.assertEqual(rem.total, 403000)             # 報酬＝通貨＋現物
+        self.assertEqual(rem.unclassified, [])
 
     def test_hourly_allowance2_is_excluded_by_label(self):
         pi = _pi_shaho(shikyu={"allowance1": 408000, "allowance2": 692},
