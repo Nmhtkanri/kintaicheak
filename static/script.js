@@ -3351,7 +3351,7 @@ function invoiceShowError(messages) {
 
 function invoiceValidateRow(row) {
     const main = row._row_type === 'main';
-    let required = ['勘定科目', '税区分', '金額', '税計算区分', '税額', '備考', '従業員'];
+    let required = ['勘定科目', '税区分', '金額', '税計算区分', '税額', '備考', '部門', '従業員'];
     if (main) required = ['収支区分', '管理番号', '発生日', '支払期日', '取引先'].concat(required);
     const errors = [];
     required.forEach(key => {
@@ -3411,7 +3411,7 @@ function invoiceRenderRows() {
     if (!target) return;
     let html = '<table class="keiri-md-table"><tr>'
         + '<th>区分</th><th>従業員</th><th>管理番号</th><th>発生日</th><th>支払期日</th>'
-        + '<th>取引先</th><th>勘定科目</th><th>金額</th><th>税額</th><th>部門</th><th>確認</th><th>元PDF</th></tr>';
+        + '<th>取引先</th><th>勘定科目</th><th>金額</th><th>税額</th><th>部門</th><th>確認</th><th>元PDF</th><th>行操作</th></tr>';
     invoiceState.rows.forEach((row, index) => {
         const commute = row._row_type === 'commute';
         const sourceNames = (row._sources || []).map(path => String(path).split(/[\\/]/).pop());
@@ -3428,7 +3428,13 @@ function invoiceRenderRows() {
             + '<td>' + invoiceInput(index, '部門') + '</td>'
             + '<td class="invoice-row-errors" style="min-width:170px"></td>'
             + '<td title="' + escapeHtml((row._sources || []).join('\n')) + '" style="min-width:160px">'
-            + sourceNames.map(name => escapeHtml(name)).join('<br>') + '</td></tr>';
+            + sourceNames.map(name => escapeHtml(name)).join('<br>') + '</td>'
+            + '<td style="white-space:nowrap">'
+            + (!commute ? '<button type="button" class="btn invoice-row-action" data-action="duplicate" data-index="' + index
+                + '" style="padding:2px 6px; font-size:11px">複製</button>' : '')
+            + (row._manual_added ? '<button type="button" class="btn invoice-row-action" data-action="delete" data-index="' + index
+                + '" style="padding:2px 6px; font-size:11px; margin-left:4px">削除</button>' : '')
+            + '</td></tr>';
     });
     html += '</table>';
     target.innerHTML = html;
@@ -3436,9 +3442,39 @@ function invoiceRenderRows() {
         input.addEventListener('input', () => {
             const index = Number(input.dataset.index);
             invoiceState.rows[index][input.dataset.field] = input.value;
+            if (input.dataset.field === '従業員') {
+                invoiceState.rows[index]['備考'] = '総合計請求書：' + input.value.trim();
+            }
             invoiceRevalidate();
             document.getElementById('invoice-download-link').style.display = 'none';
             document.getElementById('invoice-log-link').style.display = 'none';
+        });
+    });
+    target.querySelectorAll('.invoice-row-action').forEach(button => {
+        button.addEventListener('click', () => {
+            const index = Number(button.dataset.index);
+            if (button.dataset.action === 'duplicate') {
+                const source = invoiceState.rows[index];
+                const copy = Object.assign({}, source, {
+                    '従業員': '',
+                    '管理番号': '',
+                    '備考': '総合計請求書：',
+                    _group_id: source._group_id + '-split-' + Date.now(),
+                    _sources: (source._sources || []).slice(),
+                    _warnings: ['合算請求書を手動で分割した行です。金額と税額の合計を元PDFと照合してください。'],
+                    _errors: [],
+                    _manual_added: true,
+                });
+                invoiceState.rows.splice(index + 1, 0, copy);
+            } else if (button.dataset.action === 'delete' && invoiceState.rows[index]._manual_added) {
+                invoiceState.rows.splice(index, 1);
+            }
+            document.getElementById('invoice-count-rows').textContent = String(invoiceState.rows.length);
+            document.getElementById('invoice-count-commute').textContent = String(
+                invoiceState.rows.filter(row => row._row_type === 'commute').length);
+            document.getElementById('invoice-download-link').style.display = 'none';
+            document.getElementById('invoice-log-link').style.display = 'none';
+            invoiceRenderRows();
         });
     });
     invoiceRevalidate();

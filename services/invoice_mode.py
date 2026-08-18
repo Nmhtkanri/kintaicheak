@@ -73,13 +73,23 @@ def _nfkc(value: Any) -> str:
 
 def normalize_name(value: Any) -> str:
     value = _nfkc(value).strip("()（）[]【】")
-    return re.sub(r"[\s　・･._\-]", "", value).casefold()
+    return re.sub(r"[\s　・･.,，_\-]", "", value).casefold()
 
 
 def _clean_display_name(value: Any) -> str:
     value = _nfkc(value).strip("()（）[]【】 ")
     value = re.sub(r"\s+(?:スタッフコード|就業期間|\d|[¥￥])(?:.|\n)*$", "", value)
-    return re.sub(r"[\s　]+", "", value)
+    return re.sub(r"[\s　,，]+", "", value)
+
+
+def _company_key(value: Any) -> str:
+    value = normalize_name(value)
+    for token in ("株式会社", "有限会社", "合同会社", "(請求先)", "請求先"):
+        value = value.replace(normalize_name(token), "")
+    for before, after in (("アイティーワン", "itone"), ("エリクソンジャパン", "ericsson"),
+                          ("ixナレッジ", "iki"), ("アイエックスナレッジ", "iki")):
+        value = value.replace(before, after)
+    return value
 
 
 def _parse_money(value: Any) -> int | None:
@@ -138,10 +148,12 @@ def _extract_labeled_date(text: str, labels: Sequence[str]) -> str:
 def _extract_employee_name(text: str, filename: str) -> str:
     patterns = (
         r"作業担当者\s*[:：]\s*([^\n]+)",
+        r"スタッフ\s+([^,\n]+,\s*[^\s\n]+)(?=\s+提出者)",
         r"スタッフ氏名\s*[:：]\s*([^\n]+)",
         r"スタッフ名\s+([^\n]+)",
         r"請求書明細\s*\n\s*([^\n]+)",
-        r"\bWorker\s*(?:Name)?\s*[:：]\s*([^\n]+)",
+        r"\bWorker\s+([A-Za-z'\-]+\s*,\s*[A-Za-z'\-]+)",
+        r"\bWorker\s+(?:Name\s*)?(.+?)(?=\s+(?:Submit|Remit|Site|Purchase|Business|Job|Status)|$)",
     )
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -160,11 +172,23 @@ def _extract_employee_name(text: str, filename: str) -> str:
 
 
 def _extract_partner(text: str) -> str:
+    for pattern in (
+        r"発注者\s+(.+?)\s+サプライヤ",
+        r"請求先\s+(.+?)(?:\s+差出人|\n)",
+        r"\bBuyer\s+([^\s\n]+)",
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            partner = _nfkc(match.group(1)).strip()
+            if (partner and partner not in {"送金先", "請求元"}
+                    and "エヌエム・ヒューマテック" not in partner):
+                return partner
     for line in text.splitlines()[:30]:
         normalized = _nfkc(line)
         if "御中" not in normalized:
             continue
         partner = re.sub(r"\s*御中.*$", "", normalized).strip()
+        partner = re.sub(r"^\(請求先\)", "", partner).strip()
         if partner and "エヌエム・ヒューマテック" not in partner:
             return partner
     return ""
@@ -192,20 +216,29 @@ def parse_invoice_text(text: str, filename: str = "") -> dict[str, Any]:
     commute_only = any(token in filename for token in ("立替", "交通費")) and (
         "請求" in filename or "invoice" in filename.casefold())
     issue_date = _extract_labeled_date(
-        normalized, (r"請求年月日", r"請求日", r"Invoice\s*Date"))
+        normalized, (r"請求年月日", r"請求日", r"発行日", r"請求確定日時", r"Invoice\s*Date"))
     due_date = _extract_labeled_date(
         normalized, (r"入金期日", r"お支払\s*期\s*日", r"支払\s*期\s*日", r"Due\s*Date"))
     tax_values = _money_values(normalized, (
         rf"10\s*[%％]\s*消費税\s*({_MONEY_TOKEN})",
         rf"^\s*消費税(?:額)?\s+({_MONEY_TOKEN})",
         rf"Consumption\s*Tax\s*[:：]?\s*({_MONEY_TOKEN})",
+        rf"消費税\s+({_MONEY_TOKEN})",
     ))
+    tax_values.extend(_last_money_on_lines(
+        normalized, ("消費税_10%", "調整(消費税等)", "消費税(10%)", "合計税額")))
     tax = max(tax_values) if tax_values else None
     total_values = _money_values(normalized, (
         rf"合計金額\s*[:：]?\s*({_MONEY_TOKEN})",
         rf"御請求金額総計\s*({_MONEY_TOKEN})",
         rf"^\s*請求合計\s+({_MONEY_TOKEN})",
         rf"Total\s*Amount\s*Due\s*[:：]?\s*({_MONEY_TOKEN})",
+        rf"請求総額\s*\(税込み\)\s*({_MONEY_TOKEN})",
+        rf"請求金額\s*({_MONEY_TOKEN})\s*円?\s*\(税込",
+        rf"^\s*総合計\s+({_MONEY_TOKEN})",
+        rf"^\s*支払金額\s+({_MONEY_TOKEN})",
+        rf"^\s*総計\s+({_MONEY_TOKEN})",
+        rf"^\s*合計\s+({_MONEY_TOKEN})",
     ))
     total = max(total_values) if total_values else None
 
@@ -226,6 +259,10 @@ def parse_invoice_text(text: str, filename: str = "") -> dict[str, Any]:
         rf"^\s*小計\s+({_MONEY_TOKEN})\s*$",
         rf"^\s*請求小計\s+({_MONEY_TOKEN})",
         rf"Subtotal\s*[:：]?\s*({_MONEY_TOKEN})",
+        rf"税抜合計額\s*({_MONEY_TOKEN})",
+        rf"10\s*%\s*対象\s+税抜金額\s*({_MONEY_TOKEN})",
+        rf"明細の小計\s*({_MONEY_TOKEN})",
+        rf"^\s*10\s*%\s*対象\s+({_MONEY_TOKEN})",
     ))
     subtotal = max(subtotal_values) if subtotal_values else None
     commute_values = _last_money_on_lines(
@@ -274,7 +311,7 @@ def load_target_roots(csv_path: os.PathLike[str] | str | None = None) -> list[st
                 continue
             raw = row.get("フォルダパス") or row.get("Path") or row.get("path") or ""
             if _nfkc(raw):
-                roots.append(_nfkc(raw).strip('"'))
+                roots.append(str(raw).strip().strip('"'))
         if roots:
             return roots
     return list(DEFAULT_TARGET_ROOTS)
@@ -408,10 +445,13 @@ def load_employee_master(sales_book: os.PathLike[str] | str | None,
                 employee_name = _clean_display_name(values[1])
                 if not employee_id or not employee_name:
                     continue
+                contract_type = _nfkc(values[3])
+                department = {"派遣": "他社向け派遣", "委任": "他社向け委任契約"}.get(contract_type, "")
                 master[normalize_name(employee_name)] = {
                     "employee_no": employee_id, "employee_name": employee_name,
                     "partner": re.sub(r"\s*/\s*", "", _nfkc(values[8])).replace("\n", ""),
-                    "department": "", "source": f"{Path(sales_book).name}:{sheet.title}",
+                    "department": department, "source": f"{Path(sales_book).name}:{sheet.title}",
+                    "partner_override": False,
                 }
     if override_csv and Path(override_csv).exists():
         for row in _read_csv_rows(Path(override_csv)):
@@ -426,8 +466,13 @@ def load_employee_master(sales_book: os.PathLike[str] | str | None,
                 "partner": _nfkc(row.get("freee取引先") or row.get("取引先") or current.get("partner", "")),
                 "department": _nfkc(row.get("部門") or current.get("department", "")),
                 "source": str(override_csv),
+                "partner_override": bool(_nfkc(row.get("freee取引先") or row.get("取引先"))),
             })
             master[key] = current
+            aliases = re.split(r"[|｜;；]", _nfkc(row.get("氏名別名") or row.get("別名")))
+            for alias in aliases:
+                if normalize_name(alias):
+                    master[normalize_name(alias)] = current
     return master
 
 
@@ -439,10 +484,20 @@ def _match_employee(document: dict[str, Any], master: dict[str, dict[str, str]])
     matches = [(key, value) for key, value in master.items() if len(key) >= 3 and key in haystack]
     if len(matches) == 1:
         return matches[0][1]
+
+    # PDFに担当者名が無い形式は、契約先と対象フォルダから一意に決まる場合だけ補う。
+    # BBSやIXのように同じ契約先に複数人いる場合は推測せず、画面補完へ回す。
+    company_haystack = _company_key(
+        f"{document.get('partner', '')} {document.get('source_file', '')}")
+    company_matches = []
+    for value in master.values():
+        partner_key = _company_key(value.get("partner", ""))
+        if len(partner_key) >= 3 and partner_key in company_haystack:
+            company_matches.append(value)
+    if len(company_matches) == 1:
+        return company_matches[0]
     return {"employee_no": "", "employee_name": _clean_display_name(document.get("employee_name", "")),
             "partner": "", "department": "", "source": ""}
-
-
 def _common_value(documents: Sequence[dict[str, Any]], key: str) -> tuple[str, bool]:
     values = {_nfkc(doc.get(key)) for doc in documents if _nfkc(doc.get(key))}
     if len(values) == 1:
@@ -452,7 +507,7 @@ def _common_value(documents: Sequence[dict[str, Any]], key: str) -> tuple[str, b
 
 def _validation_messages(row: dict[str, Any]) -> list[str]:
     row_type = row.get("_row_type", "main")
-    required = ["勘定科目", "税区分", "金額", "税計算区分", "税額", "備考", "従業員"]
+    required = ["勘定科目", "税区分", "金額", "税計算区分", "税額", "備考", "部門", "従業員"]
     if row_type == "main":
         required = ["収支区分", "管理番号", "発生日", "支払期日", "取引先", *required]
     errors = [f"{column}が未入力" for column in required if str(row.get(column, "")).strip() == ""]
@@ -503,6 +558,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         document["master_partner"] = employee.get("partner", "")
         document["department"] = employee.get("department", "") or _nfkc(default_department)
         document["master_source"] = employee.get("source", "")
+        if employee.get("partner_override") and employee.get("partner"):
+            document["partner"] = employee["partner"]
         documents.append(document)
 
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
