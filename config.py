@@ -148,6 +148,22 @@ class Config:
     KEIRI_OUTPUT_DIR = os.environ.get("KEIRI_OUTPUT_DIR", "outputs/keiri")
 
     # ------------------------------------------------------------------
+    # 請求書モード（共有PDF → freee 売上取引インポートCSV）
+    # ------------------------------------------------------------------
+    # 対象フォルダはコード内に指定済みの28件を持ち、CSVがある場合だけ優先する。
+    INVOICE_TARGET_ROOTS_CSV = os.environ.get(
+        "INVOICE_TARGET_ROOTS_CSV", r"Z:\API連携\docs\請求書モード_対象フォルダ.csv")
+    # 社員番号は年度営業実績の「総受注金額」行から補う。{year} は対象年に置換する。
+    INVOICE_SALES_BOOK_TEMPLATE = os.environ.get(
+        "INVOICE_SALES_BOOK_TEMPLATE",
+        r"Z:\売上管理\{year}年\{year}年度営業実績（その他).xlsx")
+    # 任意の補正マスタ。列: 氏名, 社員番号, freee取引先, 部門
+    INVOICE_MASTER_CSV = os.environ.get(
+        "INVOICE_MASTER_CSV", r"Z:\API連携\docs\請求書モード_freee補正マスタ.csv")
+    INVOICE_DEFAULT_DEPARTMENT = os.environ.get("INVOICE_DEFAULT_DEPARTMENT", "")
+    INVOICE_OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "outputs/invoice")
+
+    # ------------------------------------------------------------------
     # 社労士モード（前田事務所へ渡す給与CSVの生成）
     # ------------------------------------------------------------------
     # 列の対応は給与体系ごとに変わる。谷津さんが直せるよう共有フォルダに置き、
@@ -194,6 +210,44 @@ class Config:
     # 支払基礎日数の閾値（原則17日・短時間労働者11日）
     SHAHO_BASE_DAYS_THRESHOLD = int(os.environ.get("SHAHO_BASE_DAYS_THRESHOLD", "17"))
     SHAHO_BASE_DAYS_THRESHOLD_SHORT = int(os.environ.get("SHAHO_BASE_DAYS_THRESHOLD_SHORT", "11"))
+
+    # ------------------------------------------------------------------
+    # 標報投入（社労士の保険料一覧表PDF → jinjer報酬月額。**書き込みあり**）
+    # ------------------------------------------------------------------
+    # ⚠ 標準報酬月額は給与計算の土台で、階層は「書く（マスタ級）」。本来は共有exeに
+    #    入れない決まりだが、2026-08-17 に谷津さんの判断でハブに載せる例外とした。
+    #    その代わり、実行者は下の許可リストに載っている人だけに限定する。
+    #    **このCSVが読めないときは誰も書けない**（フェイルクローズ）。
+    #    列: ユーザー名, 表示名, 備考
+    SHAHO_IMPORT_ALLOWED_USERS_CSV = os.environ.get(
+        "SHAHO_IMPORT_ALLOWED_USERS_CSV",
+        r"Z:\API連携\docs\標報投入_書き込み許可ユーザー.csv")
+    # 実行台帳（いつ誰が誰の標報をいくらからいくらに変えたか）。追記専用・初回に自動生成。
+    SHAHO_IMPORT_LEDGER_CSV = os.environ.get(
+        "SHAHO_IMPORT_LEDGER_CSV", r"Z:\API連携\docs\標報投入_実行台帳.csv")
+    # 同時実行ロック。jinjer のレート制限はテナント単位なので、経費インポート等と
+    # 並走すると両方が429で詰まる。取れなければ実行しない。
+    SHAHO_IMPORT_LOCK_FILE = os.environ.get(
+        "SHAHO_IMPORT_LOCK_FILE", r"Z:\API連携\docs\標報投入_実行中.lock")
+    # 生成物（投入前バックアップ・投入結果）の置き場（氏名・報酬額を含むのでローカル）
+    SHAHO_IMPORT_OUTPUT_DIR = os.environ.get(
+        "SHAHO_IMPORT_OUTPUT_DIR", "outputs/shaho_import")
+    # PDFの写し・投入計画・進捗は各PCのローカルへ隔離する（健診モードと同じ理由）
+    SHAHO_IMPORT_SESSION_DIR = os.environ.get(
+        "SHAHO_IMPORT_SESSION_DIR",
+        os.path.join(
+            os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(),
+            "KintaiChecker", "shaho_import_sessions",
+        ),
+    )
+    SHAHO_IMPORT_SESSION_MAX_AGE_HOURS = int(
+        os.environ.get("SHAHO_IMPORT_SESSION_MAX_AGE_HOURS", "8"))
+    # 書き込みの間隔（秒）。社内の書き込み系スクリプトと同じ 25 秒。
+    # 詰めると429の再試行で結局遅くなる（健診44件の実測）。
+    SHAHO_IMPORT_WRITE_INTERVAL_SEC = float(
+        os.environ.get("SHAHO_IMPORT_WRITE_INTERVAL_SEC", "25"))
+    # 他社のPDFを間違って投入しないためのガード（保険料一覧表の事業所コード）
+    SHAHO_IMPORT_EXPECTED_OFFICE = os.environ.get("SHAHO_IMPORT_EXPECTED_OFFICE", "263")
 
     # 手順③ API直接投入（kintai-imports）
     # executor = jinjer標準の完了通知メール宛先。

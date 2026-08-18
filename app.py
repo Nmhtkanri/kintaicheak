@@ -5,6 +5,7 @@ import json
 import uuid
 import logging
 import pickle
+import threading
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 from dotenv import load_dotenv
 import pandas as pd
@@ -2796,6 +2797,112 @@ def keiri_download(ym, filename):
 
 
 # =============================================================================
+# 請求書モード — 共有PDF → freee 売上取引インポートCSV
+# =============================================================================
+
+@app.route("/invoice_preview", methods=["POST"])
+def route_invoice_preview():
+    """指定月の28フォルダを読み、編集可能なfreee CSVプレビューを返す。
+
+    このルートでは共有フォルダもfreeeも変更しない。修正版を優先し、
+    PDFから取れない値は空欄のまま返して画面での補完を求める。
+    """
+    from services.invoice_mode import InvoiceModeError, build_preview
+
+    month = (request.form.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["対象月は YYYY-MM 形式で入力してください（例: 2026-07）"]}), 400
+    try:
+        result = build_preview(
+            month,
+            target_roots_csv=Config.INVOICE_TARGET_ROOTS_CSV,
+            sales_book_template=Config.INVOICE_SALES_BOOK_TEMPLATE,
+            master_csv=Config.INVOICE_MASTER_CSV,
+            default_department=Config.INVOICE_DEFAULT_DEPARTMENT,
+        )
+    except InvoiceModeError as exc:
+        return jsonify({"success": False, "errors": [str(exc)]}), 400
+    except Exception as exc:
+        logger.exception("invoice_preview failed")
+        return jsonify({"success": False,
+                        "errors": [f"請求書PDFの読み取りに失敗しました: {exc}"]}), 500
+    result["success"] = True
+    result["error_rows"] = sum(1 for row in result["rows"] if row.get("_errors"))
+    return jsonify(result)
+
+
+@app.route("/invoice_export", methods=["POST"])
+def route_invoice_export():
+    """画面で確認・修正した行をCSV化する。PDF変更時は再確認を要求する。"""
+    from services.invoice_mode import (
+        InvoiceModeError,
+        current_scan_signature,
+        export_csv,
+        load_target_roots,
+    )
+
+    payload = request.get_json(silent=True) or {}
+    month = str(payload.get("month") or "").strip()
+    rows = payload.get("rows")
+    signature = str(payload.get("signature") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False, "errors": ["対象月が不正です"]}), 400
+    if not isinstance(rows, list):
+        return jsonify({"success": False, "errors": ["確認済みの明細がありません"]}), 400
+
+    roots = load_target_roots(Config.INVOICE_TARGET_ROOTS_CSV)
+    try:
+        current_signature, scan = current_scan_signature(month, roots)
+        if not signature or current_signature != signature:
+            return jsonify({"success": False, "errors": [
+                "プレビュー後に対象PDFが追加・更新されました。"
+                "最新の内容で「PDFを検索して確認」をやり直してください。"
+            ]}), 409
+        result = export_csv(
+            month,
+            rows,
+            Config.INVOICE_OUTPUT_DIR,
+            log_context={
+                "source_files": scan["selected"],
+                "ignored_files": scan["ignored"],
+                "missing_roots": scan["missing_roots"],
+                "scan_errors": scan["scan_errors"],
+            },
+        )
+    except InvoiceModeError as exc:
+        return jsonify({"success": False, "errors": str(exc).splitlines()}), 400
+    except OSError as exc:
+        logger.exception("invoice_export failed")
+        return jsonify({"success": False,
+                        "errors": [f"CSVを書き込めませんでした: {exc}"]}), 500
+    except Exception as exc:
+        logger.exception("invoice_export failed")
+        return jsonify({"success": False,
+                        "errors": [f"CSVの作成に失敗しました: {exc}"]}), 500
+
+    ym = month.replace("-", "")
+    return jsonify({
+        "success": True,
+        "row_count": result["row_count"],
+        "csv_name": result["csv_name"],
+        "log_name": result["log_name"],
+        "csv_url": f"/invoice_download/{ym}/{result['csv_name']}",
+        "log_url": f"/invoice_download/{ym}/{result['log_name']}",
+    })
+
+
+@app.route("/invoice_download/<ym>/<path:filename>")
+def invoice_download(ym, filename):
+    """請求書モードのCSV・実行ログを月別出力フォルダから返す。"""
+    safe_ym = os.path.basename(ym)
+    if not re.fullmatch(r"\d{6}", safe_ym):
+        return jsonify({"error": "月の指定が不正です"}), 400
+    folder = os.path.abspath(os.path.join(Config.INVOICE_OUTPUT_DIR, safe_ym))
+    return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
+
+
+# =============================================================================
 # 社労士モード — jinjer給与明細 → 前田事務所へ渡す給与CSV（60列・cp932）
 # =============================================================================
 
@@ -3007,6 +3114,455 @@ def shaho_download(year, filename):
     if not re.fullmatch(r"\d{4}", safe_year):
         return jsonify({"error": "年の指定が不正です"}), 400
     folder = os.path.abspath(os.path.join(Config.SHAHO_OUTPUT_DIR, safe_year))
+    return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
+
+
+# =============================================================================
+# 標報投入 — 社労士の保険料一覧表PDF → jinjer報酬月額
+#   ⚠ このモードだけは jinjer へ**書き込む**。階層は「書く（マスタ級）」で、
+#     本来は共有exeに入れない決まりだが、2026-08-17 に谷津さんの判断で例外とした。
+#     実行者の許可リスト・dry-run既定・計画ハッシュ照合・投入前バックアップ・
+#     投入後の再取得検証・実行台帳・同時実行ロックをすべて必須にしている。
+# =============================================================================
+
+_SHAHO_IMPORT_ID_RE = re.compile(r"shimp_[0-9a-f]{32}")
+# 同じPCで2つ走らせない（NAS上のロックファイルは他PC・他モードとの排他）
+_shaho_import_thread_lock = threading.Lock()
+_shaho_import_active: set = set()
+
+
+def _shaho_import_dir() -> str:
+    """投入セッションの置き場。氏名と報酬額を持つので共有NASではなくローカル。"""
+    path = Config.SHAHO_IMPORT_SESSION_DIR
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _shaho_import_path(session_id: str, suffix: str) -> str | None:
+    if not _SHAHO_IMPORT_ID_RE.fullmatch(str(session_id or "")):
+        return None
+    return os.path.join(_shaho_import_dir(), f"{session_id}{suffix}")
+
+
+def _save_shaho_import_session(session_id: str, payload: dict) -> None:
+    path = _shaho_import_path(session_id, ".pkl")
+    if path is None:
+        raise ValueError("セッションIDが不正です")
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
+
+
+def _load_shaho_import_session(session_id: str) -> dict | None:
+    path = _shaho_import_path(session_id, ".pkl")
+    if path is None or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        logger.exception("標報投入セッションを読めません: %s", session_id)
+        return None
+
+
+def _write_shaho_progress(session_id: str, payload: dict) -> None:
+    """進捗を書き出す。**書いている途中の中身を読ませない**ため一時ファイル経由。
+
+    126名だと投入に1時間近くかかる。ブラウザを閉じても書き込みは走り続けるので、
+    進捗はメモリではなくファイルに持ち、開き直せば追いつけるようにする。
+    """
+    path = _shaho_import_path(session_id, ".progress.json")
+    if path is None:
+        return
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _read_shaho_progress(session_id: str) -> dict | None:
+    path = _shaho_import_path(session_id, ".progress.json")
+    if path is None or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _cleanup_shaho_import_sessions() -> int:
+    import time
+
+    directory = _shaho_import_dir()
+    limit = Config.SHAHO_IMPORT_SESSION_MAX_AGE_HOURS * 3600
+    now = time.time()
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith("shimp_"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if now - os.path.getmtime(path) > limit:
+                _safe_remove(path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _shaho_import_client():
+    """認証済みクライアント（GET用）。テストで差し替えられるよう関数に切る。"""
+    from services.keiri_api import get_client
+    return get_client()
+
+
+def _shaho_import_write_client():
+    """書き込み用クライアント。**書き込みはこの関数を通したものだけ**。"""
+    from services.jinjer_api_client import JinjerWriteClient
+    return JinjerWriteClient(write_interval=Config.SHAHO_IMPORT_WRITE_INTERVAL_SEC)
+
+
+@app.route("/shaho_import_preview", methods=["POST"])
+def route_shaho_import_preview():
+    """保険料一覧表PDFを読み、jinjer現在値・当方計算値と突き合わせた投入計画を返す。
+
+    ここでは**一切書き込まない**。フォーム:
+      - hoken_pdf   : 保険料一覧表のPDF（必須）
+      - expected_ym : 対象年月 YYYY-MM（入れるとPDFと違う月なら止める）
+      - refresh     : "1" で従業員一覧をAPIから取り直す
+    """
+    from services import shaho_its, shaho_pdf, shaho_writer
+    from services.jinjer_api_client import JinjerAPIError
+    from services.keiri_api import load_or_fetch_roster, roster_index
+
+    upload = request.files.get("hoken_pdf")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False, "errors": [
+            "社労士の保険料一覧表（PDF）か、関東ITSの決定通知書（CSV）を選んでください"]}), 400
+    name_lower = upload.filename.lower()
+    is_csv = name_lower.endswith(".csv")
+    if not (is_csv or name_lower.endswith(".pdf")):
+        return jsonify({"success": False,
+                        "errors": [f"PDFかCSVを選んでください: {upload.filename}"]}), 400
+    expected_ym = (request.form.get("expected_ym") or "").strip()
+    if expected_ym and not re.fullmatch(r"\d{4}-\d{2}", expected_ym):
+        return jsonify({"success": False,
+                        "errors": ["対象年月は YYYY-MM 形式で入力してください"]}), 400
+    if is_csv and not expected_ym:
+        # 関東ITSのCSVには適用年月が書かれていない（PATPOSTで落ちる）ので必須にする
+        return jsonify({"success": False, "errors": [
+            "関東ITSのCSVには適用年月が入っていません。"
+            "「対象年月」に適用する年月（定時決定なら YYYY-09）を入力してください"]}), 400
+    refresh = (request.form.get("refresh") or "") == "1"
+
+    _cleanup_shaho_import_sessions()
+    session_id = "shimp_" + uuid.uuid4().hex
+    pdf_path = os.path.join(_shaho_import_dir(), f"{session_id}.pdf")
+    upload.save(pdf_path)
+    source_filename = upload.filename          # request を触るのはここまで
+
+    try:
+        client = _shaho_import_client()
+        roster = roster_index(load_or_fetch_roster(
+            client, os.path.join(Config.KEIRI_OUTPUT_DIR, "raw", "roster.json"),
+            refresh=refresh))
+    except JinjerAPIError as e:
+        _safe_remove(pdf_path)
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+
+    checksum, pdf_issues = [], {}
+    try:
+        if is_csv:
+            # 関東ITSの決定通知書（PATPOSTでCSV化）。健保の決定額だけが載っており、
+            # 厚生年金は等級表から導出する。突合は証番号＋氏名の両方で行う。
+            rows = shaho_its.read_rows(pdf_path)
+            ctx = shaho_writer.load_calc_context(expected_ym)
+            if ctx.master is None:
+                return jsonify({"success": False, "errors": [
+                    f"等級表が読めないため厚生年金の標準報酬を出せません: {ctx.error}"]}), 400
+            number_map = shaho_its.load_number_map(client, sorted(roster))
+            stmt = shaho_its.build_statement(
+                rows, expected_ym, roster=roster,
+                number_map=number_map, master=ctx.master)
+            checksum = [f"明細 {len(rows)}行"]
+        else:
+            stmt = shaho_pdf.read_pdf(
+                pdf_path, expected_office=Config.SHAHO_IMPORT_EXPECTED_OFFICE)
+            checksum = shaho_pdf.verify_totals(stmt)
+            if expected_ym and stmt.target_ym != expected_ym:
+                return jsonify({"success": False, "errors": [
+                    f"このPDFは {stmt.target_ym} 分です（指定は {expected_ym}）。"
+                    "月を間違えていないか確認してください"]}), 400
+            # 改訂理由から必要な算定月だけを読む
+            ctx = shaho_writer.load_calc_context(stmt.target_ym, stmt=stmt)
+            pdf_issues = shaho_pdf.verify_person_premiums(stmt, ctx.master)
+    except shaho_pdf.ShahoPdfError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except Exception as e:
+        logger.exception("shaho_import_preview: 読み取り失敗")
+        return jsonify({"success": False,
+                        "errors": [f"読み取りに失敗しました: {e}"]}), 500
+    finally:
+        _safe_remove(pdf_path)                 # 原票は残さない
+
+    emps = [p.emp for p in stmt.persons if p.emp]
+    try:
+        # ⚠ year/month で絞らない。報酬月額は履歴テーブルなので、対象月に
+        #    レコードが無い人の「いま効いている値」は**過去のレコード**にある。
+        #    絞ると標準報酬が動いていない人（料率変更のみ）が「登録なし」に見え、
+        #    要らない履歴を足すことになる（2026-08-17 有田さんで実際に踏んだ）。
+        current = client.get_monthly_remunerations(emps)
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except Exception as e:
+        logger.exception("shaho_import_preview: jinjer取得失敗")
+        return jsonify({"success": False,
+                        "errors": [f"jinjer から現在値を取れませんでした: {e}"]}), 500
+
+    rows = shaho_writer.build_plan(stmt, current, roster, ctx, pdf_issues)
+    phash = shaho_writer.plan_hash(rows, stmt.target_ym)
+    allowed, why = shaho_writer.can_write()
+    force_allowed, force_why = shaho_writer.can_force()
+
+    notes = []
+    if ctx.error:
+        notes.append(f"当方の計算値は出せません（{ctx.error}）。差分の確認だけになります")
+    if ctx.missing_months:
+        notes.append("給与明細キャッシュが無い月: " + "、".join(ctx.missing_months)
+                     + "（経理モードで取得すると計算値を出せる人が増えます）")
+    # 基準年月の意味を実データで確かめる（PDFは「7月分＝8月給与控除」と書いてある）
+    collections = {shaho_writer.record_ym(r): str(r.get("collection_month") or "")
+                   for recs in current.values() for r in recs
+                   if shaho_writer.record_ym(r) == stmt.target_ym and r.get("collection_month")}
+    got = collections.get(stmt.target_ym, "")
+    if got and got != stmt.pay_ym:
+        notes.append(f"⚠ jinjer上の徴収年月は {got} で、PDFの「{stmt.pay_ym}給与控除」と違います。"
+                     "基準年月の指定が正しいか確認してください")
+
+    _save_shaho_import_session(session_id, {
+        "created_at": _now_iso(), "source_filename": source_filename,
+        "target_ym": stmt.target_ym, "pay_ym": stmt.pay_ym,
+        "rows": rows, "plan_hash": phash, "current": current,
+    })
+    logger.info("shaho_import_preview: %s %d名 hash=%s writable=%s",
+                stmt.target_ym, len(rows), phash, allowed)
+    return jsonify({
+        "success": True, "session_id": session_id,
+        "target_ym": stmt.target_ym, "pay_ym": stmt.pay_ym,
+        "office": f"{stmt.office_code}:{stmt.office_name}",
+        "source_filename": source_filename,
+        "plan_hash": phash, "checksum": checksum,
+        "rows": [r.to_dict() for r in rows],
+        "summary": shaho_writer.summarize(rows),
+        "can_write": allowed, "write_reason": why,
+        "can_force": force_allowed, "force_reason": force_why,
+        "write_interval": Config.SHAHO_IMPORT_WRITE_INTERVAL_SEC,
+        "notes": notes + list(stmt.warnings),
+    })
+
+
+def _shaho_import_pick(session: dict, selected: list) -> tuple:
+    """画面の選択を検証して (対象行, 承知投入の社員番号) にする。
+
+    要確認の人を通すには「承知のうえ投入」の選択に加えて、**その権限を持つ実行者**で
+    ある必要がある（許可は2段構え。`shaho_writer.can_force` を参照）。
+    """
+    from services.shaho_writer import STATUS_JA, ShahoWriteError, can_force
+
+    by_emp = {r.emp: r for r in session["rows"]}
+    chosen, forced = [], set()
+    force_allowed = force_reason = None
+    for item in selected or []:
+        emp = str((item or {}).get("emp") or "").strip()
+        row = by_emp.get(emp)
+        if row is None:
+            raise ShahoWriteError(f"計画にない社員番号が選ばれています: {emp}")
+        if not row.selectable:
+            raise ShahoWriteError(
+                f"{emp} {row.name} は投入できません（{STATUS_JA.get(row.status, row.status)}）")
+        if row.needs_force:
+            if not (item or {}).get("forced"):
+                raise ShahoWriteError(
+                    f"{emp} {row.name} は「承知のうえ投入」を選んでいないため投入できません")
+            if force_allowed is None:
+                force_allowed, force_reason = can_force()
+            if not force_allowed:
+                raise ShahoWriteError(
+                    f"{emp} {row.name} は要確認です。{force_reason}")
+            forced.add(emp)
+        chosen.append(row)
+    if not chosen:
+        raise ShahoWriteError("投入する人が選ばれていません")
+    return chosen, forced
+
+
+def _run_shaho_import(session_id: str, chosen: list, target_ym: str, pdf_name: str,
+                      forced: set, lock_path: str, user: str) -> None:
+    """本番投入のワーカー。ブラウザを閉じても最後まで走る。"""
+    from services import shaho_writer
+
+    total = len(chosen)
+    state = {"state": "running", "done": 0, "total": total, "target_ym": target_ym,
+             "started_at": _now_iso(), "user": user, "entries": [], "errors": []}
+    _write_shaho_progress(session_id, state)
+
+    def on_progress(done, _total, entry):
+        state["done"] = done
+        state["entries"].append(entry)
+        _write_shaho_progress(session_id, state)
+
+    try:
+        client = _shaho_import_write_client()
+
+        # dry-run のときから動いていないかを見るため、直前にもう一度取り直す。
+        # ここも**月で絞らない**（計画と同じ見方でないと差分の比較にならない）
+        state["message"] = "jinjer の現在値を取り直しています…"
+        _write_shaho_progress(session_id, state)
+        fresh = client.get_monthly_remunerations([r.emp for r in chosen])
+
+        # ★ 1件も書く前にバックアップを取る
+        backup = shaho_writer.write_backup(
+            target_ym, chosen, fresh,
+            {"実行者": user, "PDF": pdf_name, "承知投入": sorted(forced)})
+        state.update(backup=os.path.basename(backup), message="投入しています…")
+        _write_shaho_progress(session_id, state)
+
+        results = shaho_writer.execute_plan(chosen, client, target_ym, dry_run=False,
+                                            progress=on_progress, fresh=fresh)
+
+        state["message"] = "書き込んだ内容を取り直して確認しています…"
+        _write_shaho_progress(session_id, state)
+        ok_emps = {e["emp"] for e in results if e.get("result") == "OK"}
+        verified = shaho_writer.verify_after(
+            client, [r for r in chosen if r.emp in ok_emps], target_ym)
+
+        entries = shaho_writer.ledger_entries(results, verified, target_ym=target_ym,
+                                              pdf_name=pdf_name, backup=backup,
+                                              forced=forced)
+        try:
+            ledger = shaho_writer.append_ledger(entries)
+        except OSError as e:
+            ledger = os.path.join(shaho_writer.output_dir(target_ym),
+                                  f"台帳退避_{session_id}.csv")
+            shaho_writer.append_ledger(entries, path=ledger)
+            state["errors"].append(
+                f"実行台帳に書けませんでした（{e}）。{ledger} に退避しました")
+
+        state.update(state="done", finished_at=_now_iso(), verified=verified,
+                     ledger=ledger, message="",
+                     counts={"ok": len(ok_emps),
+                             "failed": sum(1 for e in results if e.get("result") == "失敗"),
+                             "skipped": sum(1 for e in results
+                                            if e.get("result") in ("スキップ", "中止")),
+                             "verify_ng": sum(1 for v in verified.values()
+                                              if v != "OK")})
+        _write_shaho_progress(session_id, state)
+        logger.info("shaho_import 完了: %s ok=%d ng=%d",
+                    target_ym, len(ok_emps), state["counts"]["verify_ng"])
+    except Exception as e:
+        logger.exception("shaho_import failed")
+        state.update(state="error", message=str(e), finished_at=_now_iso())
+        _write_shaho_progress(session_id, state)
+    finally:
+        shaho_writer.release_lock(lock_path)
+        with _shaho_import_thread_lock:
+            _shaho_import_active.discard(session_id)
+
+
+@app.route("/shaho_import_execute", methods=["POST"])
+def route_shaho_import_execute():
+    """投入の確認（dry-run）と本番実行。
+
+    JSON: {"session_id", "plan_hash", "selected": [{"emp","forced"}...],
+           "dry_run": true/false, "confirm_ym": "YYYY-MM"}
+    """
+    from services import shaho_writer
+    from services.shaho_writer import ShahoWriteError
+
+    payload = request.get_json(silent=True) or {}
+    session_id = str(payload.get("session_id") or "")
+    session = _load_shaho_import_session(session_id)
+    if session is None:
+        return jsonify({"success": False, "errors": [
+            "プレビューの内容が見つかりません（時間が経ちすぎた可能性）。"
+            "同じPDFでもう一度プレビューしてください"]}), 400
+    if str(payload.get("plan_hash") or "") != session["plan_hash"]:
+        return jsonify({"success": False, "errors": [
+            "確認した投入内容と今の内容が違います。もう一度プレビューしてください"]}), 400
+
+    allowed, why = shaho_writer.can_write()
+    if not allowed:
+        return jsonify({"success": False, "errors": [why]}), 403
+
+    try:
+        chosen, forced = _shaho_import_pick(session, payload.get("selected"))
+    except ShahoWriteError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+
+    target_ym = session["target_ym"]
+    dry_run = bool(payload.get("dry_run", True))
+    if dry_run:
+        results = shaho_writer.execute_plan(chosen, None, target_ym, dry_run=True)
+        return jsonify({
+            "success": True, "dry_run": True, "target_ym": target_ym,
+            "count": len(chosen), "forced": sorted(forced), "results": results,
+            "eta_minutes": round(len(chosen) * Config.SHAHO_IMPORT_WRITE_INTERVAL_SEC / 60, 1),
+        })
+
+    # ---- ここから本番。年月の手入力照合が最後のガード ----
+    if str(payload.get("confirm_ym") or "").strip() != target_ym:
+        return jsonify({"success": False, "errors": [
+            f"確認のため対象年月（{target_ym}）を入力してください"]}), 400
+
+    with _shaho_import_thread_lock:
+        if _shaho_import_active:
+            return jsonify({"success": False,
+                            "errors": ["いまこのPCで投入が動いています"]}), 409
+        try:
+            lock_path = shaho_writer.acquire_lock(target_ym, len(chosen))
+        except ShahoWriteError as e:
+            return jsonify({"success": False, "errors": [str(e)]}), 409
+        _shaho_import_active.add(session_id)
+
+    from services.sap_import_ledger import current_user
+    user = current_user()
+    thread = threading.Thread(
+        target=_run_shaho_import, daemon=True,
+        args=(session_id, chosen, target_ym, session.get("source_filename", ""),
+              forced, lock_path, user))
+    thread.start()
+    logger.info("shaho_import 開始: %s %d名 user=%s", target_ym, len(chosen), user)
+    return jsonify({"success": True, "dry_run": False, "started": True,
+                    "session_id": session_id, "count": len(chosen),
+                    "eta_minutes": round(
+                        len(chosen) * Config.SHAHO_IMPORT_WRITE_INTERVAL_SEC / 60, 1)})
+
+
+@app.route("/shaho_import_status")
+def route_shaho_import_status():
+    """投入の進捗を返す（画面はこれをポーリングする）。"""
+    session_id = str(request.args.get("session_id") or "")
+    if not _SHAHO_IMPORT_ID_RE.fullmatch(session_id):
+        return jsonify({"success": False, "errors": ["セッションIDが不正です"]}), 400
+    progress = _read_shaho_progress(session_id)
+    if progress is None:
+        return jsonify({"success": True, "state": "none"})
+    return jsonify({"success": True, **progress})
+
+
+@app.route("/shaho_import_download/<ym>/<path:filename>")
+def shaho_import_download(ym, filename):
+    """投入前バックアップ・台帳退避をダウンロードする（outputs/shaho_import 配下のみ）。"""
+    safe_ym = os.path.basename(ym)
+    if not re.fullmatch(r"\d{6}", safe_ym):
+        return jsonify({"error": "月の指定が不正です"}), 400
+    folder = os.path.abspath(os.path.join(Config.SHAHO_IMPORT_OUTPUT_DIR, safe_ym))
     return send_from_directory(folder, os.path.basename(filename), as_attachment=True)
 
 

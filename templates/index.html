@@ -22,6 +22,10 @@
             <input type="radio" name="mode" value="keiri">
             <span class="mode-tab-face">経理</span>
         </label>
+        <label class="mode-tab" title="共有フォルダの請求書PDFからfreee売上取引CSVを作る">
+            <input type="radio" name="mode" value="invoice">
+            <span class="mode-tab-face">請求書CSV</span>
+        </label>
         <label class="mode-tab" title="給与明細から社労士（前田事務所）へ渡すCSVを作る">
             <input type="radio" name="mode" value="sharoushi">
             <span class="mode-tab-face">社労士CSV</span>
@@ -595,6 +599,63 @@
     </div>
 
     <!-- ============================================================ -->
+    <!-- ==== 請求書モード: 共有PDF → freee 売上取引CSV ==== -->
+    <div class="workflow-card mode-accent acc-keiri" id="invoice-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keiri">🧾</span>
+            <div>
+                <div class="card-title">
+                    請求書PDFからfreee取込CSVを作る
+                    <span class="tag tag-safe">読み取りのみ・freee取込は手動</span>
+                </div>
+                <p class="card-lead">
+                    指定した月の請求書を28フォルダから探し、請求日・入金期日・小計・消費税・交通費を読み取ります。
+                    読み取り結果を直してからCSVを作成します。
+                </p>
+            </div>
+        </div>
+
+        <div class="fields">
+            <label class="field field-inline">
+                <span class="field-label">請求対象月 <span class="tag tag-req">必須</span></span>
+                <input type="month" id="invoice-month" value="2026-07" style="width:160px">
+                <span class="field-sub">例: 2026年7月分なら 2026-07</span>
+            </label>
+            <div class="hint">
+                対象は指定済みの28フォルダ配下です。ファイル名に「請求」または「invoice」があるPDFだけを使い、
+                作業報告書・勤務表は使いません。同じ請求書に修正版がある場合は修正版を優先します。
+            </div>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="invoice-preview-btn">🔍 PDFを検索して確認</button>
+            <span id="invoice-status" class="status-text"></span>
+        </div>
+
+        <div id="invoice-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:10px">
+                <div class="summary-card"><div class="card-label">請求書PDF</div><div class="card-value" id="invoice-count-files">0</div></div>
+                <div class="summary-card"><div class="card-label">CSV行数</div><div class="card-value" id="invoice-count-rows">0</div></div>
+                <div class="summary-card"><div class="card-label">交通費行</div><div class="card-value" id="invoice-count-commute">0</div></div>
+                <div class="summary-card"><div class="card-label">要修正行</div><div class="card-value" id="invoice-count-errors">0</div></div>
+            </div>
+            <div id="invoice-notices" style="margin-bottom:10px"></div>
+            <div class="hint" style="margin-bottom:6px">
+                赤い行はPDFから取れなかった項目があります。セルを修正すると再判定します。
+                交通費行はfreee見本どおり、取引先・日付等を空欄にした継続行で出力します。
+            </div>
+            <div id="invoice-preview-table" style="overflow-x:auto; margin-bottom:10px"></div>
+            <div class="actions" style="padding:0">
+                <button type="button" class="btn btn-primary" id="invoice-export-btn" disabled>📥 freee CSVを作成</button>
+                <span id="invoice-export-status" class="status-text"></span>
+                <a id="invoice-download-link" class="btn btn-download" style="display:none" href="#">CSVをダウンロード</a>
+                <a id="invoice-log-link" class="btn btn-secondary" style="display:none" href="#">実行ログ</a>
+            </div>
+        </div>
+        <div id="invoice-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <!-- ============================================================ -->
     <!-- ==== 社労士モード: 前田事務所へ渡す給与CSV（60列・cp932）==== -->
     <div class="workflow-card mode-accent acc-keiri" id="sharoushi-card" style="display:none">
         <div class="card-head">
@@ -677,6 +738,101 @@
             </div>
         </div>
         <div id="sharoushi-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- ==== 標報投入: 保険料一覧表PDF → jinjer報酬月額（唯一の書き込みモード）==== -->
+    <div class="workflow-card mode-accent acc-keiri" id="shaho-import-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keiri">📥</span>
+            <div>
+                <div class="card-title">
+                    社労士PDFの標準報酬をjinjerへ入れる
+                    <span class="tag tag-req">jinjerに書き込みます</span>
+                </div>
+                <p class="card-lead">
+                    社労士の <b>保険料一覧表（PDF）</b> または関東ITSの
+                    <b>被保険者標準報酬決定通知書（CSV）</b> を読み、
+                    <b>通知の値・jinjerの登録値・当方の計算値</b>の3つを突き合わせます。
+                    内容を確認してから、標準報酬月額をjinjerへ投入します。
+                </p>
+            </div>
+        </div>
+
+        <div class="fields">
+            <label class="field">
+                <span class="field-label">通知のファイル <span class="tag tag-req">必須</span></span>
+                <input type="file" id="shaho-import-pdf" accept=".pdf,.csv">
+                <span class="field-sub">
+                    <b>社労士の保険料一覧表（PDF）</b>: 例
+                    <code>7月保険料一覧表（8月給与控除分）.pdf</code>。
+                    その月に保険料が変わった人だけが載っています。健保・厚年の両方が入っています。<br>
+                    <b>関東ITSの決定通知書（CSV）</b>: PATPOSTでCSVにしたもの。
+                    定時決定の一覧で、<b>健康保険の決定額だけ</b>が載っています
+                    （厚生年金は等級表から自動で出します）。
+                </span>
+            </label>
+            <label class="field field-inline">
+                <span class="field-label">対象年月</span>
+                <input type="text" id="shaho-import-expected-ym" placeholder="2026-09" style="width:130px">
+                <span class="field-sub">
+                    PDFは空欄可（入れると違う月なら止めます）。
+                    <b>関東ITSのCSVは適用年月が入っていないので必須</b>（定時決定なら 2026-09）。
+                </span>
+            </label>
+            <div class="hint">
+                読み込みだけでは何も書き込みません。投入する人を選び、
+                <b>内容の確認 → 対象年月の入力</b>まで進めて初めてjinjerへ書きます。
+                書き込みは1件あたり25秒（jinjerのレート制限）です。実行中は
+                <b>経費インポートなど他のAPI投入を同時に走らせないでください</b>。
+            </div>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="shaho-import-preview-btn">🔍 データを突合する</button>
+            <span id="shaho-import-status" class="status-text"></span>
+        </div>
+
+        <div id="shaho-import-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div id="shaho-import-head" style="margin-bottom:8px"></div>
+            <div class="summary-cards" style="margin-bottom:10px">
+                <div class="summary-card"><div class="card-label">PDFの人数</div><div class="card-value" id="shaho-import-cnt-n">0</div></div>
+                <div class="summary-card"><div class="card-label">投入対象</div><div class="card-value" id="shaho-import-cnt-target">0</div></div>
+                <div class="summary-card"><div class="card-label">要確認</div><div class="card-value" id="shaho-import-cnt-review">0</div></div>
+                <div class="summary-card"><div class="card-label">書込不要</div><div class="card-value" id="shaho-import-cnt-nochange">0</div></div>
+            </div>
+            <div id="shaho-import-notes" style="margin-bottom:10px"></div>
+            <div id="shaho-import-rows" style="margin-bottom:10px"></div>
+
+            <div id="shaho-import-exec-area" style="display:none; margin-top:12px; padding:10px;
+                 border:1px solid #d6c48a; background:#FAF6EA; border-radius:4px">
+                <div class="section-title" style="font-size:13px; margin-bottom:4px">jinjerへ投入する</div>
+                <div id="shaho-import-writer" class="hint" style="margin-bottom:6px"></div>
+                <div class="actions" style="padding:0">
+                    <button type="button" class="btn btn-secondary" id="shaho-import-dryrun-btn">① 投入内容を確定（まだ書きません）</button>
+                    <span id="shaho-import-dryrun-status" class="status-text"></span>
+                </div>
+                <div id="shaho-import-confirm-area" style="display:none; margin-top:10px; padding-top:10px; border-top:1px dashed #d6c48a">
+                    <div id="shaho-import-dryrun-detail" style="margin-bottom:8px"></div>
+                    <label class="field field-inline">
+                        <span class="field-label">対象年月を入力 <span class="tag tag-req">必須</span></span>
+                        <input type="text" id="shaho-import-confirm-ym" placeholder="YYYY-MM" style="width:130px">
+                        <span class="field-sub">確認のため、上に出ている対象年月をそのまま入力してください</span>
+                    </label>
+                    <label style="display:block; margin:6px 0">
+                        <input type="checkbox" id="shaho-import-confirm-check">
+                        上の内容を確認しました。jinjerの標準報酬月額を書き換えます
+                    </label>
+                    <div class="actions" style="padding:0">
+                        <button type="button" class="btn btn-danger" id="shaho-import-run-btn" disabled>② jinjerへ投入する</button>
+                        <span id="shaho-import-run-status" class="status-text"></span>
+                    </div>
+                </div>
+            </div>
+
+            <div id="shaho-import-progress-area" style="display:none; margin-top:12px"></div>
+        </div>
+        <div id="shaho-import-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
     <!-- ============================================================ -->

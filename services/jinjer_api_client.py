@@ -354,6 +354,89 @@ class JinjerClient:
         return all_items
 
     # ------------------------------------------------------------------
+    # 報酬月額（標準報酬月額）— 社労士の保険料一覧表との突合に使う
+    # ------------------------------------------------------------------
+    MONTHLY_REMUNERATION_BATCH_SIZE = 50  # employee-ids クエリの実用上限（所属履歴と同じ）
+
+    def get_monthly_remunerations(self, employee_ids: list[str], year: str = "",
+                                  month: str = "") -> dict[str, list[dict]]:
+        """`/v1/employees/monthly-remunerations` を 50件ずつバッチで取得する。
+
+        Args:
+            employee_ids: 社員番号のリスト
+            year: 基準年 "YYYY"（省略時は全件）
+            month: 基準月 "MM"（**year 無しでは指定できない**）
+
+        Returns:
+            ``{社員番号: [レコード, ...]}``。各レコードは
+            ``{"year", "month", "collection_month"(徴収年月),
+               "health_insurance": {"fee"}, "employee_pension": {"fee"},
+               "last_update": {"classification": {"id", "name"}, "updater": {...}}}``。
+            ``last_update.classification.id`` は 0:自動登録 / 1:管理者登録 /
+            2:随時改定 / 3:定時改定。**誰がいつ入れた値かが分かる**ので、
+            投入前の現在値バックアップと投入後の検証の両方で使う。
+        """
+        if month and not year:
+            raise JinjerAPIError("報酬月額の取得: 月を指定するときは年も必要です")
+
+        url = f"{self.base_url}/v1/employees/monthly-remunerations"
+        headers = self._auth_headers()
+        result: dict[str, list[dict]] = {}
+
+        unique_ids, seen = [], set()
+        for emp_id in employee_ids:
+            s = str(emp_id or "").strip()
+            if s and s not in seen:
+                seen.add(s)
+                unique_ids.append(s)
+        if not unique_ids:
+            return result
+
+        batch = self.MONTHLY_REMUNERATION_BATCH_SIZE
+        for i in range(0, len(unique_ids), batch):
+            chunk = unique_ids[i:i + batch]
+            base_params: dict[str, Any] = {"employee-ids": ",".join(chunk)}
+            if year:
+                base_params["year"] = str(year)
+            if month:
+                base_params["month"] = str(month)
+
+            page = 1
+            while page <= 100:
+                params = dict(base_params, page=page)
+                try:
+                    response = requests.get(url, headers=headers, params=params,
+                                            timeout=self.timeout)
+                except requests.RequestException as e:
+                    raise JinjerAPIError(f"報酬月額の取得に失敗: {e}") from e
+                if response.status_code != 200:
+                    raise JinjerAPIError(
+                        f"報酬月額の取得に失敗 (status={response.status_code}): "
+                        f"{response.text[:300]}")
+
+                data = response.json().get("data", []) or []
+                if not data:
+                    break
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    emp = str(item.get("employee_id") or "").strip()
+                    if not emp:
+                        continue
+                    result.setdefault(emp, []).extend(
+                        item.get("monthly_remunerations", []) or [])
+                if len(data) < 100:
+                    break
+                page += 1
+                _time.sleep(0.1)
+
+            if i + batch < len(unique_ids):
+                _time.sleep(0.3)  # 軽いペーシング
+
+        logger.info("jinjer 報酬月額取得: %d 名分", len(result))
+        return result
+
+    # ------------------------------------------------------------------
     # 勤怠インポート（汎用データCSVのAPI投入）と日別スケジュール
     #   背景: 画面の汎用データインポートがスケジュール列をサイレントに
     #   反映しない不具合(2026-07-09)を、POST /v1/kintai-imports で回避できる
@@ -923,6 +1006,139 @@ def pick_attendance_group_at(affiliations: list[dict], target_date) -> tuple[str
     # 全部空 → 末尾 (空文字) を返す
     _, gid, gname = candidates[-1]
     return (gid, gname)
+
+
+class JinjerWriteClient(JinjerClient):
+    r"""報酬月額（標準報酬月額）を **書き込む** 専用クライアント。
+
+    ## なぜ基底 JinjerClient に足さないのか
+
+    `JinjerClient` はオペレーションハブの全モードが共有している。標準報酬月額は
+    給与計算の土台で、間違えると全員の社会保険料が狂う。**気軽に呼べる場所に
+    書き込みメソッドを置かない**ために、書き込みは必ずこのクラスを経由させる。
+    呼び出し側は実行者の許可チェック（`sap_import_ledger.can_write`）を
+    通してからインスタンス化すること。
+
+    ## レート制限（社内の実測値）
+
+    jinjer の書き込みAPIは読み取りより制限が強い。`Z:\API連携` の書き込み系
+    スクリプトは **1件あたり25秒間隔**（`--write-interval 25`）で回している。
+    間隔を詰めると429の再試行で結局1件あたり1分近くかかり、かえって遅い
+    （健診カスタム項目の44件投入で実測）。制限は**テナント単位**なので、
+    経費インポート等の他の投入と並行して走らせてはいけない。
+    """
+
+    DEFAULT_WRITE_INTERVAL_SEC = 25.0
+    MAX_RETRIES = 3
+
+    def __init__(self, *args, write_interval: float | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.write_interval = (self.DEFAULT_WRITE_INTERVAL_SEC if write_interval is None
+                               else float(write_interval))
+        self._last_write_at = 0.0
+
+    def _wait_write_slot(self) -> None:
+        """前回の書き込みから write_interval 秒あけるまで待つ。"""
+        if self.write_interval <= 0 or not self._last_write_at:
+            return
+        remain = self.write_interval - (_time.monotonic() - self._last_write_at)
+        if remain > 0:
+            _time.sleep(remain)
+
+    @staticmethod
+    def _error_text(response) -> str:
+        """エラー本文から errors[].message を最大3件抜く（原因が分からないと直せない）。"""
+        try:
+            payload = response.json()
+        except ValueError:
+            return response.text[:300]
+        messages = []
+        for err in (payload.get("errors") or [])[:3]:
+            if isinstance(err, dict):
+                msg = str(err.get("message") or "").strip()
+                if msg:
+                    messages.append(msg)
+            elif err:
+                messages.append(str(err)[:200])
+        return "／".join(messages) if messages else str(payload)[:300]
+
+    def _write(self, method: str, path: str, body: dict, *, what: str) -> dict:
+        """書き込みリクエスト1本。401は1回だけ再認証、429は待って再試行。"""
+        url = f"{self.base_url}{path}"
+        refreshed = False
+        last_error = ""
+
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            self._wait_write_slot()
+            headers = self._auth_headers()
+            try:
+                response = requests.request(method, url, headers=headers, json=body,
+                                            timeout=120)
+            except requests.RequestException as e:
+                last_error = str(e)
+                if attempt >= self.MAX_RETRIES:
+                    raise JinjerAPIError(f"{what}に失敗: {e}") from e
+                _time.sleep(min(2 ** (attempt - 1), 5))
+                continue
+            finally:
+                self._last_write_at = _time.monotonic()
+
+            if response.status_code == 200:
+                return response.json().get("data") or {}
+
+            if response.status_code == 401 and not refreshed:
+                refreshed = True
+                self._access_token = None  # 期限切れ。1回だけ取り直す
+                continue
+
+            if response.status_code == 429 and attempt < self.MAX_RETRIES:
+                try:
+                    wait = float(response.headers.get("Retry-After", ""))
+                except (TypeError, ValueError):
+                    wait = self.write_interval
+                _time.sleep(max(wait, self.write_interval))
+                continue
+
+            last_error = self._error_text(response)
+            raise JinjerAPIError(
+                f"{what}に失敗 (status={response.status_code}): {last_error}")
+
+        raise JinjerAPIError(f"{what}に失敗: {last_error}")
+
+    @staticmethod
+    def _remuneration_body(emp: str, year: str, month: str,
+                           kenpo_smr: int, konen_smr: int) -> dict:
+        """POST/PATCH 共通のボディ。標準報酬月額は**円**の文字列で渡す。"""
+        body: dict[str, Any] = {
+            "employee_id": str(emp),
+            "monthly_remunerations": {
+                "year": f"{int(year):04d}",
+                "month": f"{int(month):02d}",
+            },
+        }
+        if kenpo_smr:
+            body["monthly_remunerations"]["health_insurance"] = {
+                "standard_fee": str(int(kenpo_smr))}
+        if konen_smr:
+            body["monthly_remunerations"]["employee_pension"] = {
+                "standard_fee": str(int(konen_smr))}
+        return body
+
+    def post_monthly_remuneration(self, emp: str, year, month,
+                                  kenpo_smr: int, konen_smr: int) -> dict:
+        """報酬月額を**新規登録**する（その基準年月のレコードが無い人）。"""
+        return self._write(
+            "POST", "/v1/employees/monthly-remunerations",
+            self._remuneration_body(emp, year, month, kenpo_smr, konen_smr),
+            what=f"報酬月額の登録（{emp} {year}-{month}）")
+
+    def patch_monthly_remuneration(self, emp: str, year, month,
+                                   kenpo_smr: int, konen_smr: int) -> dict:
+        """報酬月額を**更新**する（その基準年月のレコードが既にある人）。"""
+        return self._write(
+            "PATCH", "/v1/employees/monthly-remunerations",
+            self._remuneration_body(emp, year, month, kenpo_smr, konen_smr),
+            what=f"報酬月額の更新（{emp} {year}-{month}）")
 
 
 def fetch_attendance_groups_at(

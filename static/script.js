@@ -108,7 +108,8 @@ const MODE_HINTS = {
     match:      '請求勤怠と jinjer の差異を洗い出す',
     csv_export: 'シフト表を読み取って jinjer へ登録する',
     keiri:      'freee 取引インポート用の4CSVを作る',
-    sharoushi:  '社労士へ渡す給与CSVを作る（jinjerには書きません）',
+    invoice:    '請求書PDFを確認してfreee売上取引CSVを作る',
+    sharoushi:  '社労士へ渡す給与CSVを作る／保険料一覧表PDFの標準報酬をjinjerへ投入する',
     shaho:      '標準報酬月額の検算と保険料突合（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
     mail:       '下書きのみ作成・送信はしません',
@@ -142,7 +143,9 @@ function applyModeUI(mode) {
     const expenseCard = document.getElementById('expense-card');
     const kiCard = document.getElementById('ki-card');
     const keiriCard = document.getElementById('keiri-card');
+    const invoiceCard = document.getElementById('invoice-card');
     const sharoushiCard = document.getElementById('sharoushi-card');
+    const shahoImportCard = document.getElementById('shaho-import-card');
     const shahoCard = document.getElementById('shaho-card');
     const mailCard = document.getElementById('mail-card');
     const healthCard = document.getElementById('health-card');
@@ -151,12 +154,13 @@ function applyModeUI(mode) {
     const isSchedule = mode === 'csv_export';
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
+    const isInvoice = mode === 'invoice';
     const isSharoushi = mode === 'sharoushi';
     const isShaho = mode === 'shaho';
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isShaho && !isMail && !isHealthHpm;
+        && !isInvoice && !isShaho && !isMail && !isHealthHpm;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -192,8 +196,11 @@ function applyModeUI(mode) {
     if (kiCard) kiCard.style.display = isExpense ? '' : 'none';
     // 経理モード: 仕訳CSV生成カードのみ表示
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
-    // 社労士モード: 社労士CSV生成カードのみ表示
+    // 請求書モード: PDF確認とfreee CSV生成カードのみ表示
+    if (invoiceCard) invoiceCard.style.display = isInvoice ? '' : 'none';
+    // 社労士モード: 社労士CSV生成カードと、保険料一覧表PDFの投入カード
     if (sharoushiCard) sharoushiCard.style.display = isSharoushi ? '' : 'none';
+    if (shahoImportCard) shahoImportCard.style.display = isSharoushi ? '' : 'none';
     // 標準報酬チェック: 検算カードのみ表示
     if (shahoCard) shahoCard.style.display = isShaho ? '' : 'none';
     // メール下書きモード: メールカードのみ表示（初回表示時にテンプレ一覧を読み込む）
@@ -2983,6 +2990,579 @@ if (shahoRunBtn) {
             status.textContent = '';
         } finally {
             shahoRunBtn.disabled = false;
+        }
+    });
+}
+
+
+// =============================================================================
+// 標報投入 — 社労士の保険料一覧表PDF → jinjer報酬月額
+//   このモードだけ jinjer へ書き込む。読み込み → 突合 → ①内容確定 → ②投入 の順。
+//   126名だと投入に1時間近くかかるので、進捗はSSEではなくポーリングで追う
+//   （ブラウザを閉じてもサーバ側の書き込みは最後まで走る）。
+// =============================================================================
+const shahoImport = { sessionId: '', planHash: '', targetYm: '', rows: [], timer: null };
+
+function shahoImportError(msgs) {
+    const el = document.getElementById('shaho-import-error-area');
+    if (!el) return;
+    const list = Array.isArray(msgs) ? msgs : [msgs];
+    el.innerHTML = list.map(m => '<div>' + escapeHtml(m) + '</div>').join('');
+    el.style.display = list.length ? 'block' : 'none';
+}
+
+function shahoImportYen(v) {
+    return (v === null || v === undefined || v === '') ? '—' : Number(v).toLocaleString();
+}
+
+function shahoImportPicked() {
+    return Array.from(document.querySelectorAll('.shaho-import-pick:checked'))
+        .map(el => ({ emp: el.dataset.emp, forced: el.dataset.force === '1' }));
+}
+
+function shahoImportSyncButtons() {
+    const n = shahoImportPicked().length;
+    const dry = document.getElementById('shaho-import-dryrun-btn');
+    if (dry) {
+        dry.disabled = n === 0;
+        dry.textContent = n ? '① 投入内容を確定（' + n + '名・まだ書きません）'
+                            : '① 投入内容を確定（投入する人を選んでください）';
+    }
+    // 選び直したら確定済みの内容は無効にする（見たものと違うものを書かせない）
+    const confirmArea = document.getElementById('shaho-import-confirm-area');
+    if (confirmArea) confirmArea.style.display = 'none';
+}
+
+function shahoImportRenderRows(data) {
+    const forceable = data.rows.filter(r => r.needs_force).length;
+    document.getElementById('shaho-import-head').innerHTML = '<div class="hint">'
+        + '<b>' + escapeHtml(data.target_ym) + ' 分</b>の保険料一覧表'
+        + '（' + escapeHtml(data.pay_ym) + ' の給与から控除）／'
+        + escapeHtml(data.office) + '<br>'
+        + 'チェックサム照合: ' + escapeHtml((data.checksum || []).join('、') || 'なし')
+        + ' → 一致。読み落としはありません。</div>';
+
+    const cnt = (fn) => data.rows.filter(fn).length;
+    const reviewStatuses = ['CALC_MISMATCH', 'PDF_INCONSISTENT', 'NOT_IN_JINJER', 'RETIRED'];
+    document.getElementById('shaho-import-cnt-n').textContent = data.rows.length;
+    document.getElementById('shaho-import-cnt-target').textContent =
+        cnt(r => r.status === 'AUTO_OK' || r.status === 'NO_CALC');
+    document.getElementById('shaho-import-cnt-review').textContent =
+        cnt(r => reviewStatuses.includes(r.status));
+    document.getElementById('shaho-import-cnt-nochange').textContent =
+        cnt(r => r.status === 'NO_CHANGE');
+
+    const notes = (data.notes || []).map(n => '<div>' + escapeHtml(n) + '</div>').join('');
+    document.getElementById('shaho-import-notes').innerHTML = notes
+        ? '<div class="alert alert-warning">' + notes + '</div>' : '';
+
+    let html = '';
+    if (forceable) {
+        // 「承知のうえ投入」は判断が要るので、その権限を持つ人だけが開けられる
+        html += '<label style="display:block; margin-bottom:6px">'
+            + '<input type="checkbox" id="shaho-import-allow-force"'
+            + (data.can_force ? '' : ' disabled') + '> '
+            + '要確認の' + forceable + '名も選べるようにする（承知のうえ投入）'
+            + (data.can_force ? '' : '<br><span class="hint">'
+                + escapeHtml(data.force_reason || '') + '</span>')
+            + '</label>';
+    }
+    html += '<table class="keiri-md-table"><tr><th></th><th>社員番号</th><th>氏名</th>'
+        + '<th>判定</th><th>社労士PDF<br>健保／厚年</th><th>jinjer登録<br>健保／厚年</th>'
+        + '<th>当方の計算<br>健保／厚年</th><th>操作</th><th>改訂理由・備考</th></tr>';
+    data.rows.forEach(r => {
+        const review = reviewStatuses.includes(r.status);
+        const box = r.selectable
+            ? '<input type="checkbox" class="shaho-import-pick" data-emp="' + escapeHtml(r.emp)
+              + '" data-force="' + (r.needs_force ? '1' : '0') + '"'
+              + (r.default_selected ? ' checked' : '')
+              + (r.needs_force ? ' disabled' : '') + '>'
+            : '';
+        const op = r.operation === 'PATCH' ? '更新' : (r.operation === 'POST' ? '新規' : '—');
+        html += '<tr' + (review ? ' style="background:#FFF6F6"' : '') + '>'
+            + '<td>' + box + '</td>'
+            + '<td>' + escapeHtml(r.emp) + '</td>'
+            + '<td>' + escapeHtml(r.name) + '</td>'
+            + '<td>' + (review ? '⚠ ' : '') + escapeHtml(r.status_ja) + '</td>'
+            + '<td>' + shahoImportYen(r.pdf_kenpo) + '／' + shahoImportYen(r.pdf_konen) + '</td>'
+            + '<td>' + shahoImportYen(r.cur_kenpo) + '／' + shahoImportYen(r.cur_konen)
+            + (r.cur_ym ? '<br><span class="hint">' + escapeHtml(r.cur_ym) + '</span>' : '') + '</td>'
+            + '<td>' + shahoImportYen(r.calc_kenpo) + '／' + shahoImportYen(r.calc_konen) + '</td>'
+            + '<td>' + escapeHtml(op) + '</td>'
+            + '<td><span class="hint">' + escapeHtml(r.reason || '') + '</span>'
+            + (r.notes || []).map(n => '<div class="hint">・' + escapeHtml(n) + '</div>').join('')
+            + '</td></tr>';
+    });
+    html += '</table>';
+    document.getElementById('shaho-import-rows').innerHTML = html;
+
+    const allow = document.getElementById('shaho-import-allow-force');
+    if (allow) {
+        allow.addEventListener('change', () => {
+            document.querySelectorAll('.shaho-import-pick[data-force="1"]').forEach(el => {
+                el.disabled = !allow.checked;
+                if (!allow.checked) el.checked = false;
+            });
+            shahoImportSyncButtons();
+        });
+    }
+    document.querySelectorAll('.shaho-import-pick')
+        .forEach(el => el.addEventListener('change', shahoImportSyncButtons));
+
+    const selectable = data.rows.filter(r => r.selectable).length;
+    document.getElementById('shaho-import-exec-area').style.display = 'block';
+    const writerEl = document.getElementById('shaho-import-writer');
+    if (!data.can_write) {
+        writerEl.innerHTML = '<b>' + escapeHtml(data.write_reason) + '</b>';
+    } else if (!selectable) {
+        // 全員すでに登録済み等で投入対象が0名。ボタンが押せない理由を必ず書く
+        const nochange = data.rows.filter(r => r.status === 'NO_CHANGE').length;
+        writerEl.innerHTML = '<b>投入する人はいません。</b>'
+            + (nochange === data.rows.length
+                ? '通知の値は' + nochange + '名全員すでにjinjerに入っています（やることなし）。'
+                : nochange + '名は登録済み、残りは要確認のため投入できません。'
+                  + '上の表で理由を確認してください。');
+    } else {
+        writerEl.innerHTML = escapeHtml(data.write_reason) + '／1件あたり約'
+            + escapeHtml(String(data.write_interval)) + '秒かかります。'
+            + '実行中は経費インポートなど他のAPI投入を走らせないでください。';
+    }
+    document.getElementById('shaho-import-dryrun-btn').disabled =
+        !data.can_write || !selectable;
+    document.getElementById('shaho-import-confirm-area').style.display = 'none';
+    document.getElementById('shaho-import-progress-area').style.display = 'none';
+    if (data.can_write) shahoImportSyncButtons();
+}
+
+const shahoImportPreviewBtn = document.getElementById('shaho-import-preview-btn');
+if (shahoImportPreviewBtn) {
+    shahoImportPreviewBtn.addEventListener('click', async () => {
+        const status = document.getElementById('shaho-import-status');
+        const fileInput = document.getElementById('shaho-import-pdf');
+        shahoImportError([]);
+        if (!fileInput.files.length) {
+            shahoImportError('保険料一覧表のPDF、または関東ITSの決定通知書CSVを選んでください');
+            return;
+        }
+        if (fileInput.files[0].name.toLowerCase().endsWith('.csv')
+            && !document.getElementById('shaho-import-expected-ym').value.trim()) {
+            shahoImportError('関東ITSのCSVには適用年月が入っていません。'
+                + '「対象年月」に適用する年月（定時決定なら 2026-09）を入力してください');
+            return;
+        }
+        const fd = new FormData();
+        fd.append('hoken_pdf', fileInput.files[0]);
+        fd.append('expected_ym', document.getElementById('shaho-import-expected-ym').value.trim());
+        shahoImportPreviewBtn.disabled = true;
+        status.textContent = 'ファイルを読み、jinjer の登録値と突き合わせています…';
+        document.getElementById('shaho-import-result-area').style.display = 'none';
+        try {
+            const res = await fetch('/shaho_import_preview', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) {
+                shahoImportError(data.errors || ['読み取りに失敗しました']);
+                status.textContent = '';
+                return;
+            }
+            shahoImport.sessionId = data.session_id;
+            shahoImport.planHash = data.plan_hash;
+            shahoImport.targetYm = data.target_ym;
+            shahoImport.rows = data.rows;
+            shahoImportRenderRows(data);
+            document.getElementById('shaho-import-result-area').style.display = 'block';
+            status.textContent = '突合が終わりました（この時点では何も書いていません）';
+        } catch (e) {
+            shahoImportError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            shahoImportPreviewBtn.disabled = false;
+        }
+    });
+}
+
+const shahoImportDryRunBtn = document.getElementById('shaho-import-dryrun-btn');
+if (shahoImportDryRunBtn) {
+    shahoImportDryRunBtn.addEventListener('click', async () => {
+        const status = document.getElementById('shaho-import-dryrun-status');
+        shahoImportError([]);
+        status.textContent = '確認中…';
+        try {
+            const res = await fetch('/shaho_import_execute', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: shahoImport.sessionId, plan_hash: shahoImport.planHash,
+                    selected: shahoImportPicked(), dry_run: true,
+                }),
+            });
+            const data = await res.json();
+            if (!data.success) {
+                shahoImportError(data.errors || ['確認に失敗しました']);
+                status.textContent = '';
+                return;
+            }
+            document.getElementById('shaho-import-dryrun-detail').innerHTML =
+                '<b>' + data.count + '名</b> に書き込みます（所要 約' + data.eta_minutes + '分）。'
+                + (data.forced.length
+                    ? '<br>承知のうえ投入: ' + escapeHtml(data.forced.join('、')) : '')
+                + '<table class="keiri-md-table" style="margin-top:6px">'
+                + '<tr><th>社員番号</th><th>氏名</th><th>操作</th><th>健保</th><th>厚年</th></tr>'
+                + data.results.map(r => '<tr><td>' + escapeHtml(r.emp) + '</td><td>'
+                    + escapeHtml(r.name) + '</td><td>'
+                    + escapeHtml(r.operation === 'PATCH' ? '更新' : '新規') + '</td><td>'
+                    + shahoImportYen(r.before_kenpo) + ' → <b>' + shahoImportYen(r.after_kenpo)
+                    + '</b></td><td>' + shahoImportYen(r.before_konen) + ' → <b>'
+                    + shahoImportYen(r.after_konen) + '</b></td></tr>').join('')
+                + '</table>';
+            document.getElementById('shaho-import-confirm-area').style.display = 'block';
+            document.getElementById('shaho-import-confirm-ym').value = '';
+            document.getElementById('shaho-import-confirm-check').checked = false;
+            document.getElementById('shaho-import-run-btn').disabled = true;
+            status.textContent = '内容を確認してください';
+        } catch (e) {
+            shahoImportError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        }
+    });
+}
+
+function shahoImportSyncRunBtn() {
+    const ymOk = document.getElementById('shaho-import-confirm-ym').value.trim()
+        === shahoImport.targetYm;
+    const checked = document.getElementById('shaho-import-confirm-check').checked;
+    document.getElementById('shaho-import-run-btn').disabled = !(ymOk && checked);
+}
+['shaho-import-confirm-ym', 'shaho-import-confirm-check'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', shahoImportSyncRunBtn);
+    el.addEventListener('change', shahoImportSyncRunBtn);
+});
+
+function shahoImportRenderProgress(p) {
+    const area = document.getElementById('shaho-import-progress-area');
+    if (!area) return;
+    area.style.display = 'block';
+    const counts = p.counts || {};
+    let html = '<div class="section-title" style="font-size:13px">投入の進み具合</div>';
+    if (p.state === 'running') {
+        html += '<div><b>' + (p.done || 0) + ' / ' + (p.total || 0) + '名</b> 完了'
+            + (p.message ? '（' + escapeHtml(p.message) + '）' : '')
+            + '</div><div class="hint">この画面を閉じても投入は最後まで続きます。'
+            + '戻ってきたらもう一度このモードを開いてください。</div>';
+    } else if (p.state === 'done') {
+        const ng = counts.verify_ng || 0;
+        html += '<div class="alert ' + (ng || counts.failed ? 'alert-warning' : '')
+            + '"><b>投入が終わりました</b>：成功 ' + (counts.ok || 0) + '名'
+            + '／失敗 ' + (counts.failed || 0) + '名'
+            + '／スキップ ' + (counts.skipped || 0) + '名'
+            + '／書込後の照合NG ' + ng + '名</div>';
+        if (p.ledger) html += '<div class="hint">実行台帳: ' + escapeHtml(p.ledger) + '</div>';
+        if (p.backup) html += '<div class="hint">投入前バックアップ: ' + escapeHtml(p.backup) + '</div>';
+        html += '<div class="hint">続きをやり直すときは、同じファイルでもう一度「データを突合する」を'
+            + '押してください。投入済みの人は自動で「書込不要」に落ちます。</div>';
+    } else if (p.state === 'error') {
+        html += '<div class="alert alert-error"><b>投入が止まりました</b>：'
+            + escapeHtml(p.message || '') + '</div>'
+            + '<div class="hint">同じファイルでもう一度突合すると、どこまで入ったかが分かります。</div>';
+    }
+    (p.errors || []).forEach(e => {
+        html += '<div class="alert alert-warning">' + escapeHtml(e) + '</div>';
+    });
+    const entries = (p.entries || []).slice().reverse();
+    if (entries.length) {
+        html += '<table class="keiri-md-table" style="margin-top:6px">'
+            + '<tr><th>社員番号</th><th>氏名</th><th>操作</th><th>結果</th><th>確認</th><th>メモ</th></tr>'
+            + entries.map(e => '<tr><td>' + escapeHtml(e.emp) + '</td><td>' + escapeHtml(e.name)
+                + '</td><td>' + escapeHtml(e.operation || '') + '</td><td>'
+                + escapeHtml(e.result || '') + '</td><td>'
+                + escapeHtml((p.verified || {})[e.emp] || '') + '</td><td><span class="hint">'
+                + escapeHtml(e.message || '') + '</span></td></tr>').join('')
+            + '</table>';
+    }
+    area.innerHTML = html;
+}
+
+async function shahoImportPoll() {
+    if (!shahoImport.sessionId) return;
+    try {
+        const res = await fetch('/shaho_import_status?session_id='
+            + encodeURIComponent(shahoImport.sessionId));
+        const p = await res.json();
+        if (p.state && p.state !== 'none') shahoImportRenderProgress(p);
+        if (p.state === 'done' || p.state === 'error') {
+            clearInterval(shahoImport.timer);
+            shahoImport.timer = null;
+            document.getElementById('shaho-import-run-status').textContent =
+                p.state === 'done' ? '完了' : '停止';
+        }
+    } catch (e) {
+        // 通信が一時的に切れても投入自体は走っている。次の周期で拾い直す
+    }
+}
+
+const shahoImportRunBtn = document.getElementById('shaho-import-run-btn');
+if (shahoImportRunBtn) {
+    shahoImportRunBtn.addEventListener('click', async () => {
+        const status = document.getElementById('shaho-import-run-status');
+        shahoImportError([]);
+        shahoImportRunBtn.disabled = true;
+        status.textContent = '投入を開始しています…';
+        try {
+            const res = await fetch('/shaho_import_execute', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: shahoImport.sessionId, plan_hash: shahoImport.planHash,
+                    selected: shahoImportPicked(), dry_run: false,
+                    confirm_ym: document.getElementById('shaho-import-confirm-ym').value.trim(),
+                }),
+            });
+            const data = await res.json();
+            if (!data.success) {
+                shahoImportError(data.errors || ['投入を開始できませんでした']);
+                status.textContent = '';
+                shahoImportRunBtn.disabled = false;
+                return;
+            }
+            status.textContent = '投入中（約' + data.eta_minutes + '分）…';
+            document.getElementById('shaho-import-dryrun-btn').disabled = true;
+            if (shahoImport.timer) clearInterval(shahoImport.timer);
+            shahoImport.timer = setInterval(shahoImportPoll, 4000);
+            shahoImportPoll();
+        } catch (e) {
+            shahoImportError('通信に失敗しました: ' + e);
+            status.textContent = '';
+            shahoImportRunBtn.disabled = false;
+        }
+    });
+}
+
+// =============================================================================
+// 請求書モード — 共有PDF → freee 売上取引CSV
+// =============================================================================
+const invoiceState = { month: '', rows: [], signature: '', preview: null };
+
+function invoiceShowError(messages) {
+    const area = document.getElementById('invoice-error-area');
+    if (!area) return;
+    const list = Array.isArray(messages) ? messages : (messages ? [messages] : []);
+    area.innerHTML = list.map(message => '<div>' + escapeHtml(String(message)) + '</div>').join('');
+    area.style.display = list.length ? '' : 'none';
+}
+
+function invoiceValidateRow(row) {
+    const main = row._row_type === 'main';
+    let required = ['勘定科目', '税区分', '金額', '税計算区分', '税額', '備考', '従業員'];
+    if (main) required = ['収支区分', '管理番号', '発生日', '支払期日', '取引先'].concat(required);
+    const errors = [];
+    required.forEach(key => {
+        if (String(row[key] == null ? '' : row[key]).trim() === '') errors.push(key + 'が未入力');
+    });
+    if (main && row['管理番号'] && !/^\d+$/.test(String(row['管理番号']).trim())) {
+        errors.push('管理番号は数字で入力');
+    }
+    ['発生日', '支払期日'].forEach(key => {
+        if (main && row[key] && !/^\d{4}-\d{2}-\d{2}$/.test(String(row[key]).replaceAll('/', '-'))) {
+            errors.push(key + 'は正しい日付で入力');
+        }
+    });
+    const amount = Number(String(row['金額'] == null ? '' : row['金額']).replaceAll(',', ''));
+    const tax = Number(String(row['税額'] == null ? '' : row['税額']).replaceAll(',', ''));
+    if (row['金額'] !== '' && (!Number.isInteger(amount) || amount <= 0)) errors.push('金額は1円以上の整数で入力');
+    if (row['税額'] !== '' && (!Number.isInteger(tax) || tax < 0)) errors.push('税額は0円以上の整数で入力');
+    if (Number.isFinite(amount) && Number.isFinite(tax) && tax > amount) errors.push('税額が金額を超えています');
+    return errors;
+}
+
+function invoiceRevalidate() {
+    let errorRows = 0;
+    invoiceState.rows.forEach((row, index) => {
+        row._errors = invoiceValidateRow(row);
+        if (row._errors.length) errorRows += 1;
+        const tr = document.querySelector('tr[data-invoice-row="' + index + '"]');
+        if (tr) {
+            tr.style.background = row._errors.length ? '#fff1f1' : '';
+            const cell = tr.querySelector('.invoice-row-errors');
+            if (cell) {
+                const warnings = row._warnings || [];
+                cell.innerHTML = row._errors.map(e => '<div style="color:#b00020">' + escapeHtml(e) + '</div>').join('')
+                    + warnings.map(w => '<div style="color:#8a5b00">' + escapeHtml(w) + '</div>').join('');
+            }
+        }
+    });
+    const count = document.getElementById('invoice-count-errors');
+    if (count) count.textContent = String(errorRows);
+    const exportBtn = document.getElementById('invoice-export-btn');
+    if (exportBtn) exportBtn.disabled = errorRows > 0 || !invoiceState.rows.length;
+    return errorRows;
+}
+
+function invoiceInput(index, field, type, disabled) {
+    const row = invoiceState.rows[index];
+    const value = row[field] == null ? '' : row[field];
+    const safeType = type || 'text';
+    return '<input class="invoice-cell-input" data-index="' + index + '" data-field="'
+        + escapeHtml(field) + '" type="' + safeType + '" value="' + escapeHtml(String(value)) + '"'
+        + (disabled ? ' disabled' : '') + ' style="min-width:'
+        + (field === '取引先' || field === '部門' ? '180px' : '105px') + '; padding:3px 5px">';
+}
+
+function invoiceRenderRows() {
+    const target = document.getElementById('invoice-preview-table');
+    if (!target) return;
+    let html = '<table class="keiri-md-table"><tr>'
+        + '<th>区分</th><th>従業員</th><th>管理番号</th><th>発生日</th><th>支払期日</th>'
+        + '<th>取引先</th><th>勘定科目</th><th>金額</th><th>税額</th><th>部門</th><th>確認</th><th>元PDF</th></tr>';
+    invoiceState.rows.forEach((row, index) => {
+        const commute = row._row_type === 'commute';
+        const sourceNames = (row._sources || []).map(path => String(path).split(/[\\/]/).pop());
+        html += '<tr data-invoice-row="' + index + '">'
+            + '<td>' + (commute ? '交通費' : '本体') + '</td>'
+            + '<td>' + invoiceInput(index, '従業員') + '</td>'
+            + '<td>' + invoiceInput(index, '管理番号', 'text', commute) + '</td>'
+            + '<td>' + invoiceInput(index, '発生日', 'date', commute) + '</td>'
+            + '<td>' + invoiceInput(index, '支払期日', 'date', commute) + '</td>'
+            + '<td>' + invoiceInput(index, '取引先', 'text', commute) + '</td>'
+            + '<td>' + invoiceInput(index, '勘定科目') + '</td>'
+            + '<td>' + invoiceInput(index, '金額', 'number') + '</td>'
+            + '<td>' + invoiceInput(index, '税額', 'number') + '</td>'
+            + '<td>' + invoiceInput(index, '部門') + '</td>'
+            + '<td class="invoice-row-errors" style="min-width:170px"></td>'
+            + '<td title="' + escapeHtml((row._sources || []).join('\n')) + '" style="min-width:160px">'
+            + sourceNames.map(name => escapeHtml(name)).join('<br>') + '</td></tr>';
+    });
+    html += '</table>';
+    target.innerHTML = html;
+    target.querySelectorAll('.invoice-cell-input').forEach(input => {
+        input.addEventListener('input', () => {
+            const index = Number(input.dataset.index);
+            invoiceState.rows[index][input.dataset.field] = input.value;
+            invoiceRevalidate();
+            document.getElementById('invoice-download-link').style.display = 'none';
+            document.getElementById('invoice-log-link').style.display = 'none';
+        });
+    });
+    invoiceRevalidate();
+}
+
+function invoiceRenderNotices(data) {
+    const target = document.getElementById('invoice-notices');
+    if (!target) return;
+    let html = '';
+    if (data.ignored && data.ignored.length) {
+        html += '<div class="alert alert-warning"><b>修正版を優先して除外: '
+            + data.ignored.length + '件</b><details><summary>一覧</summary>'
+            + data.ignored.map(item => '<div>' + escapeHtml(item.file) + '（'
+                + escapeHtml(item.reason) + '）</div>').join('') + '</details></div>';
+    }
+    if (data.missing_roots && data.missing_roots.length) {
+        html += '<div class="alert alert-warning">見つからない対象フォルダ: '
+            + data.missing_roots.length + '件</div>';
+    }
+    const failures = (data.scan_errors || []).concat(data.parse_errors || []);
+    if (failures.length) {
+        html += '<div class="alert alert-error"><b>読み取れなかったPDF/フォルダがあります</b>'
+            + failures.map(message => '<div>' + escapeHtml(message) + '</div>').join('') + '</div>';
+    }
+    html += '<div class="hint">社員番号の参照元: ' + escapeHtml(data.sales_book || '見つかりません') + '</div>';
+    target.innerHTML = html;
+}
+
+const invoiceMonthInput = document.getElementById('invoice-month');
+if (invoiceMonthInput) {
+    const previous = new Date();
+    previous.setMonth(previous.getMonth() - 1);
+    invoiceMonthInput.value = previous.getFullYear() + '-'
+        + String(previous.getMonth() + 1).padStart(2, '0');
+}
+
+const invoicePreviewBtn = document.getElementById('invoice-preview-btn');
+if (invoicePreviewBtn) {
+    invoicePreviewBtn.addEventListener('click', async () => {
+        const month = (document.getElementById('invoice-month').value || '').trim();
+        const status = document.getElementById('invoice-status');
+        invoiceShowError([]);
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+            invoiceShowError('請求対象月を選択してください');
+            return;
+        }
+        invoicePreviewBtn.disabled = true;
+        status.textContent = '28フォルダから請求書PDFを探して読み取っています…';
+        document.getElementById('invoice-result-area').style.display = 'none';
+        document.getElementById('invoice-download-link').style.display = 'none';
+        document.getElementById('invoice-log-link').style.display = 'none';
+        try {
+            const form = new FormData();
+            form.append('month', month);
+            const response = await fetch('/invoice_preview', { method: 'POST', body: form });
+            const data = await response.json();
+            if (!data.success) {
+                invoiceShowError(data.errors || ['請求書を読み取れませんでした']);
+                status.textContent = '';
+                return;
+            }
+            invoiceState.month = month;
+            invoiceState.rows = data.rows || [];
+            invoiceState.signature = data.signature || '';
+            invoiceState.preview = data;
+            document.getElementById('invoice-count-files').textContent = String((data.selected_files || []).length);
+            document.getElementById('invoice-count-rows').textContent = String(invoiceState.rows.length);
+            document.getElementById('invoice-count-commute').textContent = String(
+                invoiceState.rows.filter(row => row._row_type === 'commute').length);
+            invoiceRenderNotices(data);
+            invoiceRenderRows();
+            document.getElementById('invoice-result-area').style.display = 'block';
+            status.textContent = invoiceState.rows.length
+                ? '読み取り完了。赤い行を修正してからCSVを作成してください。'
+                : '対象の請求書PDFが見つかりませんでした。';
+        } catch (error) {
+            invoiceShowError('通信に失敗しました: ' + error);
+            status.textContent = '';
+        } finally {
+            invoicePreviewBtn.disabled = false;
+        }
+    });
+}
+
+const invoiceExportBtn = document.getElementById('invoice-export-btn');
+if (invoiceExportBtn) {
+    invoiceExportBtn.addEventListener('click', async () => {
+        if (invoiceRevalidate() > 0) {
+            invoiceShowError('未入力・不正な行があるためCSVを作成できません');
+            return;
+        }
+        const status = document.getElementById('invoice-export-status');
+        invoiceShowError([]);
+        invoiceExportBtn.disabled = true;
+        status.textContent = 'CSVを作成しています…';
+        try {
+            const response = await fetch('/invoice_export', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    month: invoiceState.month,
+                    rows: invoiceState.rows,
+                    signature: invoiceState.signature,
+                }),
+            });
+            const data = await response.json();
+            if (!data.success) {
+                invoiceShowError(data.errors || ['CSVを作成できませんでした']);
+                status.textContent = '';
+                return;
+            }
+            const download = document.getElementById('invoice-download-link');
+            const log = document.getElementById('invoice-log-link');
+            download.href = data.csv_url;
+            download.textContent = data.csv_name + ' をダウンロード';
+            download.style.display = '';
+            log.href = data.log_url;
+            log.style.display = '';
+            status.textContent = data.row_count + '行のCSVを作成しました。';
+        } catch (error) {
+            invoiceShowError('通信に失敗しました: ' + error);
+            status.textContent = '';
+        } finally {
+            invoiceExportBtn.disabled = false;
+            invoiceRevalidate();
         }
     });
 }

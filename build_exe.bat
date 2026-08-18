@@ -34,6 +34,7 @@ python -m PyInstaller ^
   --hidden-import services.keiri_keihi_tenki ^
   --hidden-import services.keiri_api ^
   --hidden-import services.keiri_diff ^
+  --hidden-import services.invoice_mode ^
   --hidden-import services.mail_draft ^
   --hidden-import services.mail_ledger_sync ^
   --hidden-import services.higashi_shift_parser ^
@@ -54,6 +55,9 @@ python -m PyInstaller ^
   --hidden-import services.shaho_engine ^
   --hidden-import services.shaho_check ^
   --hidden-import services.shaho_report ^
+  --hidden-import services.shaho_pdf ^
+  --hidden-import services.shaho_writer ^
+  --hidden-import services.shaho_its ^
   launcher.py
 
 if errorlevel 1 goto :build_failed
