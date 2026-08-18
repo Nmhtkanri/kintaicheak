@@ -1,0 +1,6 @@
+# Batch files must keep CRLF endings.
+# The launcher is saved in Shift-JIS (CP932); with LF-only endings cmd.exe
+# desyncs on multi-byte characters and starts treating parts of a line as
+# commands. Checking these out with LF would break the launcher.
+*.bat text eol=crlf
+*.cmd text eol=crlf
