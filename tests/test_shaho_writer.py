@@ -282,6 +282,29 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(result["2099001"], "OK")
         self.assertTrue(result["2099002"].startswith("NG"))
 
+    def test_wrong_collection_month_is_flagged(self):
+        """★金額が合っていても、控除される月がずれていたらOKと呼ばない。
+
+        2026-08-18 に実際に起きた: API で作ったレコードは徴収年月が
+        「基準年月と同じ」になり、画面入力（基準+1か月）とずれていた。
+        """
+        rows = plan_for([person()], calc=CalcResult(kenpo=300000, konen=300000))
+
+        class Client(FakeClient):
+            def get_monthly_remunerations(self, emps, year=None, month=None):
+                rec_ = rec(TARGET, 300000, 300000)
+                rec_["collection_month"] = TARGET          # 本来は 2026-08
+                return {e: [rec_] for e in emps}
+
+        result = verify_after(Client(), rows, TARGET)
+        self.assertIn("徴収年月", result["2099001"])
+        self.assertNotEqual(result["2099001"], "OK")
+
+    def test_correct_collection_month_is_ok(self):
+        rows = plan_for([person()], calc=CalcResult(kenpo=300000, konen=300000))
+        client = FakeClient(state={"2099001": (300000, 300000)})
+        self.assertEqual(verify_after(client, rows, TARGET)["2099001"], "OK")
+
     def test_missing_record_is_ng(self):
         rows = plan_for([person()], calc=CalcResult(kenpo=300000, konen=300000))
         self.assertTrue(verify_after(FakeClient(), rows, TARGET)["2099001"].startswith("NG"))

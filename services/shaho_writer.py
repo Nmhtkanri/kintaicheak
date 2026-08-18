@@ -662,16 +662,25 @@ def verify_after(client, rows: list, target_ym: str) -> dict:
         return {}
     year, month = target_ym.split("-")
     fetched = client.get_monthly_remunerations(emps, year=year, month=month)
+    expect_collection = ym_add(target_ym, 1)
     out = {}
     for row in rows:
         _at, effective = pick_records(fetched.get(row.emp) or [], target_ym)
         got_kenpo = _rec_fee(effective, "health_insurance") if effective else None
         got_konen = _rec_fee(effective, "employee_pension") if effective else None
-        if (got_kenpo, got_konen) == (row.pdf_kenpo, row.pdf_konen):
-            out[row.emp] = "OK"
-        else:
+        if (got_kenpo, got_konen) != (row.pdf_kenpo, row.pdf_konen):
             out[row.emp] = (f"NG（健保 {got_kenpo}／厚年 {got_konen} が入っています。"
                             f"期待は {row.pdf_kenpo}／{row.pdf_konen}）")
+            continue
+        # ★徴収年月も見る。2026-08-18 に、API で作ったレコードだけ徴収年月が
+        #   「基準年月と同じ」になり、画面入力（基準+1か月）とずれる事象が起きた。
+        #   金額が合っていても控除される月がずれるので、OKとは呼べない。
+        got_collection = str((effective or {}).get("collection_month") or "")
+        if got_collection and got_collection != expect_collection:
+            out[row.emp] = (f"要確認（金額は合っていますが徴収年月が {got_collection} です。"
+                            f"画面入力なら {expect_collection} になります）")
+        else:
+            out[row.emp] = "OK"
     return out
 
 

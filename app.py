@@ -3336,6 +3336,19 @@ def route_shaho_import_preview():
     if ctx.missing_months:
         notes.append("給与明細キャッシュが無い月: " + "、".join(ctx.missing_months)
                      + "（経理モードで取得すると計算値を出せる人が増えます）")
+    # ★トリプルチェックの3点目（当方計算）が丸ごと効いていない状態を見逃さない。
+    #   給与明細キャッシュは各PCのローカルにあるので、経理モードを動かしていない
+    #   端末では計算値が1人も出せず、全員が「計算値なし」で素通りしてしまう
+    #   （2026-08-18 に実際に起きた。34名中3名が当方計算と食い違ったまま投入された）。
+    selectable_rows = [r for r in rows if r.selectable]
+    if selectable_rows and not ctx.months:
+        # 算定に使う月が1つも読めていない＝この端末に給与明細キャッシュが無い
+        notes.append(
+            "⚠ この端末には給与明細キャッシュが無いため、当方の計算値を1人も出せていません。"
+            "いまは「通知」と「jinjerの登録値」の2点だけの確認で、"
+            "通知の値が当方の算定と食い違っていても気づけません"
+            "（投入できる" + str(len(selectable_rows)) + "名は全員この状態です）。"
+            "経理モードを実行している端末で動かすと3点で確認できます")
     # Codex が毎月1日に置く公式資料（標準報酬月額_YYYY_MM.xlsx）が、いま計算に
     # 使っている等級表より新しければ知らせる。自動では読まない（作りが違うため）。
     newer = shaho_master.find_newer_tables(Config.SHAHO_GRADE_TABLE_XLSX)

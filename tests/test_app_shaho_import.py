@@ -209,6 +209,20 @@ class TestPreview:
         assert by_emp["2099001"]["status"] == "NO_CHANGE"
         assert by_emp["2099001"]["selectable"] is False
 
+    def test_warns_when_no_one_has_a_calculated_value(self, client, session_dir,
+                                                       monkeypatch, allow_write):
+        """★トリプルチェックの3点目が丸ごと効いていない端末を検知する。
+
+        給与明細キャッシュは各PCのローカルにあるので、経理モードを動かしていない
+        端末では計算値が1人も出せない。2026-08-18 に実際に起きた
+        （34名中3名が当方計算と食い違ったまま投入された）。
+        """
+        _res, data = preview(client, monkeypatch,
+                             calc=CalcResult(note="給与明細がない"))
+        assert all(r["status"] == "NO_CALC" for r in data["rows"] if r["selectable"])
+        assert any("給与明細キャッシュが無い" in n and "2点だけ" in n
+                   for n in data["notes"]),             "計算値を1人も出せないときは、2点しか見ていないことを警告すること"
+
     def test_history_is_fetched_unfiltered(self, client, session_dir, monkeypatch,
                                            allow_write):
         """★回帰: 対象月で絞って取ると、過去のレコードが効いている人を見失う。
