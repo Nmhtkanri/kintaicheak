@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -148,6 +149,43 @@ def _parse_reiwa_year(text: str) -> int | None:
 # ---------------------------------------------------------------------------
 # 等級表の読み込み
 # ---------------------------------------------------------------------------
+# Codex が毎月1日に取得して置く公式資料のファイル名（標準報酬月額_YYYY_MM.xlsx）。
+# 既存を上書きしない運用なので、月が進むほどファイルが増える。
+CODEX_TABLE_RE = re.compile(r"^標準報酬月額_(\d{4})_(\d{2})\.xlsx$")
+
+
+def find_newer_tables(configured_path: str) -> list:
+    """設定の等級表より後に置かれた公式資料を探す（ファイル名のリスト）。
+
+    **計算に使うのは `Config.SHAHO_GRADE_TABLE_XLSX` の1本だけ**で、Codex が
+    毎月取ってくる `標準報酬月額_YYYY_MM.xlsx` は自動では読まない（作りが違うため）。
+    ただし黙って古い料率を使い続けると、年度途中の料率改定に気づけない。
+    そこで**新しい資料が来ていたら画面で知らせる**ところまでをここで担う。
+
+    年度が変わったときは `load_grade_table` の年度チェックが止めるので、
+    ここが拾うのは主に「同じ年度のまま料率が改定された」場合。
+    """
+    try:
+        folder = os.path.dirname(configured_path)
+        base_mtime = os.path.getmtime(configured_path)
+    except OSError:
+        return []
+    found = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    for name in sorted(names):
+        if not CODEX_TABLE_RE.match(name):
+            continue
+        try:
+            if os.path.getmtime(os.path.join(folder, name)) > base_mtime:
+                found.append(name)
+        except OSError:
+            continue
+    return found
+
+
 def load_grade_table(path: str, insurer: str, expected_year: int) -> ShahoMaster:
     """等級表Excelを読み、総当たり検証してから ShahoMaster を返す。"""
     if insurer not in INSURERS:

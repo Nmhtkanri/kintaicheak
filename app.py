@@ -3235,7 +3235,7 @@ def route_shaho_import_preview():
       - expected_ym : 対象年月 YYYY-MM（入れるとPDFと違う月なら止める）
       - refresh     : "1" で従業員一覧をAPIから取り直す
     """
-    from services import shaho_its, shaho_pdf, shaho_writer
+    from services import shaho_its, shaho_master, shaho_pdf, shaho_writer
     from services.jinjer_api_client import JinjerAPIError
     from services.keiri_api import load_or_fetch_roster, roster_index
 
@@ -3336,6 +3336,15 @@ def route_shaho_import_preview():
     if ctx.missing_months:
         notes.append("給与明細キャッシュが無い月: " + "、".join(ctx.missing_months)
                      + "（経理モードで取得すると計算値を出せる人が増えます）")
+    # Codex が毎月1日に置く公式資料（標準報酬月額_YYYY_MM.xlsx）が、いま計算に
+    # 使っている等級表より新しければ知らせる。自動では読まない（作りが違うため）。
+    newer = shaho_master.find_newer_tables(Config.SHAHO_GRADE_TABLE_XLSX)
+    if newer:
+        notes.append(
+            "⚠ 新しい標準報酬月額表が届いています（" + "、".join(newer) + "）。"
+            "いま計算に使っているのは "
+            + os.path.basename(Config.SHAHO_GRADE_TABLE_XLSX)
+            + " です。料率が変わっていないか確認し、変わっていれば等級表を差し替えてください")
     # 基準年月の意味を実データで確かめる（PDFは「7月分＝8月給与控除」と書いてある）
     collections = {shaho_writer.record_ym(r): str(r.get("collection_month") or "")
                    for recs in current.values() for r in recs

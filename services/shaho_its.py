@@ -66,6 +66,7 @@ from __future__ import annotations
 import csv
 import re
 
+from services.keiri_api import classify_employee
 from services.shaho_pdf import PdfPerson, PdfStatement, ShahoPdfError
 
 # この通知が持つのは定時決定だけ（随時改定は社労士の保険料一覧表から来る）
@@ -173,6 +174,23 @@ def build_statement(rows: list, target_ym: str, *, roster: dict, number_map: dic
     for emp, info in roster.items():
         by_name.setdefault(name_key(info.get("name")), []).append(emp)
 
+    def pick_by_name(cands: list):
+        """氏名の候補から1人に絞る。(社員番号 or None, 注記)。
+
+        jinjerには同じ人が2つの社員番号で登録されていることがある
+        （例: 谷津晴香さん = 2026007 と 3333003。旧登録が閉じられていない）。
+        **投入できるのは 20YY 始まりの人だけ**なので、候補のうち 20YY が
+        ちょうど1人ならその人に決めてよい。
+        """
+        if len(cands) == 1:
+            return cands[0], ""
+        targets = [c for c in cands if classify_employee(c) == "target"]
+        if len(targets) == 1:
+            others = "・".join(c for c in cands if c != targets[0])
+            return targets[0], (f"jinjerに同じ氏名の登録が{len(cands)}件あり"
+                                f"（{others}）、社員番号が 20YY の {targets[0]} を採りました")
+        return None, ""
+
     stmt = PdfStatement(target_ym=target_ym, pay_ym=ym_add(target_ym, 1),
                         office_name="関東ITソフトウェア健康保険組合",
                         total_count=len(rows))
@@ -180,7 +198,7 @@ def build_statement(rows: list, target_ym: str, *, roster: dict, number_map: dic
     for row in rows:
         by_no = number_map.get(row["no"])
         cands = by_name.get(name_key(row["name"]), [])
-        by_nm = cands[0] if len(cands) == 1 else None
+        by_nm, dup_note = pick_by_name(cands)
 
         person = PdfPerson(emp="", name=row["name"], kenpo_no=row["no"],
                            reason_kenpo=REASON, reason_konen=REASON)
@@ -200,6 +218,8 @@ def build_statement(rows: list, target_ym: str, *, roster: dict, number_map: dic
             person.emp = by_nm
             person.warnings.append(
                 f"健保証番号 {row['no']} が jinjer に未登録のため、氏名で突合しました")
+            if dup_note:
+                person.warnings.append(dup_note)
         elif cands:
             person.issues.append(
                 f"同じ氏名が {len(cands)}名（{'・'.join(cands)}）いて、"

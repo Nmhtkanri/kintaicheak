@@ -160,12 +160,29 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(p.emp, "2099001")
         self.assertTrue(any("未登録" in m for m in p.warnings))
 
-    def test_duplicate_name_without_number_is_unresolved(self):
-        """同姓同名（谷津さんのように社員番号が2つある人）は特定しない。"""
+    def test_duplicate_registration_prefers_the_20yy_record(self):
+        """★同じ人がjinjerに2つの社員番号で登録されていることがある。
+
+        谷津さん（2026007 と 3333003）の実例。投入できるのは 20YY 始まりだけなので、
+        候補のうち 20YY がちょうど1人ならその人に決めてよい（理由は警告に残す）。
+        """
         p = self._one(number_map={},
                       people=roster(**{"2099001": "試験 太郎", "3333001": "試験 太郎"}))
+        self.assertEqual(p.emp, "2099001")
+        self.assertEqual(p.issues, [])
+        self.assertTrue(any("3333001" in m and "20YY" in m for m in p.warnings))
+
+    def test_two_20yy_records_with_the_same_name_is_unresolved(self):
+        """20YY が2人いる本物の同姓同名は、決めずに人へ返す。"""
+        p = self._one(number_map={},
+                      people=roster(**{"2099001": "試験 太郎", "2099002": "試験 太郎"}))
         self.assertEqual(p.emp, "")
         self.assertTrue(any("同じ氏名" in m for m in p.issues))
+
+    def test_only_non_20yy_record_still_resolves_then_excluded(self):
+        """3333系しか無い人は、そのまま拾って build_plan 側で対象外に落とす。"""
+        p = self._one(number_map={}, people=roster(**{"3333008": "試験 太郎"}))
+        self.assertEqual(p.emp, "3333008")
 
     def test_unknown_person(self):
         p = self._one(number_map={}, people={})

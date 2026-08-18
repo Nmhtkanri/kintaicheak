@@ -569,6 +569,53 @@ class ClosedMonthTests(unittest.TestCase):
         self.assertEqual(st["open"], 1)
 
 
+class NewerTableTests(unittest.TestCase):
+    """Codexが毎月1日に置く公式資料（標準報酬月額_YYYY_MM.xlsx）の検知。
+
+    計算に使うのは設定の等級表1本だけで、Codexのファイルは自動では読まない
+    （作りが違うため）。新しいものが来たら画面で知らせるところまでを担う。
+    """
+
+    def _folder(self, tmp, names, base_name="令和8年度_表.xlsx"):
+        import time
+        base = os.path.join(tmp, base_name)
+        with open(base, "wb") as f:
+            f.write(b"x")
+        old = time.time() - 3600
+        os.utime(base, (old, old))
+        for name in names:
+            with open(os.path.join(tmp, name), "wb") as f:
+                f.write(b"x")
+        return base
+
+    def test_newer_official_table_is_detected(self):
+        from services.shaho_master import find_newer_tables
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._folder(tmp, ["標準報酬月額_2026_09.xlsx"])
+            self.assertEqual(find_newer_tables(base), ["標準報酬月額_2026_09.xlsx"])
+
+    def test_other_filenames_are_ignored(self):
+        """命名ルール（年4桁_月2桁）から外れるものは拾わない。"""
+        from services.shaho_master import find_newer_tables
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._folder(tmp, ["標準報酬月額_2026_9.xlsx", "メモ.xlsx",
+                                      "標準報酬月額表_2026_09.xlsx"])
+            self.assertEqual(find_newer_tables(base), [])
+
+    def test_older_file_is_not_reported(self):
+        import time
+        from services.shaho_master import find_newer_tables
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._folder(tmp, ["標準報酬月額_2026_08.xlsx"])
+            older = time.time() - 7200
+            os.utime(os.path.join(tmp, "標準報酬月額_2026_08.xlsx"), (older, older))
+            self.assertEqual(find_newer_tables(base), [])
+
+    def test_missing_configured_file_is_safe(self):
+        from services.shaho_master import find_newer_tables
+        self.assertEqual(find_newer_tables("Z:/ない/ない.xlsx"), [])
+
+
 class RealFileTests(unittest.TestCase):
     """実在の令和8年度Excelを読む（共有フォルダが無ければスキップ）。"""
 
