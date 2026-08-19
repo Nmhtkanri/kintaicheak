@@ -500,6 +500,48 @@ def _match_employee(document: dict[str, Any], master: dict[str, dict[str, str]])
         return company_matches[0]
     return {"employee_no": "", "employee_name": _clean_display_name(document.get("employee_name", "")),
             "partner": "", "department": "", "source": ""}
+def load_due_date_rules(csv_path: os.PathLike[str] | str | None = None) -> dict[str, str]:
+    """取引先ごとの支払期日ルールを読む。
+
+    請求書PDFに入金期日が載っていない取引先があるため（IXナレッジ様など）、
+    取引先名から期日を決められるようにする。CSVが無ければ空＝どこにも
+    当てはめない（＝推測しない。画面で赤くなり人が入れる）。
+
+    列: 取引先, 支払期日
+    支払期日の書き方: 当月末 / 翌月末 / 翌々月末 / 翌月10日 / 翌々月10日 など
+    """
+    if not csv_path or not Path(csv_path).exists():
+        return {}
+    rules: dict[str, str] = {}
+    for row in _read_csv_rows(Path(csv_path)):
+        partner = _nfkc(row.get("取引先") or "")
+        rule = _nfkc(row.get("支払期日") or "")
+        if partner and rule:
+            rules[_company_key(partner)] = rule
+    return rules
+
+
+def resolve_due_date(rule: str, month_end: date) -> str:
+    """支払期日ルールを対象月の末日から解決する。解釈できなければ空を返す。"""
+    text = _nfkc(rule).strip()
+    offsets = {"当月": 0, "翌月": 1, "翌々月": 2}
+    for label, offset in offsets.items():
+        if not text.startswith(label):
+            continue
+        rest = text[len(label):]
+        total = month_end.month - 1 + offset
+        year, month = month_end.year + total // 12, total % 12 + 1
+        last_day = calendar.monthrange(year, month)[1]
+        if rest in ("末", "末日"):
+            return date(year, month, last_day).isoformat()
+        day_match = re.fullmatch(r"(\d{1,2})\s*日?", rest)
+        if day_match:
+            day = min(int(day_match.group(1)), last_day)
+            return date(year, month, day).isoformat()
+        return ""
+    return ""
+
+
 def load_departments(employee_ids: Iterable[str], on_date: str, *,
                      cache_path: os.PathLike[str] | str | None = None,
                      client: Any = None) -> dict[str, str]:
@@ -608,7 +650,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
                   sales_book_template: str | None = None,
                   master_csv: os.PathLike[str] | str | None = None,
                   default_department: str = "",
-                  custom_items_cache: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+                  custom_items_cache: os.PathLike[str] | str | None = None,
+                  due_date_rules_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
     match = re.fullmatch(r"(\d{4})-(\d{2})", _nfkc(month))
     if not match:
         raise InvoiceModeError("対象月は YYYY-MM 形式で指定してください")
@@ -619,6 +662,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
     scan = find_invoice_files(month, target_roots)
     sales_book = _sales_book_path(sales_book_template, year)
     master = load_employee_master(sales_book, master_csv)
+    due_date_rules = load_due_date_rules(due_date_rules_csv)
     documents: list[dict[str, Any]] = []
     parse_errors: list[str] = []
     for source_file in scan["selected"]:
@@ -667,6 +711,13 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         issue_date, issue_conflict = _common_value(basis, "issue_date")
         issue_date, issue_moved = _clamp_issue_date(issue_date, month_end)
         due_date, due_conflict = _common_value(basis, "due_date")
+        # PDFに入金期日が載っていない取引先は、取引先ごとのルールから決める。
+        # ルールが無ければ空のまま＝画面で赤くなり人が入れる（推測しない）。
+        due_from_rule = ""
+        if not due_date:
+            rule = due_date_rules.get(_company_key(partner))
+            due_from_rule = resolve_due_date(rule, month_end) if rule else ""
+            due_date = due_from_rule or due_date
         main_amount: int | str = ""
         main_tax: int | str = ""
         if main_documents and all(doc.get("main_amount") is not None for doc in main_documents):
@@ -696,6 +747,9 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
             main_row["_warnings"].append("請求日が複数あります")
         if due_conflict:
             main_row["_warnings"].append("入金期日が複数あります")
+        if due_from_rule:
+            main_row["_warnings"].append(
+                f"PDFに入金期日が無いので、支払期日ルールから {due_from_rule} にしました")
         main_row["_errors"] = _validation_messages(main_row)
         rows.append(main_row)
 

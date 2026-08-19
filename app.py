@@ -2824,6 +2824,7 @@ def route_invoice_preview():
             # 経理モードが作ったキャッシュがあれば API を叩かずに済む。
             custom_items_cache=os.path.join(
                 Config.KEIRI_OUTPUT_DIR, "raw", "custom_items.json"),
+            due_date_rules_csv=Config.INVOICE_DUE_DATE_RULES_CSV,
         )
     except InvoiceModeError as exc:
         return jsonify({"success": False, "errors": [str(exc)]}), 400

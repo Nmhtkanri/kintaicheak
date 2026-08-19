@@ -160,6 +160,11 @@ class Config:
     # 任意の補正マスタ。列: 氏名, 社員番号, freee取引先, 部門
     INVOICE_MASTER_CSV = os.environ.get(
         "INVOICE_MASTER_CSV", r"Z:\API連携\docs\請求書モード_freee補正マスタ.csv")
+    # 請求書PDFに入金期日が載っていない取引先の期日ルール。
+    # 列: 取引先, 支払期日（当月末／翌月末／翌々月10日 など）。
+    # 載っていない取引先は空欄のまま＝画面で赤く出して人が入れる（推測しない）。
+    INVOICE_DUE_DATE_RULES_CSV = os.environ.get(
+        "INVOICE_DUE_DATE_RULES_CSV", r"Z:\API連携\docs\請求書モード_支払期日ルール.csv")
     INVOICE_DEFAULT_DEPARTMENT = os.environ.get("INVOICE_DEFAULT_DEPARTMENT", "")
     INVOICE_OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "outputs/invoice")
 
