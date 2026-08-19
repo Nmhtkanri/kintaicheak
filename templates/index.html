@@ -1982,7 +1982,11 @@
     document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', () => {
         if (r.checked && r.value === 'expense') exRenderStepper();
     }));
-    if (getCurrentMode() === 'expense') exRenderStepper();
+    // 起動時に経費モードだった場合の初期表示。script.js はこのインラインscriptより後に
+    // 読み込まれるため、ここで getCurrentMode() を呼ぶと ReferenceError になり、これ以降の
+    // ハンドラ登録が全滅して全ボタンが死ぬ（2026-08-19 に実際に起きた）。DOMを直接見る。
+    const exModeRadio = document.querySelector('input[name="mode"][value="expense"]');
+    if (exModeRadio && exModeRadio.checked) exRenderStepper();
 
     // ----- 経費チェック（テレワーク日数）-----
     const exRunBtn = document.getElementById('ex-run-btn');

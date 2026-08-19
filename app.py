@@ -65,6 +65,20 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config.from_object(Config)
 
+
+@app.after_request
+def _no_store_html(response):
+    """画面HTMLはキャッシュさせない。
+
+    exe を入れ替えてもブラウザが古い index.html をキャッシュから返し、
+    「新しいサーバ×古い画面」の食い違いで全ボタンが死ぬ事故が起きたため
+    （2026-08-19）。静的ファイル(JS/CSS)は対象外＝従来どおりキャッシュされる。
+    """
+    if response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # アップロード/出力フォルダ作成
 os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(Config.OUTPUT_FOLDER, exist_ok=True)
