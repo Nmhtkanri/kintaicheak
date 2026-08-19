@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import calendar
 import csv
 import hashlib
 import io
@@ -216,7 +217,8 @@ def parse_invoice_text(text: str, filename: str = "") -> dict[str, Any]:
     commute_only = any(token in filename for token in ("立替", "交通費")) and (
         "請求" in filename or "invoice" in filename.casefold())
     issue_date = _extract_labeled_date(
-        normalized, (r"請求年月日", r"請求日", r"発行日", r"請求確定日時", r"Invoice\s*Date"))
+        normalized, (r"請求年月日", r"請求日", r"発行日", r"請求確定日時", r"Invoice\s*Date",
+                     r"End\s*Date"))   # End Date は Fieldglass(英語)の請求対象期間の末日
     due_date = _extract_labeled_date(
         normalized, (r"入金期日", r"お支払\s*期\s*日", r"支払\s*期\s*日", r"Due\s*Date"))
     tax_values = _money_values(normalized, (
@@ -498,6 +500,28 @@ def _match_employee(document: dict[str, Any], master: dict[str, dict[str, str]])
         return company_matches[0]
     return {"employee_no": "", "employee_name": _clean_display_name(document.get("employee_name", "")),
             "partner": "", "department": "", "source": ""}
+def _clamp_issue_date(issue_date: str, month_end: date) -> tuple[str, bool]:
+    """発生日を対象月の末日に寄せる。
+
+    freee には対象月の末日（2026/7/31）で登録する運用なのに、請求書によっては
+    「請求確定日時」「出力日時」など翌月初の日付しか載っていないものがある
+    （IXナレッジ様の 2026/08/05 など）。対象月から外れた日付はそのまま使わない。
+
+    Returns:
+        (発生日, 元の日付を月末へ置き換えたか)
+    """
+    fallback = month_end.isoformat()
+    if not issue_date:
+        return fallback, False
+    try:
+        parsed = date.fromisoformat(issue_date)
+    except ValueError:
+        return fallback, True
+    if (parsed.year, parsed.month) != (month_end.year, month_end.month):
+        return fallback, True
+    return issue_date, False
+
+
 def _common_value(documents: Sequence[dict[str, Any]], key: str) -> tuple[str, bool]:
     values = {_nfkc(doc.get(key)) for doc in documents if _nfkc(doc.get(key))}
     if len(values) == 1:
@@ -507,7 +531,7 @@ def _common_value(documents: Sequence[dict[str, Any]], key: str) -> tuple[str, b
 
 def _validation_messages(row: dict[str, Any]) -> list[str]:
     row_type = row.get("_row_type", "main")
-    required = ["勘定科目", "税区分", "金額", "税計算区分", "税額", "備考", "部門", "従業員"]
+    required = ["勘定科目", "税区分", "金額", "税計算区分", "税額", "部門", "従業員"]
     if row_type == "main":
         required = ["収支区分", "管理番号", "発生日", "支払期日", "取引先", *required]
     errors = [f"{column}が未入力" for column in required if str(row.get(column, "")).strip() == ""]
@@ -539,6 +563,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
     if not match:
         raise InvoiceModeError("対象月は YYYY-MM 形式で指定してください")
     year = int(match.group(1))
+    month_end = date(year, int(match.group(2)),
+                     calendar.monthrange(year, int(match.group(2)))[1])
     target_roots = list(roots) if roots is not None else load_target_roots(target_roots_csv)
     scan = find_invoice_files(month, target_roots)
     sales_book = _sales_book_path(sales_book_template, year)
@@ -579,6 +605,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         partner = _nfkc(basis[0].get("partner") or basis[0].get("master_partner")) if basis else ""
         department = _nfkc(basis[0].get("department")) if basis else _nfkc(default_department)
         issue_date, issue_conflict = _common_value(basis, "issue_date")
+        issue_date, issue_moved = _clamp_issue_date(issue_date, month_end)
         due_date, due_conflict = _common_value(basis, "due_date")
         main_amount: int | str = ""
         main_tax: int | str = ""
@@ -587,7 +614,10 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         if main_documents and all(doc.get("main_tax") is not None for doc in main_documents):
             main_tax = sum(int(doc["main_tax"]) for doc in main_documents)
         group_id = f"invoice-{group_index}"
-        remarks = f"総合計請求書：{employee_name}" if employee_name else "総合計請求書："
+        # 備考・品目は空欄で出す（2026-08 谷津さん指示）。
+        # Fieldglass(UAL)分の取込では備考に「総合計請求書：氏名」を入れていたが、
+        # 請求書モードで作る分では不要とのこと。戻すならここに文言を組み立てる。
+        remarks = ""
         main_row: dict[str, Any] = {
             "収支区分": "収入", "管理番号": employee_no, "発生日": issue_date,
             "支払期日": due_date, "取引先": partner, "勘定科目": "売上高",
@@ -599,6 +629,9 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         }
         if not main_documents:
             main_row["_warnings"].append("本体請求書が見つかりません")
+        if issue_moved:
+            main_row["_warnings"].append(
+                f"PDFの日付が対象月の外だったので発生日を {month_end.isoformat()} にしました")
         if issue_conflict:
             main_row["_warnings"].append("請求日が複数あります")
         if due_conflict:

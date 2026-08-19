@@ -3351,7 +3351,7 @@ function invoiceShowError(messages) {
 
 function invoiceValidateRow(row) {
     const main = row._row_type === 'main';
-    let required = ['勘定科目', '税区分', '金額', '税計算区分', '税額', '備考', '部門', '従業員'];
+    let required = ['勘定科目', '税区分', '金額', '税計算区分', '税額', '部門', '従業員'];
     if (main) required = ['収支区分', '管理番号', '発生日', '支払期日', '取引先'].concat(required);
     const errors = [];
     required.forEach(key => {
@@ -3442,9 +3442,6 @@ function invoiceRenderRows() {
         input.addEventListener('input', () => {
             const index = Number(input.dataset.index);
             invoiceState.rows[index][input.dataset.field] = input.value;
-            if (input.dataset.field === '従業員') {
-                invoiceState.rows[index]['備考'] = '総合計請求書：' + input.value.trim();
-            }
             invoiceRevalidate();
             document.getElementById('invoice-download-link').style.display = 'none';
             document.getElementById('invoice-log-link').style.display = 'none';
@@ -3458,7 +3455,7 @@ function invoiceRenderRows() {
                 const copy = Object.assign({}, source, {
                     '従業員': '',
                     '管理番号': '',
-                    '備考': '総合計請求書：',
+                    '備考': '',
                     _group_id: source._group_id + '-split-' + Date.now(),
                     _sources: (source._sources || []).slice(),
                     _warnings: ['合算請求書を手動で分割した行です。金額と税額の合計を元PDFと照合してください。'],

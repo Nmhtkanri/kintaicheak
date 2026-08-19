@@ -92,8 +92,10 @@ def test_parse_english_fieldglass_keeps_missing_tax_for_manual_review():
     assert got["employee_name"] == "NaraTakahiro"
     assert got["partner"] == "Ericsson"
     assert got["main_amount"] == 975100
+    # 英語のFieldglassには消費税の行が無いので、税額は人が入れる（推測しない）
     assert got["main_tax"] is None
-    assert got["issue_date"] == ""
+    # 日付は「End Date」＝請求対象期間の末日から取る（2026-08 対応）
+    assert got["issue_date"] == "2026-07-31"
 
 
 def test_unique_company_fallback_does_not_guess_when_multiple_people():
