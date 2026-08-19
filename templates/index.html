@@ -1255,7 +1255,7 @@
                      カード型（1行=1判断）。id は描画先として prRenderFlagged が参照する -->
                 <div id="pr-flagged-area" style="display:none; margin-bottom:8px">
                     <div class="section-title" style="font-size:13px; margin-bottom:2px">金額・経路の要確認（定期代突合・実費突合）</div>
-                    <div class="hint" style="margin-bottom:4px">申請とマスタの言い分を並べています。差し戻すかどうかはここで判断できます。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
+                    <div class="hint" style="margin-bottom:4px">申請と jinjer の登録（通勤費マスタ）の言い分を並べています。差し戻すかどうかはここで判断できます。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
                     <div style="max-height:540px; overflow:auto; border:1px solid #ddd; background:#fbfcfd; padding:0 10px 6px">
                         <div id="pr-flagged-table"></div>
                     </div>
@@ -2084,9 +2084,10 @@
             const master = r['マスタ経路'] ? esc(r['マスタ経路']) : '<span style="color:#aaa">登録なし</span>';
             const routes = '<div style="display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:1px 8px; margin-top:2px">'
                 + '<span style="color:#8a97a3">申請</span><span>' + esc(r['申請経路'] || '—') + '</span>'
-                + '<span style="color:#8a97a3">マスタ</span><span>' + master
+                + '<span style="color:#8a97a3">jinjer</span><span>' + master
                 + (r['経路判定'] && r['経路判定'] !== '一致'
-                    ? '<b style="color:#ab2318; margin-left:8px">' + esc(r['経路判定']) + '</b>' : '')
+                    ? '<b style="color:#ab2318; margin-left:8px">'
+                      + esc(r['経路判定']).replace('マスタ経路なし', 'jinjer経路なし') + '</b>' : '')
                 + '</span></div>';
             const notes = [];
             if (r['説明']) notes.push(esc(r['説明']));
@@ -2100,14 +2101,17 @@
             const amount = '<div style="display:grid; grid-template-columns:auto auto; gap:0 10px;'
                 + ' text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap">'
                 + '<span style="color:#8a97a3">申請</span><span>' + num(applied) + '円</span>'
-                + '<span style="color:#8a97a3">マスタ</span><span>' + num(masterAmt) + '円</span>'
+                + '<span style="color:#8a97a3">jinjer</span><span>' + num(masterAmt) + '円</span>'
                 + '<span style="color:#8a97a3">差額</span><b style="color:'
                 + (diff > 0 ? '#ab2318' : diff < 0 ? '#14608f' : '#555555') + '">'
                 + (diff > 0 ? '+' : '') + num(diff) + '円</b></div>';
+            // 金額はカード右端でなく中央付近（経路の右隣）に置く。画面が広いと右端では
+            // 視線移動が大きすぎるため（2026-08-19 谷津さん要望）
             return '<div style="border:1px solid #dde4ea; border-left:4px solid ' + j.edge
                 + '; border-radius:6px; padding:6px 12px; margin:6px 0; background:'
                 + (isNew ? '#fffafa' : '#ffffff') + '; font-size:12.5px; display:grid;'
-                + ' grid-template-columns:minmax(0,1fr) auto; gap:2px 18px; align-items:start">'
+                + ' grid-template-columns:minmax(0,700px) max-content; justify-content:start;'
+                + ' gap:2px 3.5em; align-items:start">'
                 + '<div>'
                 +   '<div>' + badge + '<b>' + esc(r['氏名']) + '</b>'
                 +   '<span style="color:#888; margin-left:6px">' + esc(r['社員番号']) + '</span>'
@@ -2833,7 +2837,7 @@
             const routes = '<div style="display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:1px 8px">'
                 + '<span style="color:#8a97a3">申請</span><span>' + esc(r['乗車場所'] || '—') + ' → '
                 + esc(r['降車場所'] || '—') + '</span>'
-                + '<span style="color:#8a97a3">マスタ</span><span>' + master
+                + '<span style="color:#8a97a3">jinjer</span><span>' + master
                 + (r['一致'] ? '<span style="color:#8a97a3; margin-left:8px">一致: ' + esc(r['一致']) + '</span>' : '')
                 + '</span></div>';
             const biko = r['備考']
