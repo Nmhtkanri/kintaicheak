@@ -425,3 +425,84 @@ def test_load_seisa_inputs_names_the_review_output_book(tmp_path):
     msg = str(e.value)
     assert "『通勤費』シートがありません" in msg
     assert "精査結果のブック" in msg
+
+
+# ----------------------------------------------------------------------
+# 備考の転記（2026-08-19 追加。人が精査で見る3点セット＝経路・金額・備考の欠けを塞ぐ）
+# ----------------------------------------------------------------------
+
+from services.kotsuhi_seisa import (  # noqa: E402
+    biko_indexes,
+    build_actual_rows,
+    build_pass_rows,
+    build_travel_rows,
+)
+
+# 実CSVは73列だがテストは要る列だけの短い行で組む（列位置はこの辞書が定義）
+BIKO_IDX = {"交通機関": 0, "ステータス": 1, "社員番号": 2, "申請者": 3, "所属グループ": 4,
+            "申請書No.": 5, "小計": 6, "乗車場所": 7, "降車場所": 8, "利用日": 9,
+            "金額": 10, "往復": 11, "目的地": 12, "備考(申請)": 13, "備考": 14}
+
+
+def _biko_row(kind, emp, name, amount, frm, to, date, biko="", app_biko="",
+              no="1", status="承認完了"):
+    return [kind, status, emp, name, "G", no, amount, frm, to, date,
+            amount, "往復", "", app_biko, biko]
+
+
+def _biko_master(rows):
+    """CommuteMaster用のモック。r[0]=社員番号…r[9]=支給間隔, r[11]=支給金額の位置だけ合わせる。"""
+    def leg(emp, name, frm, to, interval, amount):
+        return [emp, name, 1, frm, to, "", "", f"{frm}→{to}", "電車", interval,
+                "", amount, "", "", "2026/4/1"]
+    return CommuteMaster(_Sheet([leg(*r) for r in rows]))
+
+
+def test_biko_indexes_maps_detail_and_application_columns():
+    # 2列ある形式は後ろ＝明細側。1列だけの形式はそれを明細側として使う
+    assert biko_indexes(["備考", "金額", "備考"]) == {"備考": 2, "備考(申請)": 0}
+    assert biko_indexes(["金額", "備考"]) == {"備考": 1}
+    assert biko_indexes(["金額"]) == {}
+
+
+def test_pass_rows_collect_biko_from_both_columns_and_dedupe():
+    master = _biko_master([("2024009", "田中", "品川", "大崎", "毎月", 8000)])
+    details = [
+        _biko_row("通勤定期代", "2024009", "田中", "4000", "品川", "大崎", "2026/7/1",
+                  biko="上期分", app_biko="7月分の定期代です"),
+        # 同じ申請の2明細目: 申請側備考は同文が繰り返されるので1回に畳まれること
+        _biko_row("通勤定期代", "2024009", "田中", "4000", "品川", "大崎", "2026/7/1",
+                  app_biko="7月分の定期代です"),
+    ]
+    rows = build_pass_rows(details, BIKO_IDX, master)
+    assert rows[0]["備考"] == "上期分／7月分の定期代です"
+
+    # 備考列が無い旧形式のCSVでも動く（後方互換）
+    idx_old = {k: v for k, v in BIKO_IDX.items() if not k.startswith("備考")}
+    assert build_pass_rows(details, idx_old, master)[0]["備考"] == ""
+
+
+def test_actual_rows_carry_biko_on_daily_and_monthly_rows():
+    master = _biko_master([
+        ("2024001", "日次", "品川", "大崎", "毎日", 500),
+        ("2024002", "月次", "綾瀬", "東銀座", "毎月", 8000),
+    ])
+    details = [
+        _biko_row("通勤交通費（実費）", "2024001", "日次", "500", "品川", "大崎",
+                  "2026/7/1", biko="オンサイト※自宅から直行"),
+        # マスタが定期登録の人の実費申請 → 月合計行に集約されても備考が残ること
+        _biko_row("通勤交通費（実費）", "2024002", "月次", "8000", "綾瀬", "東銀座",
+                  "2026/7/1", biko="区分を間違えました"),
+    ]
+    rows = build_actual_rows(details, BIKO_IDX, master, {})
+    by = {r["社員番号"]: r for r in rows}
+    assert by["2024001"]["備考"] == "オンサイト※自宅から直行"
+    assert by["2024002"]["備考"] == "区分を間違えました"
+
+
+def test_travel_detail_rows_carry_biko():
+    # 従来は備考をパースしても列に出しておらず常に空だった（2026-08-19 修正）
+    details = [_biko_row("交通費（電車・バス）", "2024009", "田中", "480", "品川", "泉岳寺",
+                         "2026/7/2", biko="客先往訪", app_biko="研修のため")]
+    _summary, detail_rows = build_travel_rows(details, BIKO_IDX, set())
+    assert detail_rows[0]["備考"] == "客先往訪／研修のため"

@@ -149,6 +149,34 @@ def col_index(header: list[str], name: str, nth: int = 0) -> int:
     raise KeyError(f"列が見つかりません: {name}")
 
 
+def biko_indexes(header: list[str]) -> dict[str, int]:
+    """備考列の位置を {"備考": 明細側, "備考(申請)": 申請側} で返す。
+
+    jinjer経費のエクスポートは備考が申請書単位と明細単位の2回出る（後ろが明細側）。
+    2026年7月実データでは申請側53件・明細側978件と**両方に判断材料が書かれる**
+    （「7/13は◯◯へ出勤のため」「オンサイト※自宅から直行」等）ので両方拾う。
+    1列しか無い形式はそれを明細側として扱い、備考の無いCSVでも精査は止めない。
+    """
+    pos = [i for i, h in enumerate(header) if h.strip() == "備考"]
+    out: dict[str, int] = {}
+    if pos:
+        out["備考"] = pos[-1]
+    if len(pos) > 1:
+        out["備考(申請)"] = pos[0]
+    return out
+
+
+def _biko_of(r: list, idx: dict) -> list[str]:
+    """明細行から備考を集める（明細側→申請側の順、空は落とす）。"""
+    out = []
+    for k in ("備考", "備考(申請)"):
+        if k in idx and len(r) > idx[k]:
+            v = str(r[idx[k]] or "").strip()
+            if v:
+                out.append(v)
+    return out
+
+
 # --- マスタ ---------------------------------------------------------------
 class CommuteMaster:
     """経費チェックブックの「通勤費」シート = jinjer 通勤情報。
@@ -279,7 +307,8 @@ def severity(code: str, applied: int, master_total: int) -> str:
 # --- 集計 -----------------------------------------------------------------
 def build_pass_rows(details, idx, master: CommuteMaster) -> list[dict]:
     """定期代は分割申請があるので人単位で合算してから突合する。"""
-    per = defaultdict(lambda: {"金額": 0, "件数": 0, "申請書": [], "pairs": set(), "経路": []})
+    per = defaultdict(lambda: {"金額": 0, "件数": 0, "申請書": [], "pairs": set(), "経路": [],
+                               "備考": []})
     for r in details:
         if r[idx["交通機関"]] != KIND_PASS or r[idx["ステータス"]] not in ACTIVE_STATUS:
             continue
@@ -292,6 +321,7 @@ def build_pass_rows(details, idx, master: CommuteMaster) -> list[dict]:
         frm, to = r[idx["乗車場所"]], r[idx["降車場所"]]
         acc["pairs"].add((norm_station(frm), norm_station(to)))
         acc["経路"].append(f"{frm}→{to}")
+        acc["備考"].extend(_biko_of(r, idx))
 
     out = []
     for (emp, name, group), acc in sorted(per.items()):
@@ -314,6 +344,7 @@ def build_pass_rows(details, idx, master: CommuteMaster) -> list[dict]:
                 "申請経路": " / ".join(dict.fromkeys(acc["経路"])),
                 "マスタ経路": master.route_text(emp, "毎月"),
                 "説明": note,
+                "備考": "／".join(dict.fromkeys(acc["備考"]))[:400],
             }
         )
     return out
@@ -395,7 +426,8 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
     この人たちを日単位で毎日額(=0)と比べると全額が過大に見えるので、
     月合計を1行にまとめて毎月額と突合する。
     """
-    per = defaultdict(lambda: {"金額": 0, "件数": 0, "pairs": set(), "経路": [], "申請書": set()})
+    per = defaultdict(lambda: {"金額": 0, "件数": 0, "pairs": set(), "経路": [], "申請書": set(),
+                               "備考": []})
     for r in details:
         if r[idx["交通機関"]] != KIND_ACTUAL or r[idx["ステータス"]] not in ACTIVE_STATUS:
             continue
@@ -409,6 +441,7 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
         frm, to = r[idx["乗車場所"]], r[idx["降車場所"]]
         acc["pairs"].add((norm_station(frm), norm_station(to)))
         acc["経路"].append(f"{frm}→{to}({to_int(r[idx['金額']]):,}/{r[idx['往復']]})")
+        acc["備考"].extend(_biko_of(r, idx))
 
     daily_emps = {k[0] for k in per if master.legs(k[0], "毎日")}
     out = []
@@ -436,12 +469,13 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
                 "申請経路": " / ".join(acc["経路"]),
                 "マスタ経路": master.route_text(emp, "毎日"),
                 "説明": note,
+                "備考": "／".join(dict.fromkeys(acc["備考"]))[:400],
             }
         )
 
     # マスタが定期登録の人 → 月合計を1行にまとめて毎月額と突合
     monthly = defaultdict(lambda: {"金額": 0, "件数": 0, "日": set(), "pairs": set(),
-                                   "経路": [], "申請書": set(), "ステータス": ""})
+                                   "経路": [], "申請書": set(), "ステータス": "", "備考": []})
     for (emp, name, group, date), acc in per.items():
         if emp in daily_emps:
             continue
@@ -453,6 +487,7 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
         m["経路"].extend(acc["経路"])
         m["申請書"] |= acc["申請書"]
         m["ステータス"] = acc["ステータス"]
+        m["備考"].extend(acc["備考"])
 
     for (emp, name, group), m in sorted(monthly.items()):
         m_total = master.total(emp, "毎月")
@@ -486,6 +521,7 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
                 "申請経路": " / ".join(dict.fromkeys(m["経路"]))[:400],
                 "マスタ経路": master.route_text(emp, "毎月"),
                 "説明": note,
+                "備考": "／".join(dict.fromkeys(m["備考"]))[:400],
             }
         )
 
@@ -961,7 +997,7 @@ def build_travel_rows(details, idx, target_ids: set[str]) -> tuple[list[dict], l
                 "金額": to_int(r[idx["金額"]]),
                 "小計": amount,
                 "対象者リスト": "○" if emp in target_ids else "リスト外",
-                "備考": r[idx["備考", 1]] if ("備考", 1) in idx else "",
+                "備考": "／".join(_biko_of(r, idx)),
             }
         )
 
@@ -1021,6 +1057,8 @@ def write_sheet(wb, title: str, rows: list[dict], columns: list[str], widths: di
 def _default_width(name: str) -> int:
     if name in ("申請経路", "マスタ経路", "説明"):
         return 46
+    if name == "備考":
+        return 32
     if name in ("所属グループ", "申請書No."):
         return 18
     if name in ("氏名", "利用日", "経路判定", "対象者リスト"):
@@ -1249,6 +1287,7 @@ def load_seisa_inputs(csv_path: Path, check_path: Path, target_ym: str,
     names = ["ステータス", "交通機関", "社員番号", "申請者", "所属グループ", "申請書No.",
              "明細No.", "利用日", "金額", "往復", "小計", "乗車場所", "降車場所", "経路", "目的地"]
     idx = {n: col_index(header, n) for n in names}
+    idx.update(biko_indexes(header))
 
     # 定期代は翌月分を同じ申請書にまとめて出す運用があるため、利用日の年月で対象月に絞る。
     # これを外すと「7月分＋8月分」が二重申請に見えてしまう。
@@ -1347,11 +1386,11 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
     write_sheet(wb, "定期代突合", pass_rows,
                 ["社員番号", "氏名", "所属グループ", "ステータス", "申請書No.", "明細件数",
                  "申請額(合計)", "マスタ支給額", "差額", "判定", "区分", "前回比", "経路判定",
-                 "申請経路", "マスタ経路", "説明"])
+                 "申請経路", "マスタ経路", "説明", "備考"])
     write_sheet(wb, "実費突合", actual_rows,
                 ["社員番号", "氏名", "所属グループ", "利用日", "ステータス", "申請書No.", "明細件数",
                  "申請額(日計)", "マスタ日額", "差額", "判定", "区分", "前回比", "経路判定",
-                 "申請日数/出社日数", "テレワーク重複", "申請経路", "マスタ経路", "説明"])
+                 "申請日数/出社日数", "テレワーク重複", "申請経路", "マスタ経路", "説明", "備考"])
     write_sheet(wb, "通勤費上限超過", limit_rows,
                 ["社員番号", "氏名", "所属グループ", "申請書No.", "通勤費合計", "うち定期代",
                  "うち実費", "上限", "超過額", "上限免除", "区分", "前回比", "説明"],
@@ -1361,7 +1400,7 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
                  "対象者リスト", "区分", "前回比", "説明"])
     write_sheet(wb, "移動交通費明細", travel_details,
                 ["社員番号", "氏名", "利用日", "ステータス", "申請書No.", "交通機関", "目的地",
-                 "乗車場所", "降車場所", "往復", "金額", "小計", "対象者リスト"])
+                 "乗車場所", "降車場所", "往復", "金額", "小計", "対象者リスト", "備考"])
 
     total_rows = sum(1 for r in details if r[idx["ステータス"]] in ACTIVE_STATUS)
     approved = sum(1 for r in details if r[idx["ステータス"]] == "承認完了")
@@ -1418,6 +1457,7 @@ class PreReviewResult:
     new_count: int = 0
     resolved_count: int = 0
     flagged: "dict[str, int] | None" = None
+    flagged_rows: "list[dict] | None" = None   # 定期代突合・実費突合の要確認行（画面表示用）
     mail_targets: int = 0
     first_run: bool = True
 
@@ -1505,6 +1545,18 @@ def run_pre_approval_review(
     result.resolved_count = int(m_res.group(1)) if m_res else 0
     result.flagged = flagged
     result.mail_targets = len(mail_rows)
+
+    # 金額・経路の要確認行は画面にも返す。Excelを開かなくても差し戻し判断が
+    # できるようにするため（承認が進むたびに回す運用なので往復が回数分効く）。
+    review_cols = ("社員番号", "氏名", "利用日", "ステータス", "判定", "申請額(合計)",
+                   "申請額(日計)", "マスタ支給額", "マスタ日額", "差額", "経路判定",
+                   "申請経路", "マスタ経路", "説明", "備考", "テレワーク重複", "前回比")
+    result.flagged_rows = [
+        dict({"シート": sheet}, **{k: r[k] for k in review_cols
+                                   if k in r and r[k] not in ("", None)})
+        for sheet, rows_ in (("定期代突合", pass_rows), ("実費突合", actual_rows))
+        for r in rows_ if r.get("区分") == "要確認"
+    ]
 
     log_func(f"[info] 承認状況: 承認完了 {result.approved_rows}行 / 進行中 {result.pending_rows}行")
     if result.first_run:
