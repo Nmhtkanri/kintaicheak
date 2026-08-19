@@ -1251,12 +1251,13 @@
                     <div class="summary-card"><div class="card-label">前回から解消</div><div class="card-value" id="pr-cnt-resolved">—</div></div>
                     <div class="summary-card"><div class="card-label">通勤費未登録(メール対象)</div><div class="card-value" id="pr-cnt-mail">0</div></div>
                 </div>
-                <!-- 金額・経路の要確認は画面でも見せる。差し戻し判断のたびにxlsxを開く往復を無くすため -->
+                <!-- 金額・経路の要確認は画面でも見せる。差し戻し判断のたびにxlsxを開く往復を無くすため。
+                     カード型（1行=1判断）。id は描画先として prRenderFlagged が参照する -->
                 <div id="pr-flagged-area" style="display:none; margin-bottom:8px">
                     <div class="section-title" style="font-size:13px; margin-bottom:2px">金額・経路の要確認（定期代突合・実費突合）</div>
-                    <div class="hint" style="margin-bottom:4px">申請とマスタを並べています。差し戻すかどうかはこの表で判断できます。判定: A=金額一致 / B=一部経路と一致 / C=往復・片道の疑い / D=金額不一致 / E=区分相違。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
-                    <div style="max-height:360px; overflow:auto; border:1px solid #ddd">
-                        <table id="pr-flagged-table" style="border-collapse:collapse; font-size:12px; width:100%"></table>
+                    <div class="hint" style="margin-bottom:4px">申請とマスタの言い分を並べています。差し戻すかどうかはここで判断できます。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
+                    <div style="max-height:540px; overflow:auto; border:1px solid #ddd; background:#fbfcfd; padding:0 10px 6px">
+                        <div id="pr-flagged-table"></div>
                     </div>
                 </div>
                 <a id="pr-download-link" href="#" class="btn btn-download" style="display:none">📥 精査結果xlsxをダウンロード</a>
@@ -2053,42 +2054,88 @@
     // 金額・経路の要確認行は画面にも出す（差し戻し判断のたびにxlsxを開かずに済むように）。
     function prRenderFlagged(rows) {
         const area = document.getElementById('pr-flagged-area');
-        const table = document.getElementById('pr-flagged-table');
-        if (!rows || !rows.length) { area.style.display = 'none'; table.innerHTML = ''; return; }
+        const list = document.getElementById('pr-flagged-table');
+        if (!rows || !rows.length) { area.style.display = 'none'; list.innerHTML = ''; return; }
         const esc = (v) => escapeHtml(String(v === undefined || v === null ? '' : v));
         const num = (v) => (v === undefined || v === null || v === '') ? '' : Number(v).toLocaleString();
-        const td = 'border:1px solid #ddd; padding:3px 6px; vertical-align:top';
-        let html = '<thead><tr>'
-            + ['種別', '社員番号', '氏名', '判定', '申請額', 'マスタ額', '差額', '経路', '説明・備考', '前回比']
-                .map(c => '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
-                        + ' padding:3px 6px; white-space:nowrap">' + c + '</th>').join('')
-            + '</tr></thead><tbody>';
-        rows.forEach(r => {
+        // 判定コードを日本語バッジで示す（色は経路突合レビューのグループ色と同じトーン）
+        const JUDGE = {
+            D: {label: '金額不一致', bg: '#fdecea', edge: '#ab2318'},
+            E: {label: '区分相違', bg: '#fff6dd', edge: '#8f5600'},
+            C: {label: '往復・片道の疑い', bg: '#eef5fa', edge: '#14608f'},
+            B: {label: '一部経路と一致', bg: '#eef5fa', edge: '#14608f'},
+            A: {label: '金額一致', bg: '#efefef', edge: '#555555'},
+        };
+        // 1行=1判断のカード。申請/マスタの経路並記・金額差・備考・理由を面に出す
+        const cardHtml = (r) => {
+            const j = JUDGE[r['判定']] || {label: r['判定'] || '—', bg: '#eeeeee', edge: '#555555'};
             const applied = ('申請額(合計)' in r) ? r['申請額(合計)'] : r['申請額(日計)'];
             const masterAmt = ('マスタ支給額' in r) ? r['マスタ支給額'] : r['マスタ日額'];
-            const kind = (r['シート'] === '定期代突合' ? '定期' : '実費')
-                + (r['利用日'] ? '<br><span style="color:#888">' + esc(r['利用日']) + '</span>' : '');
-            const route = '<span style="color:#888">申請</span> ' + esc(r['申請経路'] || '—')
-                + '<br><span style="color:#888">マスタ</span> ' + esc(r['マスタ経路'] || '—')
+            const diff = Number(r['差額'] || 0);
+            const isNew = r['前回比'] === '新規';
+            const badge = '<span style="display:inline-block; font-size:11px; font-weight:bold;'
+                + ' border-radius:4px; padding:0 8px; margin-right:8px; background:' + j.bg
+                + '; color:' + j.edge + '">' + esc(r['判定']) + ' ' + esc(j.label) + '</span>';
+            const newTag = isNew
+                ? '<span style="font-size:11px; font-weight:bold; color:#ab2318; margin-left:10px">● 新規</span>'
+                : (r['前回比'] ? '<span style="font-size:11px; color:#888; margin-left:10px">'
+                                 + esc(r['前回比']) + '</span>' : '');
+            const meta = [r['利用日'], r['ステータス']].filter(Boolean).map(esc).join(' ・ ');
+            const master = r['マスタ経路'] ? esc(r['マスタ経路']) : '<span style="color:#aaa">登録なし</span>';
+            const routes = '<div style="display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:1px 8px; margin-top:2px">'
+                + '<span style="color:#8a97a3">申請</span><span>' + esc(r['申請経路'] || '—') + '</span>'
+                + '<span style="color:#8a97a3">マスタ</span><span>' + master
                 + (r['経路判定'] && r['経路判定'] !== '一致'
-                    ? '<br><b style="color:#b00">' + esc(r['経路判定']) + '</b>' : '');
-            const note = esc(r['説明'] || '')
-                + (r['テレワーク重複'] ? '<br><b>テレワーク重複:</b> ' + esc(r['テレワーク重複']) : '')
-                + (r['備考'] ? '<br><span style="color:#8a5a00">備考: ' + esc(r['備考']) + '</span>' : '');
-            html += '<tr style="' + (r['前回比'] === '新規' ? 'background:#fdecea' : '') + '">'
-                + '<td style="' + td + '; white-space:nowrap">' + kind + '</td>'
-                + '<td style="' + td + '">' + esc(r['社員番号']) + '</td>'
-                + '<td style="' + td + '; white-space:nowrap">' + esc(r['氏名']) + '</td>'
-                + '<td style="' + td + '">' + esc(r['判定']) + '</td>'
-                + '<td style="' + td + '; text-align:right">' + num(applied) + '</td>'
-                + '<td style="' + td + '; text-align:right">' + num(masterAmt) + '</td>'
-                + '<td style="' + td + '; text-align:right">' + num(r['差額']) + '</td>'
-                + '<td style="' + td + '">' + route + '</td>'
-                + '<td style="' + td + '">' + note + '</td>'
-                + '<td style="' + td + '; white-space:nowrap">' + esc(r['前回比']) + '</td>'
-                + '</tr>';
+                    ? '<b style="color:#ab2318; margin-left:8px">' + esc(r['経路判定']) + '</b>' : '')
+                + '</span></div>';
+            const notes = [];
+            if (r['説明']) notes.push(esc(r['説明']));
+            if (r['テレワーク重複']) notes.push('テレワーク重複: ' + esc(r['テレワーク重複']));
+            const why = notes.length
+                ? '<div style="margin-top:3px"><span style="color:#14608f; background:#eef5fa;'
+                  + ' border-radius:4px; padding:1px 8px; display:inline-block">' + notes.join(' ／ ')
+                  + '</span></div>' : '';
+            const biko = r['備考']
+                ? '<div style="color:#8a5a00; margin-top:2px">備考: ' + esc(r['備考']) + '</div>' : '';
+            const amount = '<div style="display:grid; grid-template-columns:auto auto; gap:0 10px;'
+                + ' text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap">'
+                + '<span style="color:#8a97a3">申請</span><span>' + num(applied) + '円</span>'
+                + '<span style="color:#8a97a3">マスタ</span><span>' + num(masterAmt) + '円</span>'
+                + '<span style="color:#8a97a3">差額</span><b style="color:'
+                + (diff > 0 ? '#ab2318' : diff < 0 ? '#14608f' : '#555555') + '">'
+                + (diff > 0 ? '+' : '') + num(diff) + '円</b></div>';
+            return '<div style="border:1px solid #dde4ea; border-left:4px solid ' + j.edge
+                + '; border-radius:6px; padding:6px 12px; margin:6px 0; background:'
+                + (isNew ? '#fffafa' : '#ffffff') + '; font-size:12.5px; display:grid;'
+                + ' grid-template-columns:minmax(0,1fr) auto; gap:2px 18px; align-items:start">'
+                + '<div>'
+                +   '<div>' + badge + '<b>' + esc(r['氏名']) + '</b>'
+                +   '<span style="color:#888; margin-left:6px">' + esc(r['社員番号']) + '</span>'
+                +   (meta ? '<span style="color:#555; margin-left:12px">' + meta + '</span>' : '')
+                +   newTag + '</div>'
+                +   routes + why + biko
+                + '</div>'
+                + '<div>' + amount + '</div>'
+                + '</div>';
+        };
+        // 定期／実費のグループ見出し（スクロール中も上に残す）。想定外のシート名は末尾に素で出す
+        const groups = [
+            {key: '定期代突合', label: '定期代（人単位で合算）'},
+            {key: '実費突合', label: '実費（日単位）'},
+        ];
+        let html = '';
+        let rest = rows.slice();
+        groups.forEach(g => {
+            const glist = rows.filter(r => r['シート'] === g.key);
+            rest = rest.filter(r => r['シート'] !== g.key);
+            if (!glist.length) return;
+            html += '<div style="position:sticky; top:0; z-index:1; background:#e8eff6;'
+                + ' border-radius:0 0 6px 6px; padding:4px 10px; margin:0 -10px 2px; font-size:12.5px;'
+                + ' font-weight:bold; color:#14608f">' + esc(g.label) + '　' + glist.length + '件</div>';
+            glist.forEach(r => html += cardHtml(r));
         });
-        table.innerHTML = html + '</tbody>';
+        rest.forEach(r => html += cardHtml(r));
+        list.innerHTML = html;
         area.style.display = '';
     }
 
