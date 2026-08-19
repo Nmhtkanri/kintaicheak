@@ -276,6 +276,14 @@ def parse_invoice_text(text: str, filename: str = "") -> dict[str, Any]:
         main_amount = total - max(commute, 0)
     else:
         main_amount = None
+
+    # Fieldglass（エリクソン様）の英語請求書は消費税の行が無く、金額が税抜。
+    # freee には内税で登録されているので、ここで税込みに直す。
+    # 2026-07 の実データで freee の登録額と完全一致することを確認した
+    # （975,100→1,072,610 / 768,300→845,130 / 462,000→508,200 / 50,000→55,000）。
+    if tax is None and main_amount is not None and "fieldglass" in normalized.casefold():
+        main_amount = main_amount * 11 // 10
+        tax = main_amount // 11
     return {
         "kind": "main", "employee_name": _extract_employee_name(normalized, filename),
         "partner": _extract_partner(normalized), "issue_date": issue_date,
@@ -700,11 +708,30 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         if from_jinjer:
             document["department"] = from_jinjer
 
-    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
-    for document in documents:
-        employee_key = normalize_name(document.get("employee_name")) or f"file:{document['source_file']}"
+    def _base_key(document: dict[str, Any]) -> str:
+        employee_key = (normalize_name(document.get("employee_name"))
+                        or f"file:{document['source_file']}")
         partner = document.get("partner") or document.get("master_partner") or ""
-        grouped.setdefault(f"{employee_key}|{normalize_name(partner)}", []).append(document)
+        return f"{employee_key}|{normalize_name(partner)}"
+
+    # 同じ人に本体請求書が複数ある場合は合算せず、請求書ごとに行を分ける。
+    # freee も1請求書=1取引で登録している（エリクソン様は「技術支援業務」と
+    # 「オンコールサポート費用」が別取引。2026-07 の実データで確認）。
+    # 本体を先に並べてから交通費を最初の本体へぶら下げる（走査順に依存しないため）。
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    first_main_key: dict[str, str] = {}
+    for document in documents:
+        if document["kind"] != "main":
+            continue
+        base = _base_key(document)
+        key = f"{base}|main:{sum(1 for k in grouped if k.startswith(base + '|main:'))}"
+        grouped[key] = [document]
+        first_main_key.setdefault(base, key)
+    for document in documents:
+        if document["kind"] == "main":
+            continue
+        base = _base_key(document)
+        grouped.setdefault(first_main_key.get(base, base), []).append(document)
 
     rows: list[dict[str, Any]] = []
     public_documents: list[dict[str, Any]] = []
