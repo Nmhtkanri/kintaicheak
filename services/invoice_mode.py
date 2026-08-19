@@ -455,6 +455,13 @@ def load_employee_master(sales_book: os.PathLike[str] | str | None,
                 employee_name = _clean_display_name(values[1])
                 if not employee_id or not employee_name:
                     continue
+                # 自社社員は社員番号が 20YY 始まり。5/6/9 始まりは派遣・テスト番号
+                # なので売上CSVの従業員にはしない。これを入れておかないと、同じ
+                # 契約先に派遣の人がいるだけで「候補が複数」になり、担当者名の
+                # 入っていない請求書（IXナレッジ様など）の氏名補完が止まる
+                # （八橋さん5000002が候補に混ざり、小島さん2024044が入らなかった）。
+                if not re.fullmatch(r"20\d{5}", employee_id):
+                    continue
                 contract_type = _nfkc(values[3])
                 department = {"派遣": "他社向け派遣", "委任": "他社向け委任契約"}.get(contract_type, "")
                 master[normalize_name(employee_name)] = {

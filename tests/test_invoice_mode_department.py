@@ -67,3 +67,31 @@ def test_department_lookup_is_not_fatal_when_jinjer_is_unavailable(tmp_path):
     assert im.load_departments(["9999999"], "2026-07-31",
                                cache_path=tmp_path / "no_such_cache.json") == {}
     assert im.load_departments([], "2026-07-31") == {}
+
+
+def test_only_own_employees_are_in_the_master(tmp_path):
+    """★回帰: 派遣の人がマスタに混ざると、氏名の入っていない請求書が拾えない。
+
+    社員番号は 20YY 始まりが自社社員。IXナレッジ様の請求書には担当者名が
+    書かれておらず契約先から補完するが、同じ契約先に派遣の八橋さん(5000002)が
+    いたため「候補が複数」となり小島さん(2024044)が入らなかった。
+    """
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Other"
+    sheet.append(["社員番号", "氏名", "No", "派遣/委任", "担当", "氏名", "部署", "作業名",
+                  "契約先", "外注会社", "区分"])
+    sheet.append(["2024044", "小島光晶", 1, "派遣", "", "小島光晶", "", "",
+                  "IKI", "社員", "総受注金額"])
+    sheet.append(["5000002", "八橋麻耶", 2, "派遣", "", "八橋麻耶", "", "",
+                  "IKI", "派遣", "総受注金額"])
+    path = tmp_path / "sales.xlsx"
+    book.save(path)
+
+    master = im.load_employee_master(path)
+    assert im.normalize_name("小島光晶") in master
+    assert im.normalize_name("八橋麻耶") not in master, "5始まりは自社社員ではない"
+
+    document = {"employee_name": "", "text": "", "partner": "アイエックス・ナレッジ株式会社",
+                "source_file": r"Z:\NetMarks以外(常駐）\IXナレッジ（小島・八橋）\請求書.pdf"}
+    assert im._match_employee(document, master)["employee_name"] == "小島光晶"
