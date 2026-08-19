@@ -1132,6 +1132,7 @@ def run_keihi_route_preview(
             "内訳": r.get("内訳", ""), "金額": r.get("金額", ""),
             "乗車場所": r.get("乗車場所", ""), "降車場所": r.get("降車場所", ""),
             "一致": r.get("一致", ""), "登録通勤経路": r.get("登録通勤経路", ""),
+            "備考": r.get("備考(明細)", ""),
             "計上先": side,
             "付替可": movable,
             "移動額": int(round(float(entry.amount or 0))) if entry else 0,

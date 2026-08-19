@@ -1471,8 +1471,9 @@
         <div id="ki-route-review-area" style="display:none; margin:8px 14px; border:2px solid #b8860b; border-radius:6px; padding:10px 14px">
             <div style="font-weight:bold; margin-bottom:4px">🔀 経路突合の確認（生成前に計上先を選んでください）</div>
             <div id="ki-route-review-note" class="field-sub" style="margin-bottom:8px"></div>
-            <div style="max-height:340px; overflow:auto; border:1px solid #ddd">
-                <table id="ki-route-review-table" style="border-collapse:collapse; font-size:11px; width:100%"></table>
+            <!-- カード型リスト。id は選択収集（kiCollectRouteChoices）が参照するため変えない -->
+            <div style="max-height:480px; overflow:auto; border:1px solid #ddd; padding:0 10px 6px; background:#fbfcfd">
+                <div id="ki-route-review-table"></div>
             </div>
             <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
                 <button type="button" class="btn btn-primary" id="ki-route-apply-btn">✅ 選択を反映して生成</button>
@@ -2667,16 +2668,17 @@
     // 判定ごとのグループ。★だけ開いた状態で出し、移動交通費に倒れる△と参考の▲は畳む。
     // 畳んでも行はDOMに残る＝選択値は送信対象のまま（キーは全件必須のため欠けさせない）。
     const KI_ROUTE_GROUPS = [
-        {mark: '★', label: '★要確認（登録経路内なのに通勤系以外を選択）', bg: '#FFC7CE', open: true},
-        {mark: '△', label: '△逆要確認（移動交通費に計上する行）', bg: '#FFEB9C', open: false},
-        {mark: '▲', label: '▲要確認（片側のみ一致・初期値は申請どおり）', bg: '#DDEBF7', open: false},
+        {mark: '★', label: '経路内なのに別区分の申請', desc: '定期区間内の移動。初期値は通勤費',
+         bg: '#fdecea', edge: '#ab2318', open: true},
+        {mark: '△', label: '経路外の申請', desc: '登録経路と別の区間。初期値は移動交通費',
+         bg: '#fff6dd', edge: '#8f5600', open: false},
+        {mark: '▲', label: '片側のみ一致', desc: '判断材料が足りないため初期値は申請どおり',
+         bg: '#eef5fa', edge: '#14608f', open: false},
     ];
 
     function kiRenderRouteReview(rows, summary) {
-        const table = document.getElementById('ki-route-review-table');
-        const cols = ['判定', '社員番号', '氏名', '利用日', '交通機関', '内訳', '金額',
-                      '乗車場所', '降車場所', '一致', '計上先'];
-        const span = cols.length + 1;
+        const list = document.getElementById('ki-route-review-table');
+        const esc = (v) => escapeHtml(String(v === undefined || v === null ? '' : v));
         const amt = (r) => {
             const n = Number(String(r['金額'] || '').replace(/,/g, ''));
             return isFinite(n) ? n : 0;
@@ -2689,67 +2691,87 @@
             if (bucket[m]) bucket[m].push(r); else rest.push(r);
         });
 
+        // 1行=1判断のカード。判断材料（申請経路×マスタ経路・金額・備考）を面に出し、
+        // マスタ経路をツールチップから昇格させる（以前は title 属性でしか見えなかった）
         const rowHtml = (r, g) => {
-            let h = '<tr class="ki-route-row" data-mark="' + (g ? g.mark : '')
-                  + '" style="background:' + (g ? g.bg : '') + ';'
-                  + (g && !g.open ? 'display:none' : '') + '" title="'
-                  + escapeHtml(r['登録通勤経路'] || '') + '">';
-            cols.forEach(c => {
-                const align = (c === '金額') ? 'right' : 'left';
-                h += '<td style="border:1px solid #ddd; padding:2px 5px; text-align:' + align + '">'
-                   + escapeHtml(String(r[c] === undefined || r[c] === null ? '' : r[c])) + '</td>';
-            });
-            h += '<td style="border:1px solid #ddd; padding:2px 5px; white-space:nowrap">';
+            const meta = [r['利用日'], r['交通機関'], r['内訳']].filter(Boolean).map(esc).join(' ・ ');
+            let act;
             if (r['付替可']) {
-                h += '<select class="legend-template-select ki-route-choice" data-key="'
-                   + escapeHtml(r['key']) + '" style="width:auto; min-width:120px">'
-                   + ['通勤費', '移動交通費'].map(v =>
-                         '<option value="' + v + '"' + (v === r['既定選択'] ? ' selected' : '') + '>'
-                         + v + '</option>').join('')
-                   + '</select>';
-                if (r['移動額']) {
-                    h += '<span class="hint" style="margin-left:6px">'
-                       + Number(r['移動額']).toLocaleString() + '円</span>';
-                }
+                act = '<select class="legend-template-select ki-route-choice" data-key="' + esc(r['key'])
+                    + '" style="width:auto; min-width:150px">'
+                    + ['通勤費', '移動交通費'].map(v =>
+                          '<option value="' + v + '"' + (v === r['既定選択'] ? ' selected' : '') + '>'
+                          + v + 'に計上</option>').join('')
+                    + '</select>'
+                    + (r['移動額'] ? '<span class="hint" style="display:block; margin-top:2px">付替額 '
+                                     + Number(r['移動額']).toLocaleString() + '円</span>' : '')
+                    + '<span class="hint" style="display:block; margin-top:2px">初期値: '
+                    + (g && g.mark === '▲' ? '申請どおり' : 'システム判定') + '</span>';
             } else {
-                h += '<span class="ki-route-choice" data-key="' + escapeHtml(r['key'])
-                   + '" data-fixed="対象外" style="color:#888">対象外（動かせません）</span>';
+                act = '<span class="ki-route-choice" data-key="' + esc(r['key'])
+                    + '" data-fixed="対象外" style="color:#888">対象外（動かせません）</span>';
             }
-            return h + '</td></tr>';
+            const badge = '<span style="display:inline-block; font-size:11px; font-weight:bold;'
+                + ' border-radius:4px; padding:0 8px; margin-right:8px;'
+                + ' background:' + (g ? g.bg : '#eee') + '; color:' + (g ? g.edge : '#555') + '">'
+                + esc(r['判定'] || '—') + '</span>';
+            const master = r['登録通勤経路']
+                ? esc(r['登録通勤経路'])
+                : '<span style="color:#aaa">登録なし</span>';
+            const routes = '<div style="display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:1px 8px">'
+                + '<span style="color:#8a97a3">申請</span><span>' + esc(r['乗車場所'] || '—') + ' → '
+                + esc(r['降車場所'] || '—') + '</span>'
+                + '<span style="color:#8a97a3">マスタ</span><span>' + master
+                + (r['一致'] ? '<span style="color:#8a97a3; margin-left:8px">一致: ' + esc(r['一致']) + '</span>' : '')
+                + '</span></div>';
+            const biko = r['備考']
+                ? '<div style="color:#8a5a00; margin-top:2px">備考: ' + esc(r['備考']) + '</div>' : '';
+            return '<div class="ki-route-row" data-mark="' + (g ? g.mark : '') + '"'
+                + ' style="border:1px solid #dde4ea; border-left:4px solid ' + (g ? g.edge : '#999') + ';'
+                + ' border-radius:6px; padding:7px 12px; margin:6px 0; background:#fff; font-size:12.5px;'
+                + ' display:' + (g && !g.open ? 'none' : 'grid') + '; grid-template-columns:minmax(0,1fr) 170px;'
+                + ' gap:2px 16px" data-grid="1">'
+                + '<div>'
+                +   '<div>' + badge + '<b>' + esc(r['氏名']) + '</b>'
+                +   '<span style="color:#888; margin-left:6px">' + esc(r['社員番号']) + '</span>'
+                +   '<span style="color:#555; margin-left:12px">' + meta + '</span>'
+                +   '<b style="margin-left:12px; white-space:nowrap">' + amt(r).toLocaleString() + '円</b></div>'
+                +   routes + biko
+                + '</div>'
+                + '<div style="justify-self:end; text-align:right">' + act + '</div>'
+                + '</div>';
         };
 
-        let html = '<thead><tr>'
-            + cols.map(c => '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
-                          + ' padding:3px 5px; white-space:nowrap">' + escapeHtml(c) + '</th>').join('')
-            + '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
-            + ' padding:3px 5px; white-space:nowrap">この月の計上先</th></tr></thead><tbody>';
+        let html = '';
         KI_ROUTE_GROUPS.forEach(g => {
-            const list = bucket[g.mark];
-            if (!list.length) return;
-            const total = list.reduce((s, r) => s + amt(r), 0);
-            html += '<tr class="ki-route-toggle" data-mark="' + g.mark + '" data-open="'
-                  + (g.open ? '1' : '0') + '" style="cursor:pointer; background:' + g.bg + '">'
-                  + '<td colspan="' + span + '" style="border:1px solid #ccc; padding:4px 6px; font-weight:bold">'
-                  + '<span class="ki-route-caret">' + (g.open ? '▼' : '▶') + '</span> '
-                  + escapeHtml(g.label) + '　' + list.length + '行 / 計 '
-                  + total.toLocaleString() + '円'
-                  + '<span class="hint" style="margin-left:8px; font-weight:normal">'
-                  + (g.open ? 'クリックで畳む' : 'クリックで開く') + '</span></td></tr>';
-            list.forEach(r => html += rowHtml(r, g));
+            const glist = bucket[g.mark];
+            if (!glist.length) return;
+            const total = glist.reduce((s, r) => s + amt(r), 0);
+            html += '<div class="ki-route-toggle" data-mark="' + g.mark + '" data-open="'
+                  + (g.open ? '1' : '0') + '" style="cursor:pointer; background:' + g.bg
+                  + '; color:' + g.edge + '; border-radius:6px; padding:5px 10px; margin:8px 0 2px;'
+                  + ' font-weight:bold; font-size:12.5px; display:flex; align-items:center; gap:8px">'
+                  + '<span class="ki-route-caret">' + (g.open ? '▼' : '▶') + '</span>'
+                  + '<span>' + g.mark + ' ' + escapeHtml(g.label) + '</span>'
+                  + '<span style="font-weight:normal; font-size:11.5px">' + escapeHtml(g.desc) + '</span>'
+                  + '<span style="margin-left:auto; white-space:nowrap">' + glist.length + '行 / 計 '
+                  + total.toLocaleString() + '円　<span class="hint" style="font-weight:normal">'
+                  + (g.open ? 'クリックで畳む' : 'クリックで開く') + '</span></span></div>';
+            glist.forEach(r => html += rowHtml(r, g));
         });
         rest.forEach(r => html += rowHtml(r, null));
-        table.innerHTML = html + '</tbody>';
+        list.innerHTML = html;
 
-        table.querySelectorAll('.ki-route-toggle').forEach(tr => {
-            tr.addEventListener('click', () => {
-                const open = tr.dataset.open !== '1';
-                tr.dataset.open = open ? '1' : '0';
-                table.querySelectorAll('.ki-route-row').forEach(row => {
-                    if (row.dataset.mark === tr.dataset.mark) row.style.display = open ? '' : 'none';
+        list.querySelectorAll('.ki-route-toggle').forEach(head => {
+            head.addEventListener('click', () => {
+                const open = head.dataset.open !== '1';
+                head.dataset.open = open ? '1' : '0';
+                list.querySelectorAll('.ki-route-row').forEach(row => {
+                    if (row.dataset.mark === head.dataset.mark) row.style.display = open ? 'grid' : 'none';
                 });
-                const caret = tr.querySelector('.ki-route-caret');
+                const caret = head.querySelector('.ki-route-caret');
                 if (caret) caret.textContent = open ? '▼' : '▶';
-                const hint = tr.querySelector('.hint');
+                const hint = head.querySelector('.hint');
                 if (hint) hint.textContent = open ? 'クリックで畳む' : 'クリックで開く';
             });
         });
@@ -2757,15 +2779,10 @@
         const movable = (summary.movable_rows !== undefined) ? summary.movable_rows
                       : rows.filter(r => r['付替可']).length;
         document.getElementById('ki-route-review-note').innerHTML =
-            '要確認 ' + rows.length + '行（★' + (summary.flagged_rows || 0)
-            + ' / △' + (summary.rev_rows || 0) + ' / ▲' + (summary.side_rows || 0)
-            + '）のうち、計上先を選べるのは ' + movable + '行です。'
-            + '<b>初期値はシステムの判定</b>（★＝経路内なので通勤費 / △＝経路と不一致なので移動交通費）'
-            + 'が入っています。違うと思う行だけ変えてください。'
-            + '<b>▲（片側のみ一致）はシステムに判断材料が無いため、初期値は申請どおりの計上先</b>のままです。'
-            + '<br><b>見るべき★だけを開いてあります。</b>移動交通費に計上する△と参考の▲は畳んであるので、'
-            + '中身を見たい行だけ見出しをクリックしてください（<b>畳んだままでも選択はすべて反映されます</b>）。'
-            + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金に計上するため、この表には出ません。';
+            '要確認 ' + rows.length + '行のうち、計上先を選べるのは ' + movable + '行です。'
+            + '初期値は各行に入っているので、<b>違うと思う行だけ変えてください</b>。'
+            + '畳んだグループの選択もそのまま反映されます。'
+            + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金になるため、ここには出ません。';
         document.getElementById('ki-route-review-area').style.display = '';
     }
 
