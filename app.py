@@ -1883,6 +1883,64 @@ def route_expense_prereview():
     })
 
 
+@app.route("/expense_month_status", methods=["GET"])
+def route_expense_month_status():
+    """経費チェックタブの月次ステッパー用に、対象月の成果物の有無と進み具合を返す。
+
+    outputs フォルダを見るだけで何も書かない。別名で保存した成果物までは追えないので、
+    「無い」は未実行の断定ではなく「見つからない」として画面に出す。
+    ②の精査は結果ブックのサマリから「進行中N件」を読み、0なら見終わりと表示できる。
+    """
+    from datetime import datetime as _dt
+
+    month = (request.args.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["対象月は YYYY-MM 形式で指定してください（例: 2026-07）"]}), 400
+    y, m = month.split("-")
+    mi = int(m)
+    out_dir = Config.OUTPUT_FOLDER
+
+    def _latest(patterns: list) -> "dict | None":
+        hits: list = []
+        for pat in patterns:
+            hits.extend(glob.glob(os.path.join(out_dir, pat)))
+        if not hits:
+            return None
+        p = max(hits, key=os.path.getmtime)
+        return {"file": os.path.basename(p),
+                "mtime": _dt.fromtimestamp(os.path.getmtime(p)).strftime("%m/%d %H:%M")}
+
+    # ①の既定名は テレワーク出社日数_YYYY年MM月.xlsx（/expense_check）。画面の例に合わせて
+    # 経費チェック～へ改名して使う運用もあるので両方を探す
+    check = _latest([f"テレワーク出社日数_{y}年{mi:02d}月*.xlsx",
+                     f"経費チェック*{y}年{mi:02d}月*.xlsx",
+                     f"経費チェック*{y}年{mi}月*.xlsx"])
+    seisa = _latest([f"交通費精査結果_{y}年{mi}月.xlsx"])
+    pending = None
+    if seisa:
+        try:
+            import openpyxl as _op
+            wb = _op.load_workbook(os.path.join(out_dir, seisa["file"]),
+                                   read_only=True, data_only=True)
+            try:
+                if "サマリ" in wb.sheetnames:
+                    summary = {str(r[0] or ""): r[1]
+                               for r in wb["サマリ"].iter_rows(values_only=True) if r and r[0]}
+                    mm = re.search(r"進行中\s*(\d+)", str(summary.get("承認状況") or ""))
+                    if mm:
+                        pending = int(mm.group(1))
+            finally:
+                wb.close()
+        except Exception:  # noqa: BLE001 — 進み具合の表示なので読めなくても落とさない
+            pending = None
+    integrated = _latest([f"経費統合一覧表*{y}年{mi:02d}月*.xlsx",
+                          f"経費統合一覧表*{y}年{mi}月*.xlsx",
+                          "経費統合一覧表.xlsx"])
+    return jsonify({"success": True, "check": check, "seisa": seisa,
+                    "seisa_pending": pending, "integrated": integrated})
+
+
 def _teiki_shiwake_form():
     """仕訳データへの定期代追記の共通フォーム読み取り。(値, エラー) を返す。"""
     month_label = (request.form.get("month") or "").strip()

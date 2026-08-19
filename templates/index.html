@@ -1111,8 +1111,14 @@
             <span class="card-icon icon-expense">💴</span>
             <div>
                 <div class="card-title">① テレワーク・通勤費マスタを集計する</div>
-                <p class="card-lead">経費を承認する前のチェック用に、対象月のテレワーク日数・出社日数・通勤費マスタを社員番号／氏名ごとに Excel でまとめます。<b>jinjer APIから取得するため数分かかります（月1回でOK）。</b>このブックが下の②③の入力になります。</p>
+                <p class="card-lead">対象月のテレワーク日数・出社日数・通勤費マスタを jinjer API から集めて Excel にします（<b>数分かかります・月1回でOK</b>）。このブックが②③の入力です。</p>
             </div>
+        </div>
+
+        <!-- 月次ステッパー: 対象月の成果物から進み具合を出す（見るだけ・断定しない） -->
+        <div id="ex-stepper" style="display:none; margin:0 0 12px; padding:7px 12px; border:1px solid #d7dee8; border-radius:6px; background:#fafcff; font-size:12.5px">
+            <span style="font-weight:bold" id="ex-stepper-month"></span>
+            <span id="ex-stepper-steps" style="display:inline-flex; flex-wrap:wrap; gap:4px 16px; margin-left:10px"></span>
         </div>
 
         <div class="fields">
@@ -1136,7 +1142,7 @@
             <summary>対象になる人／かかる時間</summary>
             <div class="more-body">
                 <p>在籍者と、対象月以降の退職者が対象です（例: 対象月が7月なら 7/31 退職者まで＝8月給与計算の対象）。</p>
-                <p>全員分を1名ずつ取得するため数分かかります。</p>
+                <p>全員分を1名ずつ取得するため数分かかります。出力は社員番号／氏名ごとに1行のブックです。</p>
             </div>
         </details>
 
@@ -1190,10 +1196,8 @@
         <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
             <h3 style="margin:0 0 4px; font-size:14px">② 承認前の交通費精査</h3>
             <p class="card-lead" style="margin-top:0">
-                jinjer の交通費申請（<b>進行中も含む</b>）を通勤費マスタと突き合わせ、金額と経路の誤りを
-                <b>承認する前に</b>見つけます。統合一覧表の経路突合は仕訳データ＝承認済みしか見られないため、
-                差し戻せるうちに直すにはこちらを先に回します。
-                jinjer API は使わないので数秒で終わり、<b>承認が進むたび何度でも実行できます</b>。
+                交通費申請（<b>進行中も含む</b>）を通勤費マスタと突き合わせ、<b>承認前＝差し戻せるうちに</b>
+                金額・経路の誤りを見つけます。数秒で終わり、<b>承認が進むたび何度でも実行できます</b>。
             </p>
             <div class="field-grid">
                 <label class="field">
@@ -1204,12 +1208,15 @@
                 <label class="field">
                     <span class="field-label">①で出したブック <span class="tag tag-req">必須</span></span>
                     <input type="text" id="pr-xlsx" placeholder="例: Y:\給与明細\R8年\8月\経費確認精査データ\経費チェック2026年7月.xlsx">
-                    <span class="field-hint">①「集計を実行」の直後は自動で入ります。別のブック（入社日フィルタ後版など）を使うときは貼り替えてください。<b>精査結果（交通費精査結果_～.xlsx）ではありません</b></span>
+                    <span class="field-hint">①「集計を実行」の直後は自動で入ります。<b>精査結果のブックではありません</b></span>
                 </label>
             </div>
             <details class="hint-details">
                 <summary>何を見るか／繰り返し実行したときの動き</summary>
                 <div class="hint-body">
+                    <p><b>なぜ承認前か</b>：統合一覧表の経路突合は仕訳データ＝承認済みしか見られないため、
+                    差し戻せるうちに直すにはこちらを先に回します。ブックを入社日フィルタ後版などに
+                    差し替えたいときは②の欄に貼り替えてください。</p>
                     <p><b>金額</b>：定期代は人単位・実費は日単位で合算し、通勤費マスタの登録額と突合します。
                     マスタの複数経路は「乗継の区間分割（合算が正）」と「勤務地パターンの選択制（1つが正）」の
                     両方を当てにいきます。</p>
@@ -1255,21 +1262,21 @@
         <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
             <h3 style="margin:0 0 4px; font-size:14px">③ 仕訳データへの定期代追記 <span class="tag tag-opt">イレギュラー救済</span></h3>
             <p class="card-lead" style="margin-top:0">
-                定期代の人は毎月申請しないのが正常なので、<b>申請が無いまま仕訳に載らず支給漏れ</b>になります。
-                ②の精査で出た「通勤費申請なし」のうち<b>区分＝通勤定期代・判定＝マスタから支給</b>の人を、
-                <b>追記行だけの新しいCSV</b>（1経路1行）にして出力します。
-                <b>毎月の定常作業ではありません。</b>元ファイルには一切触りません。
+                ②で<b>区分＝通勤定期代・判定＝マスタから支給</b>になった人（＝申請が無く支給漏れになる人）を、
+                <b>追記行だけの新しいCSV</b>にします。<b>毎月の定常作業ではありません</b>。元ファイルには触りません。
             </p>
             <div class="field-grid">
                 <label class="field">
                     <span class="field-label">仕訳データCSV（ファイルまたはフォルダ） <span class="tag tag-req">必須</span></span>
                     <input type="text" id="ts-shiwake" placeholder="例: Y:\給与明細\R8年\8月\経費確認精査データ\jinjer経費">
-                    <span class="field-hint">jinjer 経費 → 仕訳データのエクスポート（Shift-JIS・33列）。<b>フォルダを指定すると中のCSVを全部読み、どれかに定期代が計上済みの人は自動でスキップ</b>します（追加計上分が別CSVでもOK）。交通費申請CSV／経費チェックのブック／対象月は上の欄を使います</span>
+                    <span class="field-hint">jinjer 経費 → 仕訳データのエクスポート（Shift-JIS・33列）。フォルダ指定なら中の全CSVを読み、<b>計上済みの人は自動でスキップ</b>します。ほかの入力は上の②の欄を使います</span>
                 </label>
             </div>
             <details class="hint-details">
                 <summary>追記する行の中身／※要確認が付くもの／できたCSVの使い方</summary>
                 <div class="hint-body">
+                    <p><b>なぜ要るか</b>：定期代の人は毎月申請しないのが正常なので、申請が無いまま
+                    仕訳に載らず支給漏れになります。それを1経路1行で救済します（追加計上分が別CSVでもOK）。</p>
                     <p><b>出力</b>：ヘッダー＋追記行だけの新しいCSV（通勤定期代追記_20XX年X月.csv）。
                     <b>jinjer経費のフォルダにそのまま追加</b>してください（元ファイルの入れ替えは不要）。
                     統合一覧表はフォルダの中のCSVを全部読むので、一緒に取り込まれます。</p>
@@ -1927,6 +1934,50 @@
         sseEdits.addEventListener('input', () => { sseFingerprint = ''; sseExecuteBtn.disabled = true; });
     }
 
+    // ----- 月次ステッパー（経費チェックタブの進み具合）-----
+    // outputs にある成果物と投入台帳から「今月どこまで済んだか」を出す。見るだけで断定しない
+    // （別名保存や別フォルダの成果物は追えないため「未検出」という言い方にしている）。
+    async function exRenderStepper() {
+        const box = document.getElementById('ex-stepper');
+        if (!box) return;
+        const month = (document.getElementById('ex-month').value || '').trim();
+        if (!/^\d{4}-\d{2}$/.test(month)) { box.style.display = 'none'; return; }
+        let st = null, ledger = null;
+        try {
+            st = await (await fetch('/expense_month_status?month=' + encodeURIComponent(month))).json();
+        } catch (e) { box.style.display = 'none'; return; }
+        if (!st || !st.success) { box.style.display = 'none'; return; }
+        try {
+            ledger = await (await fetch('/keihi_import_ledger_status')).json();
+        } catch (e) { ledger = null; }
+
+        const chip = (state, label, detail) => {
+            const c = state === 'done' ? '#1a7a3c' : state === 'part' ? '#8f5600' : '#888';
+            const mark = state === 'done' ? '✓' : state === 'part' ? '●' : '○';
+            return '<span style="white-space:nowrap; color:' + c + '"><b>' + mark + ' ' + label + '</b>'
+                 + (detail ? '<span style="color:#777"> ' + escapeHtml(detail) + '</span>' : '') + '</span>';
+        };
+        const steps = [];
+        steps.push(st.check ? chip('done', '①集計', st.check.mtime) : chip('todo', '①集計', '未検出'));
+        if (!st.seisa) steps.push(chip('todo', '②精査', '未検出'));
+        else if (st.seisa_pending === 0) steps.push(chip('done', '②精査', '進行中0＝見終わり'));
+        else if (st.seisa_pending > 0) steps.push(chip('part', '②精査', '進行中' + st.seisa_pending + '件'));
+        else steps.push(chip('part', '②精査', st.seisa.mtime));
+        steps.push(st.integrated ? chip('done', '統合一覧表', st.integrated.mtime)
+                                 : chip('todo', '統合一覧表', '未検出'));
+        const hit = ((ledger && ledger.months) || []).find(x => x.month === month);
+        steps.push(hit ? chip('done', 'jinjer投入', hit.rows + '名 ' + (hit.last_at || ''))
+                       : chip('todo', 'jinjer投入', '台帳に記録なし'));
+        document.getElementById('ex-stepper-month').textContent = month.replace('-', '年') + '月の進み具合';
+        document.getElementById('ex-stepper-steps').innerHTML = steps.join('');
+        box.style.display = '';
+    }
+    document.getElementById('ex-month').addEventListener('change', exRenderStepper);
+    document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', () => {
+        if (r.checked && r.value === 'expense') exRenderStepper();
+    }));
+    if (getCurrentMode() === 'expense') exRenderStepper();
+
     // ----- 経費チェック（テレワーク日数）-----
     const exRunBtn = document.getElementById('ex-run-btn');
     if (exRunBtn) {
@@ -1974,6 +2025,7 @@
                     filled = '（②の「①で出したブック」欄に出力パスを入れました）';
                 }
                 document.getElementById('ex-status').textContent = '完了' + filled;
+                exRenderStepper();
             } catch (e) {
                 showError('ex-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('ex-status').textContent = '';
@@ -2072,6 +2124,7 @@
                 document.getElementById('pr-result-area').style.display = 'block';
                 document.getElementById('pr-status').textContent =
                     s.pending_rows === 0 ? '完了（進行中の申請なし＝この月は見終わりです）' : '完了';
+                exRenderStepper();
             } catch (e) {
                 showError('pr-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('pr-status').textContent = '';
