@@ -538,6 +538,31 @@ def load_excluded_employees(csv_path: os.PathLike[str] | str | None = None) -> d
     return out
 
 
+def load_breakdown_master(csv_path: os.PathLike[str] | str | None = None) -> dict[str, list[dict[str, str]]]:
+    """1枚の請求書を複数人で計上する取引先の内訳を読む。
+
+    IXナレッジ様のように、請求書は1枚（総合計のみ）でも freee には人数分の
+    明細で登録する取引先がある。請求書に内訳が印字されていないので金額は
+    自動で割れない。ここには「誰を何行出すか」だけを持ち、金額は画面で人が入れる。
+
+    列: 取引先, 従業員, 社員番号, 備考
+
+    Returns:
+        {取引先キー: [{"name": 従業員, "employee_no": 社員番号}, ...]}
+    """
+    if not csv_path or not Path(csv_path).exists():
+        return {}
+    out: dict[str, list[dict[str, str]]] = {}
+    for row in _read_csv_rows(Path(csv_path)):
+        partner = _nfkc(row.get("取引先") or "")
+        name = str(row.get("従業員") or "").strip()
+        if not partner or not name:
+            continue
+        out.setdefault(_company_key(partner), []).append(
+            {"name": name, "employee_no": _nfkc(row.get("社員番号") or "").strip()})
+    return out
+
+
 def load_partner_master(csv_path: os.PathLike[str] | str | None = None) -> dict[str, dict[str, str]]:
     """取引先ごとの設定を読む。
 
@@ -708,7 +733,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
                   default_department: str = "",
                   custom_items_cache: os.PathLike[str] | str | None = None,
                   partner_master_csv: os.PathLike[str] | str | None = None,
-                  excluded_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+                  excluded_csv: os.PathLike[str] | str | None = None,
+                  breakdown_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
     match = re.fullmatch(r"(\d{4})-(\d{2})", _nfkc(month))
     if not match:
         raise InvoiceModeError("対象月は YYYY-MM 形式で指定してください")
@@ -721,6 +747,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
     master = load_employee_master(sales_book, master_csv)
     partner_master = load_partner_master(partner_master_csv)
     excluded = load_excluded_employees(excluded_csv)
+    breakdowns = load_breakdown_master(breakdown_csv)
     documents: list[dict[str, Any]] = []
     parse_errors: list[str] = []
     for source_file in scan["selected"]:
@@ -859,7 +886,29 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
             main_row["_warnings"].append(
                 f"PDFに入金期日が無いので、支払期日ルールから {due_from_rule} にしました")
         main_row["_errors"] = _validation_messages(main_row)
-        rows.append(main_row)
+
+        # 1枚の請求書を複数人で計上する取引先（IXナレッジ様など）は、
+        # 請求書に内訳が印字されていないので金額を自動では割れない。
+        # 人数分の行を用意して金額・税額は空にし、画面で人が入れる。
+        breakdown = breakdowns.get(_company_key(partner)) if partner else None
+        if breakdown and isinstance(main_amount, int):
+            total_note = (f"この請求書は{len(breakdown)}名分です。"
+                          f"税抜合計 {main_amount:,} 円／消費税 "
+                          f"{main_tax:,} 円を各行に振り分けてください"
+                          if isinstance(main_tax, int) else
+                          f"この請求書は{len(breakdown)}名分です。金額を振り分けてください")
+            for member in breakdown:
+                share = dict(main_row)
+                share["従業員"] = member["name"]
+                share["管理番号"] = member["employee_no"] or main_row["管理番号"]
+                share["金額"] = ""
+                share["税額"] = ""
+                share["_warnings"] = list(main_row["_warnings"]) + [total_note]
+                share["_manual_added"] = True
+                share["_errors"] = _validation_messages(share)
+                rows.append(share)
+        else:
+            rows.append(main_row)
 
         embedded_commute = sum(int(doc.get("commute_amount") or 0) for doc in main_documents)
         separate_commute = sum(int(doc.get("commute_amount") or 0) for doc in commute_documents)

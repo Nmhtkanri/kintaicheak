@@ -110,3 +110,26 @@ def test_no_excluded_csv_means_no_exclusion(tmp_path):
     """リストが無いときに勝手に誰かを落とさない。"""
     assert im.load_excluded_employees(None) == {}
     assert im.load_excluded_employees(tmp_path / "none.csv") == {}
+
+
+def test_breakdown_master_makes_one_row_per_person(tmp_path):
+    """1枚の請求書を複数人で計上する取引先は人数分の行にし、金額は空で出す。
+
+    IXナレッジ様は請求書に総合計しか印字されていないので金額を自動で割れない。
+    freeeのセグメント1タグに小島さん・八橋さんが登録されている。
+    """
+    path = tmp_path / "breakdown.csv"
+    path.write_text(
+        "取引先,従業員,社員番号,備考\n"
+        "アイエックス・ナレッジ株式会社,小島 光晶,2024044,\n"
+        "アイエックス・ナレッジ株式会社,（八橋 麻耶）,5000002,\n",
+        encoding="utf-8-sig")
+    got = im.load_breakdown_master(path)
+    members = got[im._company_key("アイエックス・ナレッジ株式会社")]
+    assert [m["name"] for m in members] == ["小島 光晶", "（八橋 麻耶）"]
+    assert [m["employee_no"] for m in members] == ["2024044", "5000002"]
+
+
+def test_no_breakdown_csv_means_no_split(tmp_path):
+    assert im.load_breakdown_master(None) == {}
+    assert im.load_breakdown_master(tmp_path / "none.csv") == {}

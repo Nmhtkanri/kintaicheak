@@ -2899,6 +2899,7 @@ def route_invoice_preview():
                 Config.KEIRI_OUTPUT_DIR, "raw", "custom_items.json"),
             partner_master_csv=Config.INVOICE_PARTNER_MASTER_CSV,
             excluded_csv=Config.INVOICE_EXCLUDED_CSV,
+            breakdown_csv=Config.INVOICE_BREAKDOWN_CSV,
         )
     except InvoiceModeError as exc:
         return jsonify({"success": False, "errors": [str(exc)]}), 400

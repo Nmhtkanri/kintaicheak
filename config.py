@@ -171,6 +171,10 @@ class Config:
     # 列: 社員番号, 氏名, 理由
     INVOICE_EXCLUDED_CSV = os.environ.get(
         "INVOICE_EXCLUDED_CSV", r"Z:\API連携\docs\請求書モード_対象外リスト.csv")
+    # 1枚の請求書を複数人で計上する取引先の内訳。列: 取引先, 従業員, 社員番号, 備考
+    # 請求書に内訳が印字されていないので金額は画面で人が入れる。
+    INVOICE_BREAKDOWN_CSV = os.environ.get(
+        "INVOICE_BREAKDOWN_CSV", r"Z:\API連携\docs\請求書モード_内訳マスタ.csv")
     INVOICE_DEFAULT_DEPARTMENT = os.environ.get("INVOICE_DEFAULT_DEPARTMENT", "")
     INVOICE_OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "outputs/invoice")
 
