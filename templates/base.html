@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}オペレーションハブ{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <!-- 版を付けて、共有側を更新したのにブラウザが古いCSSを使い続けるのを防ぐ -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ build_stamp | default('dev', true) | urlencode }}">
 </head>
 <body>
     <header class="app-header">

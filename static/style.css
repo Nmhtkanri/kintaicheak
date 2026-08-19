@@ -4,6 +4,13 @@
     padding: 0;
 }
 
+:root {
+    /* 画面の最大幅。ヘッダーと本文で共通に使う（全モード共通）。
+       請求書CSVのように列数の多い表を横スクロールなしで見せたいので広めに取り、
+       ウィンドウが狭いときは 100vw に追随させる。 */
+    --app-max-width: min(1680px, calc(100vw - 40px));
+}
+
 body {
     font-family: "Meiryo", "メイリオ", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
     background: #f4f6f8;
@@ -18,7 +25,7 @@ body {
     box-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }
 .header-inner {
-    max-width: 1100px;
+    max-width: var(--app-max-width);
     margin: 0 auto;
     display: flex;
     align-items: baseline;
@@ -34,7 +41,7 @@ body {
 }
 
 .main-content {
-    max-width: 1100px;
+    max-width: var(--app-max-width);
     margin: 24px auto;
     padding: 0 16px;
 }
@@ -906,7 +913,9 @@ body {
     border-radius: 8px 8px 0 0;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;   /* 幅が足りないときは折り返す。切れて読めないより折り返す方がよい */
     gap: 4px;
+    row-gap: 6px;
     box-shadow: 0 1px 6px rgba(0,0,0,.18);
 }
 .mode-tabs-caption {
@@ -926,8 +935,8 @@ body {
     display: inline-block;
     padding: 8px 13px;
     border-radius: 6px;
-    color: #c9d4dd;
-    font-size: 13px;
+    color: #dfe8ef;
+    font-size: 13.5px;
     line-height: 1;
     white-space: nowrap;
     cursor: pointer;
@@ -949,12 +958,14 @@ body {
 .mode-tabs-hint {
     margin-left: auto;
     padding-left: 12px;
-    color: #a9b8c6;
+    color: #b8c6d2;
     font-size: 11.5px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    min-width: 0;
+    /* 0 だとタブに押し潰されて「請…」のように1文字だけ残る。
+       ここまで縮んだら潰さずに次の行へ折り返させる。 */
+    min-width: 18em;
 }
 
 /* --- カード見出し（アイコン＋タイトル1行＋リード1行） --- */
