@@ -2826,6 +2826,7 @@ def route_invoice_preview():
             custom_items_cache=os.path.join(
                 Config.KEIRI_OUTPUT_DIR, "raw", "custom_items.json"),
             due_date_rules_csv=Config.INVOICE_DUE_DATE_RULES_CSV,
+            excluded_csv=Config.INVOICE_EXCLUDED_CSV,
         )
     except InvoiceModeError as exc:
         return jsonify({"success": False, "errors": [str(exc)]}), 400

@@ -95,3 +95,18 @@ def test_only_own_employees_are_in_the_master(tmp_path):
     document = {"employee_name": "", "text": "", "partner": "アイエックス・ナレッジ株式会社",
                 "source_file": r"Z:\NetMarks以外(常駐）\IXナレッジ（小島・八橋）\請求書.pdf"}
     assert im._match_employee(document, master)["employee_name"] == "小島光晶"
+
+
+def test_excluded_employees_are_dropped(tmp_path):
+    """e-staffing / SAP Fieldglass 経由の人は別ルートでfreeeに入るので落とす。"""
+    path = tmp_path / "excluded.csv"
+    path.write_text("社員番号,氏名,理由\n2025029,奥山 昌苗,Estaffing\n"
+                    "2018031,太田 裕一,SAP_Fieldglass\n", encoding="utf-8-sig")
+    got = im.load_excluded_employees(path)
+    assert got == {"2025029": "Estaffing", "2018031": "SAP_Fieldglass"}
+
+
+def test_no_excluded_csv_means_no_exclusion(tmp_path):
+    """リストが無いときに勝手に誰かを落とさない。"""
+    assert im.load_excluded_employees(None) == {}
+    assert im.load_excluded_employees(tmp_path / "none.csv") == {}

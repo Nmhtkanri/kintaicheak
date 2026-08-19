@@ -165,6 +165,12 @@ class Config:
     # 載っていない取引先は空欄のまま＝画面で赤く出して人が入れる（推測しない）。
     INVOICE_DUE_DATE_RULES_CSV = os.environ.get(
         "INVOICE_DUE_DATE_RULES_CSV", r"Z:\API連携\docs\請求書モード_支払期日ルール.csv")
+    # この請求書CSVの対象外にする従業員（e-staffing / SAP Fieldglass 経由で
+    # 請求している人。別ルートで freee に入るため二重計上になる）。
+    # 元は jinjer 勤怠の管理タグ＝勤務表入力進捗管理表の「請求データ」列。
+    # 列: 社員番号, 氏名, 理由
+    INVOICE_EXCLUDED_CSV = os.environ.get(
+        "INVOICE_EXCLUDED_CSV", r"Z:\API連携\docs\請求書モード_対象外リスト.csv")
     INVOICE_DEFAULT_DEPARTMENT = os.environ.get("INVOICE_DEFAULT_DEPARTMENT", "")
     INVOICE_OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "outputs/invoice")
 

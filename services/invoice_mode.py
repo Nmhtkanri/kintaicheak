@@ -515,6 +515,29 @@ def _match_employee(document: dict[str, Any], master: dict[str, dict[str, str]])
         return company_matches[0]
     return {"employee_no": "", "employee_name": _clean_display_name(document.get("employee_name", "")),
             "partner": "", "department": "", "source": ""}
+def load_excluded_employees(csv_path: os.PathLike[str] | str | None = None) -> dict[str, str]:
+    """この請求書CSVの対象外にする従業員を読む。
+
+    e-staffing や SAP Fieldglass 経由で請求している人は、別ルートで freee に
+    入るので、ここで作るCSVに入れると二重計上になる。元は jinjer 勤怠の管理タグ
+    （勤務表入力進捗管理表の「請求データ」列）。勤怠側のタグは人事APIから引けない
+    ので、外部CSVに落として持つ。
+
+    列: 社員番号, 氏名, 理由
+
+    Returns:
+        {社員番号: 理由}
+    """
+    if not csv_path or not Path(csv_path).exists():
+        return {}
+    out: dict[str, str] = {}
+    for row in _read_csv_rows(Path(csv_path)):
+        emp = _nfkc(row.get("社員番号") or "").strip()
+        if emp:
+            out[emp] = _nfkc(row.get("理由") or "")
+    return out
+
+
 def load_due_date_rules(csv_path: os.PathLike[str] | str | None = None) -> dict[str, str]:
     """取引先ごとの支払期日ルールを読む。
 
@@ -674,7 +697,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
                   master_csv: os.PathLike[str] | str | None = None,
                   default_department: str = "",
                   custom_items_cache: os.PathLike[str] | str | None = None,
-                  due_date_rules_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+                  due_date_rules_csv: os.PathLike[str] | str | None = None,
+                  excluded_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
     match = re.fullmatch(r"(\d{4})-(\d{2})", _nfkc(month))
     if not match:
         raise InvoiceModeError("対象月は YYYY-MM 形式で指定してください")
@@ -686,6 +710,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
     sales_book = _sales_book_path(sales_book_template, year)
     master = load_employee_master(sales_book, master_csv)
     due_date_rules = load_due_date_rules(due_date_rules_csv)
+    excluded = load_excluded_employees(excluded_csv)
     documents: list[dict[str, Any]] = []
     parse_errors: list[str] = []
     for source_file in scan["selected"]:
@@ -704,6 +729,21 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         if employee.get("partner_override") and employee.get("partner"):
             document["partner"] = employee["partner"]
         documents.append(document)
+
+    # e-staffing / SAP Fieldglass 経由で請求している人は、別ルートで freee に入る。
+    # ここに残すと二重計上になるので落とす。誰を落としたかは画面に出す。
+    excluded_notes: list[str] = []
+    if excluded:
+        kept: list[dict[str, Any]] = []
+        for document in documents:
+            reason = excluded.get(_nfkc(document.get("employee_no") or ""))
+            if reason is None:
+                kept.append(document)
+                continue
+            excluded_notes.append(
+                f"{document.get('employee_name') or Path(document['source_file']).name}"
+                f"（{reason or '対象外'}）")
+        documents = kept
 
     # 部門は jinjer のカスタム項目「給与計算関連」を正とする（経理モードと同じ元データ）。
     # 引けなかった人だけ、売上簿の契約形態から作った値・既定値を使う。
@@ -824,6 +864,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         "missing_roots": scan["missing_roots"], "scan_errors": scan["scan_errors"],
         "parse_errors": parse_errors, "signature": _scan_signature(scan),
         "target_count": len(target_roots), "sales_book": sales_book,
+        "excluded": excluded_notes,
     }
 
 
