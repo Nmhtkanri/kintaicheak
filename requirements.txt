@@ -8,3 +8,4 @@ anthropic
 python-dotenv
 requests
 pywin32
+pypdf

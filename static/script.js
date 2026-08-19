@@ -3455,9 +3455,9 @@ function invoiceRenderRows() {
             const index = Number(button.dataset.index);
             if (button.dataset.action === 'duplicate') {
                 const source = invoiceState.rows[index];
+                // 従業員・管理番号は複製元のまま残す（同じ人の請求を分けることが
+                // 多いので、毎回入れ直す手間をなくす。2026-08 谷津さん要望）
                 const copy = Object.assign({}, source, {
-                    '従業員': '',
-                    '管理番号': '',
                     '備考': '',
                     _group_id: source._group_id + '-split-' + Date.now(),
                     _sources: (source._sources || []).slice(),
