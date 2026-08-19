@@ -1236,6 +1236,14 @@
                     <div class="summary-card"><div class="card-label">前回から解消</div><div class="card-value" id="pr-cnt-resolved">—</div></div>
                     <div class="summary-card"><div class="card-label">通勤費未登録(メール対象)</div><div class="card-value" id="pr-cnt-mail">0</div></div>
                 </div>
+                <!-- 金額・経路の要確認は画面でも見せる。差し戻し判断のたびにxlsxを開く往復を無くすため -->
+                <div id="pr-flagged-area" style="display:none; margin-bottom:8px">
+                    <div class="section-title" style="font-size:13px; margin-bottom:2px">金額・経路の要確認（定期代突合・実費突合）</div>
+                    <div class="hint" style="margin-bottom:4px">申請とマスタを並べています。差し戻すかどうかはこの表で判断できます。判定: A=金額一致 / B=一部経路と一致 / C=往復・片道の疑い / D=金額不一致 / E=区分相違。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
+                    <div style="max-height:360px; overflow:auto; border:1px solid #ddd">
+                        <table id="pr-flagged-table" style="border-collapse:collapse; font-size:12px; width:100%"></table>
+                    </div>
+                </div>
                 <a id="pr-download-link" href="#" class="btn btn-download" style="display:none">📥 精査結果xlsxをダウンロード</a>
                 <a id="pr-mail-link" href="#" class="btn btn-secondary" style="display:none">📧 メール宛先表をダウンロード</a>
                 <pre id="pr-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:11px; display:none"></pre>
@@ -1977,6 +1985,48 @@
     // ----- 承認前の交通費精査 -----
     // jinjer API を叩かないので数秒で終わる。承認が進むたび何度でも実行する前提で、
     // 前回の出力と突き合わせて 新規/継続/解消 を出す。
+    // 金額・経路の要確認行は画面にも出す（差し戻し判断のたびにxlsxを開かずに済むように）。
+    function prRenderFlagged(rows) {
+        const area = document.getElementById('pr-flagged-area');
+        const table = document.getElementById('pr-flagged-table');
+        if (!rows || !rows.length) { area.style.display = 'none'; table.innerHTML = ''; return; }
+        const esc = (v) => escapeHtml(String(v === undefined || v === null ? '' : v));
+        const num = (v) => (v === undefined || v === null || v === '') ? '' : Number(v).toLocaleString();
+        const td = 'border:1px solid #ddd; padding:3px 6px; vertical-align:top';
+        let html = '<thead><tr>'
+            + ['種別', '社員番号', '氏名', '判定', '申請額', 'マスタ額', '差額', '経路', '説明・備考', '前回比']
+                .map(c => '<th style="position:sticky; top:0; background:#eee; border:1px solid #ccc;'
+                        + ' padding:3px 6px; white-space:nowrap">' + c + '</th>').join('')
+            + '</tr></thead><tbody>';
+        rows.forEach(r => {
+            const applied = ('申請額(合計)' in r) ? r['申請額(合計)'] : r['申請額(日計)'];
+            const masterAmt = ('マスタ支給額' in r) ? r['マスタ支給額'] : r['マスタ日額'];
+            const kind = (r['シート'] === '定期代突合' ? '定期' : '実費')
+                + (r['利用日'] ? '<br><span style="color:#888">' + esc(r['利用日']) + '</span>' : '');
+            const route = '<span style="color:#888">申請</span> ' + esc(r['申請経路'] || '—')
+                + '<br><span style="color:#888">マスタ</span> ' + esc(r['マスタ経路'] || '—')
+                + (r['経路判定'] && r['経路判定'] !== '一致'
+                    ? '<br><b style="color:#b00">' + esc(r['経路判定']) + '</b>' : '');
+            const note = esc(r['説明'] || '')
+                + (r['テレワーク重複'] ? '<br><b>テレワーク重複:</b> ' + esc(r['テレワーク重複']) : '')
+                + (r['備考'] ? '<br><span style="color:#8a5a00">備考: ' + esc(r['備考']) + '</span>' : '');
+            html += '<tr style="' + (r['前回比'] === '新規' ? 'background:#fdecea' : '') + '">'
+                + '<td style="' + td + '; white-space:nowrap">' + kind + '</td>'
+                + '<td style="' + td + '">' + esc(r['社員番号']) + '</td>'
+                + '<td style="' + td + '; white-space:nowrap">' + esc(r['氏名']) + '</td>'
+                + '<td style="' + td + '">' + esc(r['判定']) + '</td>'
+                + '<td style="' + td + '; text-align:right">' + num(applied) + '</td>'
+                + '<td style="' + td + '; text-align:right">' + num(masterAmt) + '</td>'
+                + '<td style="' + td + '; text-align:right">' + num(r['差額']) + '</td>'
+                + '<td style="' + td + '">' + route + '</td>'
+                + '<td style="' + td + '">' + note + '</td>'
+                + '<td style="' + td + '; white-space:nowrap">' + esc(r['前回比']) + '</td>'
+                + '</tr>';
+        });
+        table.innerHTML = html + '</tbody>';
+        area.style.display = '';
+    }
+
     const prRunBtn = document.getElementById('pr-run-btn');
     if (prRunBtn) {
         prRunBtn.addEventListener('click', async () => {
@@ -1999,6 +2049,7 @@
                     return;
                 }
                 const s = data.stats;
+                prRenderFlagged(data.flagged_rows || []);
                 document.getElementById('pr-cnt-flagged').textContent = s.flagged_total;
                 document.getElementById('pr-cnt-pending').textContent = s.pending_rows;
                 document.getElementById('pr-cnt-new').textContent = s.first_run ? '初回' : s.new_count;

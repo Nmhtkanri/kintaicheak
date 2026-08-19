@@ -1868,6 +1868,7 @@ def route_expense_prereview():
         "output_filename": output_filename,
         "mail_download_url": f"/download/{mail_name}" if mail_name else None,
         "mail_filename": mail_name,
+        "flagged_rows": result.flagged_rows or [],
         "stats": {
             "approved_rows": result.approved_rows,
             "pending_rows": result.pending_rows,
