@@ -538,25 +538,35 @@ def load_excluded_employees(csv_path: os.PathLike[str] | str | None = None) -> d
     return out
 
 
-def load_due_date_rules(csv_path: os.PathLike[str] | str | None = None) -> dict[str, str]:
-    """取引先ごとの支払期日ルールを読む。
+def load_partner_master(csv_path: os.PathLike[str] | str | None = None) -> dict[str, dict[str, str]]:
+    """取引先ごとの設定を読む。
 
-    請求書PDFに入金期日が載っていない取引先があるため（IXナレッジ様など）、
-    取引先名から期日を決められるようにする。CSVが無ければ空＝どこにも
-    当てはめない（＝推測しない。画面で赤くなり人が入れる）。
+    列: 取引先, freee取引先名, 支払期日, 備考
 
-    列: 取引先, 支払期日
-    支払期日の書き方: 当月末 / 翌月末 / 翌々月末 / 翌月10日 / 翌々月10日 など
+    - freee取引先名: freee に登録されている正式名称。freee は取引先を名前で
+      照合するので、ここがズレていると取込時に別の取引先が作られてしまう
+      （例「アクシスＩＴパートナーズ株式会社（旧アクシス）」）。空なら変換しない。
+    - 支払期日: 請求書PDFに入金期日が印字されていない取引先の期日ルール。
+      当月末 / 翌月末 / 翌々月末 / 翌月10日 / 3か月後末 などと書く。
+      空なら空欄のまま（推測しない）。
+
+    Returns:
+        {取引先キー: {"freee_name": ..., "due": ...}}
     """
     if not csv_path or not Path(csv_path).exists():
         return {}
-    rules: dict[str, str] = {}
+    out: dict[str, dict[str, str]] = {}
     for row in _read_csv_rows(Path(csv_path)):
         partner = _nfkc(row.get("取引先") or "")
-        rule = _nfkc(row.get("支払期日") or "")
-        if partner and rule:
-            rules[_company_key(partner)] = rule
-    return rules
+        if not partner:
+            continue
+        out[_company_key(partner)] = {
+            # freee は名前で照合するので、登録名は正規化せず原文のまま持つ。
+            # NFKC をかけると全角ＩＴが半角になり、かえって一致しなくなる。
+            "freee_name": str(row.get("freee取引先名") or "").strip(),
+            "due": _nfkc(row.get("支払期日") or ""),
+        }
+    return out
 
 
 def resolve_due_date(rule: str, month_end: date) -> str:
@@ -697,7 +707,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
                   master_csv: os.PathLike[str] | str | None = None,
                   default_department: str = "",
                   custom_items_cache: os.PathLike[str] | str | None = None,
-                  due_date_rules_csv: os.PathLike[str] | str | None = None,
+                  partner_master_csv: os.PathLike[str] | str | None = None,
                   excluded_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
     match = re.fullmatch(r"(\d{4})-(\d{2})", _nfkc(month))
     if not match:
@@ -709,7 +719,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
     scan = find_invoice_files(month, target_roots)
     sales_book = _sales_book_path(sales_book_template, year)
     master = load_employee_master(sales_book, master_csv)
-    due_date_rules = load_due_date_rules(due_date_rules_csv)
+    partner_master = load_partner_master(partner_master_csv)
     excluded = load_excluded_employees(excluded_csv)
     documents: list[dict[str, Any]] = []
     parse_errors: list[str] = []
@@ -792,12 +802,18 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         department = _nfkc(basis[0].get("department")) if basis else _nfkc(default_department)
         issue_date, issue_conflict = _common_value(basis, "issue_date")
         issue_date, issue_moved = _clamp_issue_date(issue_date, month_end)
+        # freee は取引先を名前で照合するので、freee 側の正式名称に寄せてから出す。
+        partner_setting = partner_master.get(_company_key(partner)) or {}
+        partner_renamed = ""
+        if partner_setting.get("freee_name") and partner_setting["freee_name"] != partner:
+            partner_renamed = partner_setting["freee_name"]
+            partner = partner_renamed
         due_date, due_conflict = _common_value(basis, "due_date")
         # PDFに入金期日が載っていない取引先は、取引先ごとのルールから決める。
         # ルールが無ければ空のまま＝画面で赤くなり人が入れる（推測しない）。
         due_from_rule = ""
         if not due_date:
-            rule = due_date_rules.get(_company_key(partner))
+            rule = partner_setting.get("due")
             due_from_rule = resolve_due_date(rule, month_end) if rule else ""
             due_date = due_from_rule or due_date
         main_amount: int | str = ""
@@ -829,6 +845,9 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
             main_row["_warnings"].append("請求日が複数あります")
         if due_conflict:
             main_row["_warnings"].append("入金期日が複数あります")
+        if partner_renamed:
+            main_row["_warnings"].append(
+                f"取引先をfreeeの登録名「{partner_renamed}」に合わせました")
         if due_from_rule:
             main_row["_warnings"].append(
                 f"PDFに入金期日が無いので、支払期日ルールから {due_from_rule} にしました")

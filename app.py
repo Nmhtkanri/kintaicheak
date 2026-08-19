@@ -2883,7 +2883,7 @@ def route_invoice_preview():
             # 経理モードが作ったキャッシュがあれば API を叩かずに済む。
             custom_items_cache=os.path.join(
                 Config.KEIRI_OUTPUT_DIR, "raw", "custom_items.json"),
-            due_date_rules_csv=Config.INVOICE_DUE_DATE_RULES_CSV,
+            partner_master_csv=Config.INVOICE_PARTNER_MASTER_CSV,
             excluded_csv=Config.INVOICE_EXCLUDED_CSV,
         )
     except InvoiceModeError as exc:

@@ -160,11 +160,11 @@ class Config:
     # 任意の補正マスタ。列: 氏名, 社員番号, freee取引先, 部門
     INVOICE_MASTER_CSV = os.environ.get(
         "INVOICE_MASTER_CSV", r"Z:\API連携\docs\請求書モード_freee補正マスタ.csv")
-    # 請求書PDFに入金期日が載っていない取引先の期日ルール。
-    # 列: 取引先, 支払期日（当月末／翌月末／翌々月10日 など）。
-    # 載っていない取引先は空欄のまま＝画面で赤く出して人が入れる（推測しない）。
-    INVOICE_DUE_DATE_RULES_CSV = os.environ.get(
-        "INVOICE_DUE_DATE_RULES_CSV", r"Z:\API連携\docs\請求書モード_支払期日ルール.csv")
+    # 取引先ごとの設定。列: 取引先, freee取引先名, 支払期日, 備考
+    #  freee取引先名 … freeeは取引先を名前で照合するので正式名称に寄せる
+    #  支払期日 … 請求書PDFに入金期日が無い取引先の期日（翌月末／3か月後末 など）
+    INVOICE_PARTNER_MASTER_CSV = os.environ.get(
+        "INVOICE_PARTNER_MASTER_CSV", r"Z:\API連携\docs\請求書モード_取引先マスタ.csv")
     # この請求書CSVの対象外にする従業員（e-staffing / SAP Fieldglass 経由で
     # 請求している人。別ルートで freee に入るため二重計上になる）。
     # 元は jinjer 勤怠の管理タグ＝勤務表入力進捗管理表の「請求データ」列。
