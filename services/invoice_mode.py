@@ -500,6 +500,55 @@ def _match_employee(document: dict[str, Any], master: dict[str, dict[str, str]])
         return company_matches[0]
     return {"employee_no": "", "employee_name": _clean_display_name(document.get("employee_name", "")),
             "partner": "", "department": "", "source": ""}
+def load_departments(employee_ids: Iterable[str], on_date: str, *,
+                     cache_path: os.PathLike[str] | str | None = None,
+                     client: Any = None) -> dict[str, str]:
+    """jinjer のカスタム項目「給与計算関連」から、on_date 時点の部門を引く。
+
+    元データも時点解決も経理モードと同じものを使う（services/keiri_api）。
+    部門は履歴を持つので、対象月の末日時点の値を採る（月中異動は異動後になる）。
+
+    キャッシュ（経理モードが作る raw/custom_items.json）があればそれを読む。
+    無ければ jinjer を叩くが、取れなくても請求書CSVは作れるべきなので、
+    失敗しても例外にはせず空の辞書を返す。
+
+    Returns:
+        {社員番号: 部門}。引けなかった人はキーごと入らない。
+    """
+    ids = [str(e).strip() for e in employee_ids if str(e or "").strip()]
+    if not ids:
+        return {}
+    try:
+        from services.keiri_api import (get_client, parse_payroll_custom_history,
+                                        resolve_custom_value)
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+    raw: dict[str, Any] = {}
+    if cache_path and Path(cache_path).exists():
+        try:
+            raw = json.loads(Path(cache_path).read_text(encoding="utf-8")).get("data") or {}
+        except Exception:                                      # noqa: BLE001
+            raw = {}
+    missing = [e for e in ids if e not in raw]
+    if missing:
+        try:
+            raw.update((client or get_client()).get_custom_items(missing))
+        except Exception:                                      # noqa: BLE001
+            pass   # キャッシュ分だけで続ける（部門が空なら画面で赤くなり人が気づく）
+
+    out: dict[str, str] = {}
+    for emp in ids:
+        person = raw.get(emp)
+        if not person:
+            continue
+        value = resolve_custom_value(
+            parse_payroll_custom_history(person), "部門", on_date)
+        if value:
+            out[emp] = value
+    return out
+
+
 def _clamp_issue_date(issue_date: str, month_end: date) -> tuple[str, bool]:
     """発生日を対象月の末日に寄せる。
 
@@ -558,7 +607,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
                   target_roots_csv: os.PathLike[str] | str | None = None,
                   sales_book_template: str | None = None,
                   master_csv: os.PathLike[str] | str | None = None,
-                  default_department: str = "") -> dict[str, Any]:
+                  default_department: str = "",
+                  custom_items_cache: os.PathLike[str] | str | None = None) -> dict[str, Any]:
     match = re.fullmatch(r"(\d{4})-(\d{2})", _nfkc(month))
     if not match:
         raise InvoiceModeError("対象月は YYYY-MM 形式で指定してください")
@@ -587,6 +637,16 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         if employee.get("partner_override") and employee.get("partner"):
             document["partner"] = employee["partner"]
         documents.append(document)
+
+    # 部門は jinjer のカスタム項目「給与計算関連」を正とする（経理モードと同じ元データ）。
+    # 引けなかった人だけ、売上簿の契約形態から作った値・既定値を使う。
+    jinjer_departments = load_departments(
+        {doc.get("employee_no") for doc in documents},
+        month_end.isoformat(), cache_path=custom_items_cache)
+    for document in documents:
+        from_jinjer = jinjer_departments.get(document.get("employee_no") or "")
+        if from_jinjer:
+            document["department"] = from_jinjer
 
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for document in documents:

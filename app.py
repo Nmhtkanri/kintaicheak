@@ -2820,6 +2820,10 @@ def route_invoice_preview():
             sales_book_template=Config.INVOICE_SALES_BOOK_TEMPLATE,
             master_csv=Config.INVOICE_MASTER_CSV,
             default_department=Config.INVOICE_DEFAULT_DEPARTMENT,
+            # 部門は経理モードと同じ jinjer カスタム項目から引く。
+            # 経理モードが作ったキャッシュがあれば API を叩かずに済む。
+            custom_items_cache=os.path.join(
+                Config.KEIRI_OUTPUT_DIR, "raw", "custom_items.json"),
         )
     except InvoiceModeError as exc:
         return jsonify({"success": False, "errors": [str(exc)]}), 400
