@@ -799,7 +799,10 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         employee_name = _nfkc(basis[0].get("employee_name")) if basis else ""
         employee_no = _nfkc(basis[0].get("employee_no")) if basis else ""
         partner = _nfkc(basis[0].get("partner") or basis[0].get("master_partner")) if basis else ""
-        department = _nfkc(basis[0].get("department")) if basis else _nfkc(default_department)
+        # 部門はjinjer・freeeの登録値そのままで出す。NFKCをかけると「OT：その他」の
+        # 全角コロンが半角になり、freeeの部門マスタと一致しなくなる。
+        department = (str(basis[0].get("department") or "").strip() if basis
+                      else str(default_department or "").strip())
         issue_date, issue_conflict = _common_value(basis, "issue_date")
         issue_date, issue_moved = _clamp_issue_date(issue_date, month_end)
         # freee は取引先を名前で照合するので、freee 側の正式名称に寄せてから出す。

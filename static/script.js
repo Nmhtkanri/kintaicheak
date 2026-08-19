@@ -3415,8 +3415,10 @@ function invoiceRenderRows() {
     invoiceState.rows.forEach((row, index) => {
         const commute = row._row_type === 'commute';
         const sourceNames = (row._sources || []).map(path => String(path).split(/[\\/]/).pop());
-        html += '<tr data-invoice-row="' + index + '">'
-            + '<td>' + (commute ? '交通費' : '本体') + '</td>'
+        html += '<tr data-invoice-row="' + index + '"'
+            // 手で足した行・分割した行は元PDFと突き合わせる必要があるので色で分かるようにする
+            + (row._manual_added ? ' style="background:#fffbe6"' : '') + '>'
+            + '<td>' + (commute ? '交通費' : row._manual_added ? '本体(手入力)' : '本体') + '</td>'
             + '<td>' + invoiceInput(index, '従業員') + '</td>'
             + '<td>' + invoiceInput(index, '管理番号', 'text', commute) + '</td>'
             + '<td>' + invoiceInput(index, '発生日', 'date', commute) + '</td>'
@@ -3475,6 +3477,26 @@ function invoiceRenderRows() {
         });
     });
     invoiceRevalidate();
+}
+
+// スポット案件など、共有フォルダのPDFからは拾えない請求分を手で足すための空行。
+// 発生日・支払期日・勘定科目・税区分だけ既定を入れておき、あとは人が埋める。
+function invoiceAddBlankRow() {
+    const sample = invoiceState.rows.find(row => row._row_type === 'main') || {};
+    invoiceState.rows.push({
+        '収支区分': '収入', '管理番号': '', '発生日': sample['発生日'] || '',
+        '支払期日': sample['支払期日'] || '', '取引先': '', '勘定科目': '売上高',
+        '税区分': '課税売上10%', '金額': '', '税計算区分': '内税', '税額': '',
+        '備考': '', '品目': '', '部門': '', 'メモタグ（複数指定可、カンマ区切り）': '',
+        '従業員': '',
+        _row_type: 'main', _group_id: 'manual-' + Date.now(), _sources: [],
+        _warnings: ['手で追加した行です。元の請求書と金額・税額を照合してください。'],
+        _errors: [], _manual_added: true,
+    });
+    document.getElementById('invoice-count-rows').textContent = String(invoiceState.rows.length);
+    document.getElementById('invoice-download-link').style.display = 'none';
+    document.getElementById('invoice-log-link').style.display = 'none';
+    invoiceRenderRows();
 }
 
 function invoiceRenderNotices(data) {
@@ -3554,6 +3576,11 @@ if (invoicePreviewBtn) {
             invoicePreviewBtn.disabled = false;
         }
     });
+}
+
+const invoiceAddRowBtn = document.getElementById('invoice-add-row-btn');
+if (invoiceAddRowBtn) {
+    invoiceAddRowBtn.addEventListener('click', invoiceAddBlankRow);
 }
 
 const invoiceExportBtn = document.getElementById('invoice-export-btn');

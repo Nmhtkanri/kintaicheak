@@ -644,8 +644,14 @@
                 赤い行はPDFから取れなかった項目があります。セルを修正すると再判定します。
                 交通費行はfreee見本どおり、取引先・日付等を空欄にした継続行で出力します。
                 複数人分が1枚に合算されている請求書は「複製」で行を増やし、氏名・管理番号・金額・税額を分けてください。
+                スポット案件などPDFを自動で拾えない請求分は「行を追加」で手入力できます（任意）。
             </div>
             <div id="invoice-preview-table" style="overflow-x:auto; margin-bottom:10px"></div>
+            <div style="margin-bottom:10px">
+                <button type="button" class="btn btn-secondary" id="invoice-add-row-btn"
+                        title="PDFから拾えないスポット案件などを手で足します">＋ 行を追加</button>
+                <span class="hint" style="margin-left:8px">追加した行は黄色で表示され、削除もできます</span>
+            </div>
             <div class="actions" style="padding:0">
                 <button type="button" class="btn btn-primary" id="invoice-export-btn" disabled>📥 freee CSVを作成</button>
                 <span id="invoice-export-status" class="status-text"></span>
