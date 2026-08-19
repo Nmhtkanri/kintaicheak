@@ -646,7 +646,9 @@
                 複数人分が1枚に合算されている請求書は「複製」で行を増やし、氏名・管理番号・金額・税額を分けてください。
                 スポット案件などPDFを自動で拾えない請求分は「行を追加」で手入力できます（任意）。
             </div>
-            <div id="invoice-preview-table" style="overflow-x:auto; margin-bottom:10px"></div>
+            <!-- 縦横ともこの枠の中でスクロールさせる。横スクロールバーが枠の下端＝
+                 常に画面内に出るので、人数が多くても下まで送らずに横へ動かせる。 -->
+            <div id="invoice-preview-table" class="invoice-scroll"></div>
             <div style="margin-bottom:10px">
                 <button type="button" class="btn btn-secondary" id="invoice-add-row-btn"
                         title="PDFから拾えないスポット案件などを手で足します">＋ 行を追加</button>

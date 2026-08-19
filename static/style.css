@@ -1211,3 +1211,50 @@ details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
     margin: 0 0 4px;
 }
 
+
+/* ===== 請求書モードのプレビュー表 =====
+   人数が多いので、①見出し行 ②左3列（区分・従業員・管理番号）を固定し、
+   ③横スクロールバーが常に画面内に出るよう枠の中でスクロールさせる。 */
+.invoice-scroll {
+    /* 枠の下端＝横スクロールバーが画面内に収まる高さ。
+       下まで送らずに横へ動かせるようにするのが狙い（2026-08 谷津さん要望）。 */
+    max-height: calc(100vh - 300px);
+    min-height: 220px;
+    overflow: auto;
+    margin-bottom: 10px;
+    border: 1px solid #e3e6ea;
+    border-radius: 4px;
+}
+/* sticky は border-collapse:collapse だと罫線が消えるので separate にする */
+.invoice-scroll .keiri-md-table {
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: 0;
+}
+.invoice-scroll .keiri-md-table th,
+.invoice-scroll .keiri-md-table td {
+    border: 0;
+    border-right: 1px solid #e3e6ea;
+    border-bottom: 1px solid #e3e6ea;
+    background: #fff;
+}
+.invoice-scroll .keiri-md-table th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f3edf9;
+}
+/* 左3列を固定。幅を決め打ちにして left のずらし量を合わせる */
+.invoice-scroll .keiri-md-table th:nth-child(1),
+.invoice-scroll .keiri-md-table td:nth-child(1) { position: sticky; left: 0;     width: 56px;  min-width: 56px; }
+.invoice-scroll .keiri-md-table th:nth-child(2),
+.invoice-scroll .keiri-md-table td:nth-child(2) { position: sticky; left: 56px;  width: 188px; min-width: 188px; }
+.invoice-scroll .keiri-md-table th:nth-child(3),
+.invoice-scroll .keiri-md-table td:nth-child(3) { position: sticky; left: 244px; width: 130px; min-width: 130px;
+                                                  box-shadow: 2px 0 4px rgba(0,0,0,.10); }
+.invoice-scroll .keiri-md-table td:nth-child(-n+3) { z-index: 2; }
+.invoice-scroll .keiri-md-table th:nth-child(-n+3) { z-index: 4; }  /* 見出し×固定列の角 */
+/* 固定列にも行の色を出す（縞・手入力行が左3列だけ白く抜けないように） */
+.invoice-scroll .keiri-md-table tr:nth-child(even) td { background: #fafafa; }
+.invoice-scroll .keiri-md-table tr.invoice-manual-row td { background: #fffbe6; }
+.invoice-scroll .invoice-cell-input { width: 100%; }

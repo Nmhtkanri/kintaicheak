@@ -3416,8 +3416,9 @@ function invoiceRenderRows() {
         const commute = row._row_type === 'commute';
         const sourceNames = (row._sources || []).map(path => String(path).split(/[\\/]/).pop());
         html += '<tr data-invoice-row="' + index + '"'
-            // 手で足した行・分割した行は元PDFと突き合わせる必要があるので色で分かるようにする
-            + (row._manual_added ? ' style="background:#fffbe6"' : '') + '>'
+            // 手で足した行・分割した行は元PDFと突き合わせる必要があるので色で分かるようにする。
+            // 固定列の背景も一緒に変える必要があるので、インラインstyleではなくクラスで持つ。
+            + (row._manual_added ? ' class="invoice-manual-row"' : '') + '>'
             + '<td>' + (commute ? '交通費' : row._manual_added ? '本体(手入力)' : '本体') + '</td>'
             + '<td>' + invoiceInput(index, '従業員') + '</td>'
             + '<td>' + invoiceInput(index, '管理番号', 'text', commute) + '</td>'

@@ -120,9 +120,13 @@ def test_build_preview_groups_main_and_commute(monkeypatch, tmp_path):
     assert len(got["rows"]) == 2
     main, commute = got["rows"]
     assert main["管理番号"] == "2017012"
-    assert main["金額"] == 891000
+    # 売上高は外税＝金額は税抜、税額は別欄（2026-08 谷津さん指定）
+    assert main["税計算区分"] == "外税"
+    assert main["金額"] == 810000, "891,000(税込) − 81,000 = 810,000(税抜)"
     assert main["税額"] == 81000
+    # 交通費だけ内税のまま
     assert commute["勘定科目"] == "売上高（交通費）"
+    assert commute["税計算区分"] == "内税"
     assert commute["金額"] == 5904
     assert commute["税額"] == 536
     assert not main["_errors"]
