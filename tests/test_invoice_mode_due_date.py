@@ -44,3 +44,16 @@ def test_unknown_rule_is_not_guessed():
 def test_no_csv_means_no_rules():
     assert im.load_due_date_rules(None) == {}
     assert im.load_due_date_rules("Z:/no/such/file.csv") == {}
+
+
+def test_resolve_months_later_rule():
+    """エリクソン様のように3か月先が期日になる取引先。
+
+    freeeの実データで 2026-05-31→08-31、06-30→09-30、07-31→10-31 と確認。
+    """
+    assert im.resolve_due_date("3か月後末", date(2026, 7, 31)) == "2026-10-31"
+    assert im.resolve_due_date("3ヶ月後末", date(2026, 6, 30)) == "2026-09-30"
+    assert im.resolve_due_date("翌々々月末", date(2026, 5, 31)) == "2026-08-31"
+    assert im.resolve_due_date("3か月後10日", date(2026, 7, 31)) == "2026-10-10"
+    # 年をまたぐ
+    assert im.resolve_due_date("3か月後末", date(2026, 11, 30)) == "2027-02-28"

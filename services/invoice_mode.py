@@ -522,9 +522,17 @@ def load_due_date_rules(csv_path: os.PathLike[str] | str | None = None) -> dict[
 
 
 def resolve_due_date(rule: str, month_end: date) -> str:
-    """支払期日ルールを対象月の末日から解決する。解釈できなければ空を返す。"""
+    """支払期日ルールを対象月の末日から解決する。解釈できなければ空を返す。
+
+    書き方: 当月末 / 翌月末 / 翌々月末 / 翌月10日 / 3か月後末 / 3か月後10日 など。
+    「Nか月後」はエリクソン様のように3か月先が期日になる取引先のために置いている
+    （freeeの実データで 2026-05→08-31、06→09-30、07→10-31 と確認）。
+    """
     text = _nfkc(rule).strip()
-    offsets = {"当月": 0, "翌月": 1, "翌々月": 2}
+    offsets = {"当月": 0, "翌月": 1, "翌々月": 2, "翌々々月": 3}
+    months_match = re.match(r"(\d{1,2})\s*(?:か|ヶ|ケ|カ)月後", text)
+    if months_match:
+        offsets = {months_match.group(0): int(months_match.group(1))}
     for label, offset in offsets.items():
         if not text.startswith(label):
             continue
