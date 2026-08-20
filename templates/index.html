@@ -564,6 +564,17 @@
                 <div class="summary-card"><div class="card-label">要確認の件数</div><div class="card-value" id="keiri-cnt-alert">0</div></div>
                 <div class="summary-card"><div class="card-label">経費転記の分解</div><div class="card-value" id="keiri-cnt-keihi">0</div></div>
             </div>
+            <!-- 対象外(全期間ゼロ)のはずの項目に金額が出た＝jinjerの項目移設の疑い。
+                 2026-08 に調整手当の移設で105名275万円がCSVから落ちた再発防止（見せ方の修正） -->
+            <div id="keiri-newusage-area" style="display:none; margin-bottom:10px; padding:10px;
+                 border:1px solid #e0b0b0; border-radius:4px; background:#fff8f8">
+                <div style="font-weight:bold; margin-bottom:4px">⚠️ 対象外のはずの項目に金額があります（freee CSVには入っていません）</div>
+                <div class="hint" style="margin-bottom:6px">
+                    jinjer側で支給項目が移設された疑いがあります。このままだと該当金額はCSVから丸ごと落ちます。
+                    <span id="keiri-newusage-master" style="display:block; margin-top:2px; opacity:.8"></span>
+                </div>
+                <div id="keiri-newusage-rows"></div>
+            </div>
             <div id="keiri-files" style="margin-bottom:10px"></div>
             <div id="keiri-diff-area" style="display:none; margin-bottom:10px">
                 <div style="font-weight:bold; margin-bottom:4px">最終CSVとの差分</div>

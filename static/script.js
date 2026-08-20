@@ -1792,6 +1792,34 @@ document.querySelectorAll('.keiri-tab').forEach(btn => {
 });
 
 /** 「その他」の保留者を入力フォームで描く（無ければ枠ごと隠す）。 */
+/** 対象外(全期間ゼロ)のはずの項目に金額が出た検知を赤枠で出す。
+ *  2026-08 の調整手当移設（105名275万円欠落）は、要確認mdの奥に1行出ただけで
+ *  見落とされた。人数・金額つきでサマリー直下に出すのが再発防止の本体。 */
+function keiriRenderNewUsage(data) {
+    const area = document.getElementById('keiri-newusage-area');
+    const rows = document.getElementById('keiri-newusage-rows');
+    if (!area || !rows) return;
+    const pending = data.new_usage_pending || [];
+    if (!pending.length) { area.style.display = 'none'; rows.innerHTML = ''; return; }
+
+    const masterEl = document.getElementById('keiri-newusage-master');
+    if (masterEl) masterEl.textContent =
+        '対応: マッピングマスタ（' + (data.master_csv || '') + '）の該当行を直して再実行してください（exe再ビルド不要）';
+
+    let html = '<table class="keiri-md-table"><tr><th>支給月</th><th>項目ID</th><th>項目名</th>'
+             + '<th>人数</th><th>合計金額</th></tr>';
+    pending.forEach(g => {
+        html += '<tr><td>' + mailEsc(g.month) + '</td>'
+              + '<td>' + mailEsc(g.source_key) + '</td>'
+              + '<td>' + mailEsc(g.label) + '</td>'
+              + '<td style="text-align:right">' + Number(g.persons).toLocaleString() + '名</td>'
+              + '<td style="text-align:right; color:#c00; font-weight:bold">'
+              + Number(g.total).toLocaleString() + '円</td></tr>';
+    });
+    rows.innerHTML = html + '</table>';
+    area.style.display = 'block';
+}
+
 function keiriRenderSonota(data) {
     const area = document.getElementById('keiri-sonota-area');
     const rows = document.getElementById('keiri-sonota-rows');
@@ -1888,12 +1916,16 @@ if (keiriRunBtn) {
             document.getElementById('keiri-cnt-emp').textContent = data.employees;
             document.getElementById('keiri-paid-on').textContent = data.paid_on || '—';
             const alerts = data.alerts || {};
+            // 「対象外項目の新規使用」は2026-08の欠落障害までこの集計に入っておらず、
+            // 検知が出ても画面のどこにも数字が現れなかった。必ず足すこと。
             document.getElementById('keiri-cnt-alert').textContent =
                 (alerts['備考の手入力が必要'] || 0) + (alerts['未収入金の候補'] || 0)
-                + (alerts['経費転記で保留'] || 0) + (alerts['部門未知値'] || 0);
+                + (alerts['経費転記で保留'] || 0) + (alerts['部門未知値'] || 0)
+                + (alerts['対象外項目の新規使用'] || 0);
             document.getElementById('keiri-cnt-keihi').textContent = alerts['経費転記の分解'] || 0;
             keiriRenderFiles(data);
             keiriRenderDiff(data);
+            keiriRenderNewUsage(data);
             keiriRenderSonota(data);
             document.getElementById('keiri-pane-yokakunin').innerHTML = keiriRenderMarkdown(data.yokakunin_md);
             document.getElementById('keiri-pane-kensan').innerHTML = keiriRenderMarkdown(data.kensan_md);

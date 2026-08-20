@@ -141,6 +141,10 @@ class Config:
         "KEIRI_SONOTA_MANUAL_CSV", r"Z:\API連携\docs\経理モード_その他手入力.csv")
     KEIRI_KEIHI_MAPPING_CSV = os.environ.get(
         "KEIRI_KEIHI_MAPPING_CSV", r"Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv")
+    # 「対象外(全期間ゼロ)」のはずの項目に金額を検知したとき、freee CSV の生成を止めるか。
+    # 既定は警告のみ（誤検知の頻度が読めないため。実績を見て切り替える。2026-08-20 谷津さん指定）
+    KEIRI_NEW_USAGE_BLOCK = os.environ.get(
+        "KEIRI_NEW_USAGE_BLOCK", "0").lower() in ("1", "true", "yes")
     # C-4 の分解材料（経費利用履歴 RevN.xlsm）と、突合先の経理最終CSV。どちらも {M}月 フォルダ配下
     KEIRI_KEIHI_BOOK_DIR = os.environ.get("KEIRI_KEIHI_BOOK_DIR", r"Y:\給与明細\R8年")
     KEIRI_FINAL_CSV_DIR = os.environ.get("KEIRI_FINAL_CSV_DIR", r"Y:\給与明細\R8年")

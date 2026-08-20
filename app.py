@@ -2807,6 +2807,8 @@ def route_keiri_run():
         "sonota_pending": result["sonota_pending"],
         "sonota_choices": result["sonota_choices"],
         "sonota_manual_csv": result["sonota_manual_csv"],
+        # 対象外(全期間ゼロ)のはずの項目に金額が出た検知（jinjerの項目移設の疑い）
+        "new_usage_pending": result.get("new_usage_pending", []),
     }
 
     if (request.form.get("run_diff") or "1") == "1":

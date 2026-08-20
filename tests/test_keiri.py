@@ -11,10 +11,12 @@ import unittest
 from collections import defaultdict
 
 from services.keiri_engine import (GENBUTSU_KEY, KEIHI_TENKI_KEY, KYUSHOKU_BIKO, MASTER_CSV,
-                                   Resolver, YAKUIN_LOAN, build_kensan, build_kyuyo, calc_zantei,
-                                   is_shaho_menjo, is_shaho_menjo_prev, jp_date, load_master,
-                                   load_sonota_manual, master_skipped_report, save_sonota_manual,
-                                   split_halves, split_shaho_chosei, ym_add)
+                                   KeiriNewUsageError, Resolver, YAKUIN_LOAN, ZENKIKAN_ZERO,
+                                   build_kensan, build_kyuyo, calc_zantei, check_new_usage,
+                                   enforce_new_usage_block, is_shaho_menjo, is_shaho_menjo_prev,
+                                   jp_date, load_master, load_sonota_manual,
+                                   master_skipped_report, save_sonota_manual, split_halves,
+                                   split_shaho_chosei, summarize_new_usage, ym_add)
 from services.keiri_keihi_tenki import (MAPPING_CSV, classify, decompose, decompose_rows,
                                         load_mapping)
 
@@ -301,6 +303,143 @@ class ChoseiTeateMoveTests(unittest.TestCase):
         key = "salary_items:allowance12"
         pi = self._pi(key, 25000, label="給与支給項目12")
         self.assertEqual(calc_zantei(pi, self._master(key)), 25000)
+
+
+class NewUsageDetectTests(unittest.TestCase):
+    """『対象外(全期間ゼロ)』項目の新規使用検知（2026-08 の調整手当欠落の再発防止）。
+
+    検知は警告のみで、金額計算・CSV出力には1円も影響しないことまで見る。
+    データはすべて架空（実在の社員番号・氏名・実データファイル・APIは使わない）。
+    """
+
+    EXCLUDED_KEY = "salary_items:allowance99"
+
+    def _master(self, evidence=f"{ZENKIKAN_ZERO}（構造）", target_file="対象外"):
+        return {"by_key": {self.EXCLUDED_KEY: [
+            {"target_file": target_file, "evidence": evidence}]}}
+
+    def _pi(self, value, item_id="allowance99", label="謎手当"):
+        return {"salary_items": [{"id": item_id, "value": value, "label": label}]}
+
+    def _alerts(self):
+        return {"new_usage": set(), "watch_used": set()}
+
+    def test_detects_amount_on_excluded_item_with_persons_and_total(self):
+        """対象外(全期間ゼロ)項目に金額 → 人数・合計つきで検知される。"""
+        alerts = self._alerts()
+        st = {"2099001": self._pi(10000), "2099002": self._pi(2500)}
+        check_new_usage(self._master(), {"2026-08": st}, alerts)
+        got = summarize_new_usage(alerts)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["month"], "2026-08")
+        self.assertEqual(got[0]["source_key"], self.EXCLUDED_KEY)
+        self.assertEqual(got[0]["persons"], 2)
+        self.assertEqual(got[0]["total"], 12500)
+
+    def test_two_months_are_summarized_separately(self):
+        """当月＋前月を回しても月別に集計され、人数が二重にならない。"""
+        alerts = self._alerts()
+        check_new_usage(self._master(), {"2026-08": {"2099001": self._pi(10000)},
+                                         "2026-07": {"2099001": self._pi(8000)}}, alerts)
+        got = {g["month"]: g for g in summarize_new_usage(alerts)}
+        self.assertEqual(set(got), {"2026-07", "2026-08"})
+        self.assertEqual(got["2026-08"]["persons"], 1)
+        self.assertEqual(got["2026-08"]["total"], 10000)
+        self.assertEqual(got["2026-07"]["total"], 8000)
+
+    def test_all_zero_is_not_detected(self):
+        """対象外項目がすべてゼロなら検知しない（誤検知しない）。"""
+        alerts = self._alerts()
+        check_new_usage(self._master(), {"2026-08": {"2099001": self._pi(0)}}, alerts)
+        self.assertEqual(alerts["new_usage"], set())
+        self.assertEqual(summarize_new_usage(alerts), [])
+
+    def test_amount_on_active_item_is_not_detected(self):
+        """対象外でない項目（target_file=給与）に金額があっても検知しない。"""
+        alerts = self._alerts()
+        check_new_usage(self._master(target_file="給与"),
+                        {"2026-08": {"2099001": self._pi(10000)}}, alerts)
+        self.assertEqual(alerts["new_usage"], set())
+
+    def test_excluded_without_zenkikan_zero_is_not_detected(self):
+        """対象外でも evidence に『全期間ゼロ』が無い行（構造判定など）は対象外。"""
+        alerts = self._alerts()
+        check_new_usage(self._master(evidence="構造判定"),
+                        {"2026-08": {"2099001": self._pi(10000)}}, alerts)
+        self.assertEqual(alerts["new_usage"], set())
+
+    def test_detection_does_not_change_kyuyo_output(self):
+        """検知の有無で生成されるCSVの内容が1行も変わらない（警告が出力に影響しない）。"""
+        master = dict(KyuyoLayoutTests.MASTER)
+        st_m = {"2099001": KyuyoLayoutTests._pi(base=200000)}
+        # 対象外項目に金額を足した入力（検知が出る状態）でも、
+        # build_kyuyo は採用行しか見ないので出力は同じになる
+        st_with = {"2099001": KyuyoLayoutTests._pi(base=200000)}
+        st_with["2099001"]["salary_items"].append(
+            {"id": "allowance99", "value": 12345, "label": "謎手当"})
+
+        def run(st, alerts):
+            resolver = Resolver({}, alerts, {})
+            ridx = {e: {"name": f"社員{e}"} for e in st}
+            return build_kyuyo("2026-07", "2026-06", st, {}, ridx, resolver, master,
+                               "2026-07-25", alerts)
+
+        detect_alerts = defaultdict(set)
+        check_new_usage(self._master(), {"2026-07": st_with}, detect_alerts)
+        self.assertTrue(detect_alerts["new_usage"])   # 検知は出ている
+
+        tx_plain = run(st_m, defaultdict(set))
+        tx_detected = run(st_with, detect_alerts)     # 検知済み alerts を渡しても
+        self.assertEqual(tx_plain, tx_detected)       # 出力は完全一致
+
+    def test_check_is_read_only(self):
+        """check_new_usage は入力（給与データ・マスタ）を書き換えない。"""
+        import copy
+        master = self._master()
+        st = {"2099001": self._pi(10000)}
+        master_before, st_before = copy.deepcopy(master), copy.deepcopy(st)
+        check_new_usage(master, {"2026-08": st}, self._alerts())
+        self.assertEqual(master, master_before)
+        self.assertEqual(st, st_before)
+
+    def test_block_flag_stops_before_csv_and_default_is_warn_only(self):
+        """KEIRI_NEW_USAGE_BLOCK オンなら日本語エラーで停止、既定（オフ）は止まらない。"""
+        from unittest import mock
+
+        from config import Config
+        pending = [{"month": "2026-08", "source_key": self.EXCLUDED_KEY,
+                    "label": "謎手当", "persons": 2, "total": 12500}]
+        self.assertFalse(Config.KEIRI_NEW_USAGE_BLOCK)          # 既定は警告のみ
+        enforce_new_usage_block(pending, "dummy.csv")            # オフ → 素通り
+        with mock.patch.object(Config, "KEIRI_NEW_USAGE_BLOCK", True):
+            enforce_new_usage_block([], "dummy.csv")             # 検知ゼロなら止まらない
+            with self.assertRaises(KeiriNewUsageError) as cm:
+                enforce_new_usage_block(pending, "dummy.csv")
+            self.assertIn("謎手当", str(cm.exception))
+            self.assertIn("2名", str(cm.exception))
+            self.assertIn("12,500円", str(cm.exception))
+
+
+class MasterZenkikanZeroSpellingTests(unittest.TestCase):
+    """実マスタCSVの『全期間ゼロ』表記がコードの定数と一致し続けることを守る。
+
+    判定はコード中の1定数（ZENKIKAN_ZERO）と evidence 列の部分一致なので、
+    CSV側の表記が揺れると検知が黙って消える。ここが最後の砦。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(MASTER_CSV):
+            raise unittest.SkipTest(f"マッピングマスタが参照できません: {MASTER_CSV}")
+        cls.master = load_master(MASTER_CSV, "確定")
+
+    def test_master_csv_still_uses_the_expected_spelling(self):
+        hits = [key for key, rows in self.master["by_key"].items()
+                if rows and all(r["target_file"] == "対象外" and ZENKIKAN_ZERO in r.get("evidence", "")
+                                for r in rows)]
+        self.assertGreater(len(hits), 0,
+                           f"『対象外』かつ evidence に「{ZENKIKAN_ZERO}」を含む行が実CSVに1件も無い。"
+                           "表記が変わったなら ZENKIKAN_ZERO 定数も合わせて直すこと")
 
 
 class MinashiKyuMonthCutoffTests(unittest.TestCase):

@@ -27,6 +27,7 @@ import csv
 import glob
 import io
 import json
+import logging
 import os
 from collections import Counter, defaultdict
 from decimal import ROUND_HALF_UP, Decimal
@@ -51,6 +52,8 @@ from services.keiri_keihi_tenki import decompose_rows as keihi_decompose_rows
 from services.keiri_keihi_tenki import find_book as keihi_find_book
 from services.keiri_keihi_tenki import load_details as keihi_load_details
 from services.keiri_keihi_tenki import load_mapping as keihi_load_mapping
+
+logger = logging.getLogger(__name__)
 
 MASTER_CSV = Config.KEIRI_MASTER_CSV
 KEIHI_MAPPING_CSV = Config.KEIRI_KEIHI_MAPPING_CSV
@@ -226,6 +229,10 @@ SONOTA_MANUAL_EXTRA_CHOICES = [
 ]
 # 台帳の選択肢に出さない勘定科目（自動生成の行が担当していて手入力の出番が無いもの）
 SONOTA_MANUAL_HIDDEN_ACCOUNTS = {"預り金", "法定福利費", "役員貸付金", "受取利息", "仮払金"}
+
+# 「対象外(全期間ゼロ)」をマスタCSVの evidence 列で表す部分文字列。判定はこの1定数に集約する。
+# CSV側の表記が揺れると検知が黙って消えるため、実CSVとの整合を test_keiri.py で守っている。
+ZENKIKAN_ZERO = "全期間ゼロ"
 
 # 対象外にしたが値が出たら知らせてほしい項目（マスタの判断が正しいかを毎月見張る）
 WATCH_KEYS = {
@@ -1188,8 +1195,21 @@ def write_freee_csv(path, transactions):
 # ---------------------------------------------------------------------------
 # アラート・検算
 # ---------------------------------------------------------------------------
+class KeiriNewUsageError(ValueError):
+    """対象外(全期間ゼロ)項目に金額を検知し、設定でブロックが有効なときの停止用。
+
+    ValueError 継承なので /keiri_run の既存ハンドラが 400 でメッセージをそのまま画面に出す。
+    """
+
+
 def check_new_usage(master, st_maps, alerts):
-    """マスタで『対象外(全期間ゼロ)』の項目に値が出ていないか（新規使用の検知網）。"""
+    """マスタで『対象外(全期間ゼロ)』の項目に値が出ていないか（新規使用の検知網）。
+
+    2026-08-10 に jinjer が調整手当を allowance15→12 へ移設し、対象外扱いのまま
+    105名 2,753,290円が freee CSV から落ちた。検知は出ていたが人数・金額が無く
+    重大さが伝わらなかったため、社員番号と金額まで持つ（watch_used と同形）。
+    読むだけで金額計算には一切関与しない。
+    """
     for ym, st in st_maps.items():
         for emp, pi in st.items():
             for atype in ("salary_items", "salary_deduction_items", "salary_other_items"):
@@ -1199,11 +1219,44 @@ def check_new_usage(master, st_maps, alerts):
                         continue
                     key = f"{atype}:{it.get('id')}"
                     rows = master["by_key"].get(key, [])
-                    if rows and all(r["target_file"] == "対象外" and "全期間ゼロ" in r.get("evidence", "")
+                    if rows and all(r["target_file"] == "対象外" and ZENKIKAN_ZERO in r.get("evidence", "")
                                     for r in rows):
-                        alerts["new_usage"].add((key, str(it.get("label")), ym))
+                        alerts["new_usage"].add((key, str(it.get("label")), ym, emp, int(n)))
                     if key in WATCH_KEYS:
                         alerts["watch_used"].add((key, ym, emp, int(n)))
+
+
+def summarize_new_usage(alerts):
+    """new_usage（5タプル）を (支給月, 項目) 単位の人数・合計金額へ集計する。
+
+    check_new_usage は当月と前月の2か月を回すため、月で分けないと人数が二重になる。
+    画面（/keiri_run の new_usage_pending）と要確認mdの両方がこの形を使う。
+    """
+    agg = {}
+    for key, label, ym, emp, n in alerts["new_usage"]:
+        g = agg.setdefault((ym, key), {"month": ym, "source_key": key, "label": label,
+                                       "emps": set(), "total": 0})
+        g["emps"].add(emp)
+        g["total"] += n
+    return [{"month": agg[k]["month"], "source_key": agg[k]["source_key"],
+             "label": agg[k]["label"], "persons": len(agg[k]["emps"]),
+             "total": agg[k]["total"]}
+            for k in sorted(agg)]
+
+
+def enforce_new_usage_block(new_usage_pending, master_csv_path):
+    """ブロック設定（Config.KEIRI_NEW_USAGE_BLOCK）が有効なら、検知時にCSVを書かずに止める。
+
+    既定はオフ＝警告のみ（誤検知の頻度が読めないため。実績を見て切り替える）。
+    """
+    if not new_usage_pending or not Config.KEIRI_NEW_USAGE_BLOCK:
+        return
+    raise KeiriNewUsageError(
+        "対象外(全期間ゼロ)のはずの項目に金額が入っています: "
+        + "、".join(f"{g['month']} {g['label']}（{g['source_key']}）{g['persons']}名 計{g['total']:,}円"
+                    for g in new_usage_pending)
+        + f"。マッピングマスタ（{master_csv_path}）を直して再実行してください"
+        "（KEIRI_NEW_USAGE_BLOCK=0 にすると警告のみで生成できます）")
 
 
 def detect_midmonth(histories, month, prev, alerts):
@@ -1358,6 +1411,27 @@ def detect_juminzei_shokai(st_m, st_prev, ridx, alerts):
 def build_yokakunin(month, alerts, master):
     lines = [f"# 要確認リスト {ym_compact(month)}（C-2）", ""]
     lines += ["## 骨格の未実装（TODO）", ""] + [f"- {t}" for t in SKELETON_TODOS]
+    # 新規使用検知は md の先頭に置く。2026-08 の調整手当移設では 20番目の節（207行目）に
+    # 埋もれて見落とされ、105名 2,753,290円が freee CSV から落ちた。
+    lines += ["", "## ⚠️ 『対象外(全期間ゼロ)』項目の新規使用検知", "",
+              "対象外のはずの支給項目に実際の金額が入っている＝jinjer側の項目移設の疑い。"
+              "放置するとその金額は **freee CSVから丸ごと落ちる**（2026-08の調整手当で実害105名275万円）。"
+              f"検知したら `{Config.KEIRI_MASTER_CSV}` を直して再実行すること（exe再ビルド不要）。", ""]
+    new_usage = summarize_new_usage(alerts)
+    if new_usage:
+        for g in new_usage:
+            lines.append(f"- {g['month']}: {g['label']}（{g['source_key']}）に値 → "
+                         f"**{g['persons']}名・計 {g['total']:,}円** マスタ再マッピングが必要")
+        by_group = defaultdict(list)
+        for key, _label, ym, emp, n in sorted(alerts["new_usage"]):
+            by_group[(ym, key)].append((emp, n))
+        for (ym, key), items in sorted(by_group.items()):
+            shown = sorted(items)[:10]
+            rest = len(items) - len(shown)
+            lines.append(f"  - {ym} {key}: " + "、".join(f"{e}({n:,})" for e, n in shown)
+                         + (f" ほか{rest}名" if rest > 0 else ""))
+    else:
+        lines.append("- なし")
     lines += ["", "## ⚠️ 未収入金・未払金の候補（B8: 手で追加が必要）", "",
               "急な退職等で社保を給与から徴収しきれない場合、経理が未収入金として手計上している。"
               "システム化対象外のため、下記に該当者がいれば手で行を追加すること。", ""]
@@ -1560,12 +1634,6 @@ def build_yokakunin(month, alerts, master):
             lines.append(f"- {emp}: 「{v}」")
     else:
         lines.append("- なし")
-    lines += ["", "## 『対象外(全期間ゼロ)』項目の新規使用検知", ""]
-    if alerts["new_usage"]:
-        for key, label, ym in sorted(alerts["new_usage"]):
-            lines.append(f"- {ym}: {label}（{key}）に値 → マスタ再マッピングが必要")
-    else:
-        lines.append("- なし")
     lines += ["", "## 見張り項目に値が出た（対象外の判断が正しいか確認）", ""]
     if alerts["watch_used"]:
         for key, reason in sorted(WATCH_KEYS.items()):
@@ -1672,6 +1740,14 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
     detect_mishunyukin(st_m, st_prev, ridx, alerts)
     detect_juminzei_shokai(st_m, st_prev, ridx, alerts)   # 住民税の相殺判定に先立って実行する
 
+    # 対象外(全期間ゼロ)項目の新規使用: 実行ログに残し、ブロック設定時はCSV書き出し前に止める。
+    # 警告のみ（既定）のときは計算・出力に一切影響しない。
+    new_usage_pending = summarize_new_usage(alerts)
+    for g in new_usage_pending:
+        logger.warning("対象外(全期間ゼロ)項目に金額: %s %s（%s） %d名 計%s円",
+                       g["month"], g["label"], g["source_key"], g["persons"], f"{g['total']:,}")
+    enforce_new_usage_block(new_usage_pending, master_csv or MASTER_CSV)
+
     mc, pc = ym_compact(month), ym_compact(prev)
     out_dir = os.path.join(out_base, mc)
     os.makedirs(out_dir, exist_ok=True)
@@ -1710,11 +1786,13 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
             for emp, name, amt, bumon, det_total in sorted(alerts["keihi_tenki"],
                                                            key=lambda x: (x[0], x[1]))],
         "sonota_choices": sonota_manual_choices(master, keihi_mapping),
+        # 画面の赤枠警告用: 対象外(全期間ゼロ)項目に金額が出た検知（月×項目ごとに人数・合計）
+        "new_usage_pending": new_usage_pending,
         "alerts": {
             "月中異動検知": len(alerts["midmonth"]),
             "部門未解決": len(alerts["bumon_missing"]),
             "部門未知値": len(alerts["bumon_unknown"]),
-            "対象外項目の新規使用": len(alerts["new_usage"]),
+            "対象外項目の新規使用": len(new_usage_pending),
             "経費転記の分解": len(alerts["keihi_bunkai"]),
             "経費転記で保留": len(alerts["keihi_tenki"]),
             "その他を台帳から計上": len(alerts["keihi_manual"]),
