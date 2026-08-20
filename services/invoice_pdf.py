@@ -73,8 +73,12 @@ def load_settings(csv_path: os.PathLike[str] | str) -> list[dict[str, str]]:
     """1人1行の設定を読む。
 
     列:
-        取引先, 氏名, 請求書Excel, シート名, 勤怠フォルダ, 勤怠ファイル, 出力フォルダ, 出力ファイル名
+        対象, 取引先, 氏名, 請求書Excel, シート名, 勤怠フォルダ, 勤怠ファイル,
+        出力フォルダ, 出力ファイル名
     値には {YYYY} {YY} {MM} {M} {FY} が使える。勤怠ファイルは glob（* が使える）。
+
+    「対象」を 0 にした行は読み飛ばす（画面でチェックを外した人）。列そのものが
+    無い古いCSVでも読めるよう、空欄と列なしは対象として扱う。
     """
     import csv
     import io
@@ -90,7 +94,10 @@ def load_settings(csv_path: os.PathLike[str] | str) -> list[dict[str, str]]:
             continue
     else:
         raise InvoicePdfError(f"設定CSVの文字コードが読めません: {path}")
-    return [r for r in rows if (r.get("氏名") or "").strip()]
+    return [r for r in rows
+            if (r.get("氏名") or "").strip()
+            and (r.get("対象") or "1").strip().casefold()
+            not in {"0", "false", "no", "対象外", "無効"}]
 
 
 def plan(month: str, settings: Sequence[dict[str, str]]) -> list[BuildPlan]:

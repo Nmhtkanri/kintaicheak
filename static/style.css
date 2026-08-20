@@ -1271,3 +1271,152 @@ details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
 .invoice-scroll .keiri-md-table tr:nth-child(even) td { background: #fafafa; }
 .invoice-scroll .keiri-md-table tr.invoice-manual-row td { background: #fffbe6; }
 .invoice-scroll .invoice-cell-input { width: 100%; }
+
+/* ============================================================
+   請求書モード: 見るフォルダの一覧（2026-08-20）
+   経費モードのSAP台帳の枠に合わせた見た目にしている。
+   ============================================================ */
+.folders-box {
+    border: 1px solid #ccd4db;
+    border-radius: 6px;
+    padding: 11px 13px 13px;
+    margin-top: 10px;
+    background: #fcfdfe;
+}
+.folders-meta { font-size: 12px; color: #6b7783; line-height: 1.9; }
+.folders-meta code {
+    font-size: 11.5px;
+    background: #eef2f6;
+    border: 1px solid #dde4ea;
+    color: #334;
+    border-radius: 3px;
+    padding: 1px 5px;
+    word-break: break-all;
+}
+
+/* タブ */
+.folders-tabs {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin: 12px 0 0;
+    border-bottom: 2px solid #d7dee5;
+}
+.folders-tab {
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: bold;
+    padding: 7px 13px;
+    cursor: pointer;
+    background: #eef1f4;
+    color: #55606b;
+    border: 1px solid #d7dee5;
+    border-bottom: 0;
+    border-radius: 6px 6px 0 0;
+    margin-bottom: -2px;
+}
+.folders-tab[aria-selected="true"] {
+    background: #fff;
+    color: #7030a0;
+    border-bottom: 2px solid #fff;
+}
+.folders-tab .cnt { font-weight: normal; color: #6b7783; font-size: 11.5px; }
+.folders-tab[aria-selected="true"] .cnt { color: #7030a0; }
+
+/* 一覧本体。縦横ともこの枠の中でスクロールさせる */
+.folders-gridwrap {
+    overflow: auto;
+    max-height: 420px;
+    border: 1px solid #d7dee5;
+    border-top: 0;
+    background: #fff;
+}
+.folders-grid { border-collapse: collapse; width: 100%; min-width: 900px; font-size: 12px; }
+.folders-grid th,
+.folders-grid td {
+    border-bottom: 1px solid #e7ecf0;
+    padding: 5px 8px;
+    text-align: left;
+    vertical-align: middle;
+}
+.folders-grid thead th {
+    background: #f3f6f9;
+    color: #45505b;
+    font-size: 11px;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+.folders-grid tbody tr:hover td { background: #f8fbfe; }
+.folders-grid td.c { text-align: center; }
+.folders-grid td.nowrap, .folders-grid th.nowrap { white-space: nowrap; }
+.folders-grid tr.folders-group td {
+    background: #f6f2fa;
+    font-weight: bold;
+    color: #7030a0;
+    font-size: 11.5px;
+    position: sticky;
+    top: 22px;
+    z-index: 1;
+}
+.folders-grid tr.folders-new td { background: #fffbe6; }
+.folders-grid tr.folders-off td { background: #f5f6f7; color: #8a929a; }
+
+.folders-input {
+    font-family: inherit;
+    font-size: 11.5px;
+    width: 100%;
+    min-width: 230px;
+    padding: 3px 6px;
+    border: 1px solid #dbe2e8;
+    border-radius: 4px;
+    background: #fff;
+    color: #333;
+}
+.folders-input.w-lg { min-width: 340px; }
+.folders-input.w-sm { min-width: 110px; }
+.folders-input:focus {
+    outline: 2px solid #b8d7ee;
+    outline-offset: -1px;
+    border-color: #2980b9;
+}
+.folders-input.is-empty { border-color: #f0c2bd; background: #fdecea; }
+
+.folders-del {
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid #f0c2bd;
+    background: #fdecea;
+    color: #b3372a;
+    cursor: pointer;
+    font-family: inherit;
+}
+.folders-del:hover { opacity: .85; }
+
+/* 状態バッジ */
+.folders-state {
+    display: inline-block;
+    font-size: 11px;
+    padding: 0 7px;
+    border-radius: 9px;
+    border: 1px solid;
+    line-height: 1.7;
+    white-space: nowrap;
+}
+.folders-state.ok   { color: #1e6f36; background: #e6f4ea; border-color: #c3e6cb; }
+.folders-state.warn { color: #7a5c00; background: #fdf6e3; border-color: #e0b84a; }
+.folders-state.stop { color: #b3372a; background: #fdecea; border-color: #f0c2bd; }
+.folders-state.info { color: #1e5b8a; background: #e8f4fd; border-color: #b8d7ee; }
+.folders-state.off  { color: #6c757d; background: #f4f6f8; border-color: #dee2e6; }
+.folders-state.none { color: #97a1ab; background: #fff; border-color: #e2e7ec; }
+
+.folders-actions {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 11px;
+}
+.folders-note { font-size: 11.5px; color: #97a1ab; }

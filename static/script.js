@@ -3764,3 +3764,394 @@ async function invoicePdfRun(partner, force) {
     const forceBtn = document.getElementById('invoice-pdf-force');
     if (forceBtn) forceBtn.addEventListener('click', () => invoicePdfRun(partner, true));
 }
+
+// ============================================================
+// 請求書モード: 見るフォルダの一覧（2026-08-20）
+//   勤怠フォルダ／請求書作成Excel／請求書格納フォルダ の3分類で見せる。
+//   実体は PDF作成設定CSV（人単位）と 対象フォルダCSV（会社単位）の2本で、
+//   ③のタブだけ「人単位の出力先」と「会社単位の探索ルート」が同居する。
+// ============================================================
+const invoiceFoldersState = {
+    loaded: false, loading: false,
+    people: [], roots: [], signatures: {},
+    writable: false, writeMessage: '',
+    tab: 'kintai', dirty: false, checkedMonth: ''
+};
+
+// タブごとに出す列。people は3タブ共通で「対象・取引先・氏名」＋2列＋状態。
+const INVOICE_FOLDERS_TABS = {
+    kintai: { cols: ['勤怠フォルダ', '勤怠ファイル'],
+              heads: ['勤怠フォルダ', '勤怠ファイル名（* が使えます）'] },
+    excel:  { cols: ['請求書Excel', 'シート名'],
+              heads: ['請求書Excel', 'シート名'] },
+    output: { cols: ['出力フォルダ', '出力ファイル名'],
+              heads: ['フォルダ', '出力ファイル名'] }
+};
+
+const INVOICE_FOLDERS_PERSON_KEYS = ['取引先', '氏名', '請求書Excel', 'シート名',
+                                     '勤怠フォルダ', '勤怠ファイル', '出力フォルダ', '出力ファイル名'];
+
+function invoiceFoldersSetStatus(text, tone) {
+    const el = document.getElementById('invoice-folders-status');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = tone === 'error' ? '#b3372a' : (tone === 'ok' ? '#1e6f36' : '');
+}
+
+function invoiceFoldersMarkDirty(dirty) {
+    invoiceFoldersState.dirty = dirty;
+    const save = document.getElementById('invoice-folders-save');
+    if (save) save.disabled = !dirty || !invoiceFoldersState.writable;
+}
+
+function invoiceFoldersStateCell(state) {
+    if (!state) return '<span class="folders-state none">未確認</span>';
+    return '<span class="folders-state ' + escapeHtml(state.level) + '" title="'
+        + escapeHtml(state.detail || '') + '">' + escapeHtml(state.text) + '</span>';
+}
+
+function invoiceFoldersInput(kind, index, field, value, cls) {
+    const empty = !String(value || '').trim();
+    return '<input class="folders-input ' + (cls || '') + (empty ? ' is-empty' : '')
+        + '" data-kind="' + kind + '" data-index="' + index + '" data-field="' + escapeHtml(field)
+        + '" value="' + escapeHtml(value || '') + '" aria-label="' + escapeHtml(field) + '">';
+}
+
+function invoiceFoldersCheckbox(kind, index, checked) {
+    return '<input type="checkbox" data-kind="' + kind + '" data-index="' + index
+        + '" data-field="対象" aria-label="対象"' + (checked ? ' checked' : '') + '>';
+}
+
+function invoiceFoldersPersonRow(row, index, tab) {
+    const spec = INVOICE_FOLDERS_TABS[tab];
+    return '<tr class="' + (row._new ? 'folders-new' : (row['対象'] ? '' : 'folders-off')) + '">'
+        + '<td class="c">' + invoiceFoldersCheckbox('people', index, row['対象']) + '</td>'
+        + '<td>' + invoiceFoldersInput('people', index, '取引先', row['取引先'], 'w-sm') + '</td>'
+        + '<td>' + invoiceFoldersInput('people', index, '氏名', row['氏名'], 'w-sm') + '</td>'
+        + '<td>' + invoiceFoldersInput('people', index, spec.cols[0], row[spec.cols[0]], 'w-lg') + '</td>'
+        + '<td>' + invoiceFoldersInput('people', index, spec.cols[1], row[spec.cols[1]]) + '</td>'
+        + '<td class="c">' + invoiceFoldersStateCell(row['_' + tab]) + '</td>'
+        + '<td class="c"><button type="button" class="folders-del" data-kind="people" data-index="'
+        + index + '">削除</button></td>'
+        + '</tr>';
+}
+
+function invoiceFoldersRootRow(row, index) {
+    return '<tr class="' + (row._new ? 'folders-new' : (row['対象'] ? '' : 'folders-off')) + '">'
+        + '<td class="c">' + invoiceFoldersCheckbox('roots', index, row['対象']) + '</td>'
+        + '<td>' + invoiceFoldersInput('roots', index, '取引先', row['取引先'], 'w-sm') + '</td>'
+        + '<td class="nowrap folders-note">（会社単位）</td>'
+        + '<td>' + invoiceFoldersInput('roots', index, 'フォルダパス', row['フォルダパス'], 'w-lg') + '</td>'
+        + '<td class="folders-note">配下の「提出データ」を再帰で探します</td>'
+        + '<td class="c">' + invoiceFoldersStateCell(row._root) + '</td>'
+        + '<td class="c"><button type="button" class="folders-del" data-kind="roots" data-index="'
+        + index + '">削除</button></td>'
+        + '</tr>';
+}
+
+function invoiceFoldersRenderGrid() {
+    const target = document.getElementById('invoice-folders-grid');
+    if (!target) return;
+    const tab = invoiceFoldersState.tab;
+    const spec = INVOICE_FOLDERS_TABS[tab];
+    const isOutput = tab === 'output';
+
+    let html = '<table class="folders-grid"><thead><tr>'
+        + '<th class="nowrap">対象</th><th class="nowrap">取引先</th><th class="nowrap">氏名</th>'
+        + '<th>' + escapeHtml(spec.heads[0]) + '</th><th>' + escapeHtml(spec.heads[1]) + '</th>'
+        + '<th class="nowrap">今月の状態</th><th></th></tr></thead><tbody>';
+
+    if (isOutput) {
+        html += '<tr class="folders-group"><td colspan="7">'
+            + '■ 提出用PDFの出力先（①で作ったPDFを置く場所）</td></tr>';
+    }
+    if (!invoiceFoldersState.people.length) {
+        html += '<tr><td colspan="7" class="folders-note" style="text-align:center; padding:14px">'
+            + '行がありません。「＋ 人を追加」で足してください。</td></tr>';
+    }
+    invoiceFoldersState.people.forEach((row, i) => {
+        html += invoiceFoldersPersonRow(row, i, tab);
+    });
+
+    if (isOutput) {
+        html += '<tr class="folders-group"><td colspan="7">'
+            + '■ freee取込CSVの探索ルート（②が請求書PDFを探しに行く会社フォルダ）</td></tr>';
+        invoiceFoldersState.roots.forEach((row, i) => {
+            html += invoiceFoldersRootRow(row, i);
+        });
+    }
+    target.innerHTML = html + '</tbody></table>';
+
+    const addRoot = document.getElementById('invoice-folders-add-root');
+    if (addRoot) addRoot.style.display = isOutput ? '' : 'none';
+
+    document.querySelectorAll('.folders-tab').forEach(btn => {
+        btn.setAttribute('aria-selected', String(btn.dataset.tab === tab));
+        const cnt = btn.querySelector('.cnt');
+        if (!cnt) return;
+        cnt.textContent = btn.dataset.tab === 'output'
+            ? invoiceFoldersState.people.length + '名＋' + invoiceFoldersState.roots.length + '社'
+            : invoiceFoldersState.people.length + '名';
+    });
+}
+
+function invoiceFoldersRenderMeta() {
+    const meta = document.getElementById('invoice-folders-meta');
+    if (!meta) return;
+    const s = invoiceFoldersState;
+    const badge = s.writable
+        ? '<span class="folders-state ok">書き込みできます</span>'
+        : '<span class="folders-state stop">書き込みできません</span>';
+    meta.innerHTML = '設定ファイル: <code>' + escapeHtml(s.settingsCsv || '') + '</code><br>'
+        + '会社フォルダ: <code>' + escapeHtml(s.rootsCsv || '') + '</code><br>'
+        + '実行ユーザー: <code>' + escapeHtml(s.user || '') + '</code> ' + badge
+        + ' <span class="folders-note">' + escapeHtml(s.writeMessage || '') + '</span>';
+}
+
+async function invoiceFoldersLoad(force) {
+    const s = invoiceFoldersState;
+    if (s.loading || (s.loaded && !force)) return;
+    s.loading = true;
+    invoiceFoldersSetStatus('読み込み中...');
+    try {
+        const data = await (await fetch('/invoice_folders')).json();
+        if (!data.success) {
+            invoiceFoldersSetStatus((data.errors || []).join(' / '), 'error');
+            return;
+        }
+        s.people = data.people || [];
+        s.roots = data.roots || [];
+        s.signatures = data.signatures || {};
+        s.writable = !!data.writable;
+        s.writeMessage = data.write_message || '';
+        s.user = data.user || '';
+        s.settingsCsv = data.settings_csv || '';
+        s.rootsCsv = data.roots_csv || '';
+        s.loaded = true;
+        s.checkedMonth = '';
+        invoiceFoldersRenderMeta();
+        invoiceFoldersRenderGrid();
+        invoiceFoldersMarkDirty(false);
+        invoiceFoldersSetStatus('');
+    } catch (e) {
+        invoiceFoldersSetStatus('フォルダ設定の読み込みに失敗しました', 'error');
+    } finally {
+        s.loading = false;
+    }
+}
+
+// 保存とチェックへ渡す用。画面だけで使っている _kintai などは落とす。
+function invoiceFoldersPayloadRows(rows, keys) {
+    return rows.map(row => {
+        const out = { '対象': !!row['対象'], _extra: row._extra || {} };
+        keys.forEach(k => { out[k] = row[k] || ''; });
+        return out;
+    });
+}
+
+function invoiceFoldersPayload() {
+    return {
+        people: invoiceFoldersPayloadRows(invoiceFoldersState.people, INVOICE_FOLDERS_PERSON_KEYS),
+        roots: invoiceFoldersPayloadRows(invoiceFoldersState.roots, ['取引先', 'フォルダパス'])
+    };
+}
+
+async function invoiceFoldersCheck() {
+    const monthInput = document.getElementById('invoice-pdf-month');
+    const month = ((monthInput && monthInput.value) || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+        invoiceFoldersSetStatus('先に上の「対象月」を選んでください', 'error');
+        return;
+    }
+    const tab = invoiceFoldersState.tab;
+    invoiceFoldersSetStatus(tab === 'excel'
+        ? month + ' のシートを確認中...（Excelを開くので少し待ちます）'
+        : month + ' の状態を確認中...');
+    const body = Object.assign({ month: month, scope: tab }, invoiceFoldersPayload());
+    let data;
+    try {
+        data = await (await fetch('/invoice_folders_check', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        })).json();
+    } catch (e) {
+        invoiceFoldersSetStatus('状態の確認に失敗しました', 'error');
+        return;
+    }
+    if (!data.success) {
+        invoiceFoldersSetStatus((data.errors || []).join(' / '), 'error');
+        return;
+    }
+    (data.people || []).forEach(entry => {
+        const row = invoiceFoldersState.people[entry.index];
+        if (!row) return;
+        ['kintai', 'excel', 'output'].forEach(k => {
+            if (entry[k]) row['_' + k] = entry[k];
+        });
+    });
+    (data.roots || []).forEach(entry => {
+        const row = invoiceFoldersState.roots[entry.index];
+        if (row) row._root = entry.root;
+    });
+    invoiceFoldersState.checkedMonth = month;
+    invoiceFoldersRenderGrid();
+
+    const shown = (data.people || []).map(e => e[tab]).filter(Boolean)
+        .concat((data.roots || []).map(e => e.root));
+    const count = level => shown.filter(x => x && x.level === level).length;
+    invoiceFoldersSetStatus(month + '：問題なし ' + count('ok') + ' ／ 要確認 '
+        + count('warn') + ' ／ 作れません ' + count('stop')
+        + '　バッジにカーソルを合わせると中身が出ます',
+        count('stop') ? 'error' : 'ok');
+}
+
+async function invoiceFoldersSave() {
+    if (!invoiceFoldersState.writable) {
+        invoiceFoldersSetStatus(invoiceFoldersState.writeMessage, 'error');
+        return;
+    }
+    invoiceFoldersSetStatus('保存中...');
+    const body = Object.assign({ signatures: invoiceFoldersState.signatures },
+                               invoiceFoldersPayload());
+    let data;
+    try {
+        data = await (await fetch('/invoice_folders_save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        })).json();
+    } catch (e) {
+        invoiceFoldersSetStatus('保存に失敗しました', 'error');
+        return;
+    }
+    if (!data.success) {
+        invoiceFoldersSetStatus((data.errors || []).join(' / '), 'error');
+        if (data.conflict) invoiceFoldersLoad(true);
+        return;
+    }
+    invoiceFoldersState.signatures = data.signatures || {};
+    invoiceFoldersMarkDirty(false);
+    invoiceFoldersState.people.forEach(r => { delete r._new; });
+    invoiceFoldersState.roots.forEach(r => { delete r._new; });
+    invoiceFoldersRenderGrid();
+    invoiceFoldersSetStatus('保存しました（' + data.people_saved + '名 ／ '
+        + data.roots_saved + '社）。書き換え前のCSVは _backup に残しています', 'ok');
+    invoicePdfCompanies = null;          // 会社ボタンを次に開いたとき作り直す
+    invoicePdfLoadCompanies();
+}
+
+function invoiceFoldersOpen() {
+    const panel = document.getElementById('invoice-folders-panel');
+    const toggle = document.getElementById('invoice-folders-toggle');
+    if (!panel || !toggle) return;
+    panel.style.display = '';
+    toggle.setAttribute('aria-expanded', 'true');
+    toggle.textContent = '📁 一覧を閉じる';
+    invoiceFoldersLoad(false);
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+const invoiceFoldersToggleBtn = document.getElementById('invoice-folders-toggle');
+if (invoiceFoldersToggleBtn) {
+    invoiceFoldersToggleBtn.addEventListener('click', () => {
+        const panel = document.getElementById('invoice-folders-panel');
+        if (invoiceFoldersToggleBtn.getAttribute('aria-expanded') === 'true') {
+            panel.style.display = 'none';
+            invoiceFoldersToggleBtn.setAttribute('aria-expanded', 'false');
+            invoiceFoldersToggleBtn.textContent = '📁 見るフォルダの一覧を表示';
+        } else {
+            invoiceFoldersOpen();
+        }
+    });
+}
+
+// ②のカードからも同じ一覧を開く（設定は1つ、入口が2つ）
+const invoiceFoldersOpenFromCsv = document.getElementById('invoice-folders-open-from-csv');
+if (invoiceFoldersOpenFromCsv) {
+    invoiceFoldersOpenFromCsv.addEventListener('click', () => {
+        invoiceFoldersState.tab = 'output';
+        invoiceFoldersOpen();
+        invoiceFoldersRenderGrid();
+    });
+}
+
+document.querySelectorAll('.folders-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+        invoiceFoldersState.tab = btn.dataset.tab;
+        invoiceFoldersRenderGrid();
+    });
+});
+
+// 入力はまとめて拾う（行は描き直すたびに作り直すので、個別には付けない）
+const invoiceFoldersGrid = document.getElementById('invoice-folders-grid');
+if (invoiceFoldersGrid) {
+    invoiceFoldersGrid.addEventListener('input', ev => {
+        const el = ev.target;
+        if (!el.dataset || !el.dataset.field || el.type === 'checkbox') return;
+        const rows = invoiceFoldersState[el.dataset.kind];
+        const row = rows && rows[Number(el.dataset.index)];
+        if (!row) return;
+        row[el.dataset.field] = el.value;
+        el.classList.toggle('is-empty', !el.value.trim());
+        invoiceFoldersMarkDirty(true);
+    });
+
+    invoiceFoldersGrid.addEventListener('change', ev => {
+        const el = ev.target;
+        if (!el.dataset || el.type !== 'checkbox') return;
+        const rows = invoiceFoldersState[el.dataset.kind];
+        const row = rows && rows[Number(el.dataset.index)];
+        if (!row) return;
+        row['対象'] = el.checked;
+        invoiceFoldersMarkDirty(true);
+        invoiceFoldersRenderGrid();
+    });
+
+    invoiceFoldersGrid.addEventListener('click', ev => {
+        const btn = ev.target.closest('.folders-del');
+        if (!btn) return;
+        const kind = btn.dataset.kind;
+        const index = Number(btn.dataset.index);
+        const row = invoiceFoldersState[kind][index];
+        if (!row) return;
+        const label = kind === 'people'
+            ? (row['取引先'] || '') + ' ' + (row['氏名'] || '')
+            : (row['フォルダパス'] || '');
+        const what = kind === 'people'
+            ? 'この人の設定を消します。提出用PDFは作られなくなります。'
+            : 'この会社フォルダを消します。freee取込CSVで請求書を探さなくなります。';
+        if (!confirm(what + '\n\n' + label + '\n\nよろしいですか？（保存を押すまでCSVは変わりません）')) return;
+        invoiceFoldersState[kind].splice(index, 1);
+        invoiceFoldersMarkDirty(true);
+        invoiceFoldersRenderGrid();
+    });
+}
+
+const invoiceFoldersAddBtn = document.getElementById('invoice-folders-add');
+if (invoiceFoldersAddBtn) {
+    invoiceFoldersAddBtn.addEventListener('click', () => {
+        invoiceFoldersState.people.push({
+            '対象': true, '取引先': '', '氏名': '', '請求書Excel': '', 'シート名': '{YY}年{M}月',
+            '勤怠フォルダ': '', '勤怠ファイル': '', '出力フォルダ': '', '出力ファイル名': '',
+            _extra: {}, _new: true
+        });
+        invoiceFoldersMarkDirty(true);
+        invoiceFoldersRenderGrid();
+        invoiceFoldersSetStatus('黄色い行に、3つのタブすべてを埋めてから保存してください');
+    });
+}
+
+const invoiceFoldersAddRootBtn = document.getElementById('invoice-folders-add-root');
+if (invoiceFoldersAddRootBtn) {
+    invoiceFoldersAddRootBtn.addEventListener('click', () => {
+        invoiceFoldersState.roots.push({ '対象': true, '取引先': '', 'フォルダパス': '',
+                                         _extra: {}, _new: true });
+        invoiceFoldersMarkDirty(true);
+        invoiceFoldersRenderGrid();
+    });
+}
+
+const invoiceFoldersCheckBtn = document.getElementById('invoice-folders-check');
+if (invoiceFoldersCheckBtn) invoiceFoldersCheckBtn.addEventListener('click', invoiceFoldersCheck);
+
+const invoiceFoldersSaveBtn = document.getElementById('invoice-folders-save');
+if (invoiceFoldersSaveBtn) invoiceFoldersSaveBtn.addEventListener('click', invoiceFoldersSave);

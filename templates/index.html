@@ -639,6 +639,45 @@
         <div id="invoice-pdf-buttons" class="actions" style="padding:0; flex-wrap:wrap"></div>
         <div id="invoice-pdf-status" class="status-text" style="margin-top:6px"></div>
         <div id="invoice-pdf-result" style="margin-top:10px"></div>
+
+        <!-- ==== 見るフォルダの一覧（①②の共通設定。②のボタンからも同じものを開く） ==== -->
+        <div class="actions" style="padding:12px 0 0; margin-top:12px; border-top:1px solid #e6ebef">
+            <button type="button" class="btn btn-secondary" id="invoice-folders-toggle"
+                    aria-expanded="false" aria-controls="invoice-folders-panel">📁 見るフォルダの一覧を表示</button>
+            <span class="hint">勤怠PDF・請求書Excel・提出先の場所を、この画面から直せます</span>
+        </div>
+
+        <div id="invoice-folders-panel" class="folders-box" style="display:none">
+            <div id="invoice-folders-meta" class="folders-meta">読み込み中...</div>
+
+            <div class="folders-tabs" role="tablist" aria-label="フォルダの分類">
+                <button type="button" class="folders-tab" role="tab" aria-selected="true"
+                        data-tab="kintai">🗓 勤怠フォルダ <span class="cnt" data-count="kintai"></span></button>
+                <button type="button" class="folders-tab" role="tab" aria-selected="false"
+                        data-tab="excel">📗 請求書作成Excel <span class="cnt" data-count="excel"></span></button>
+                <button type="button" class="folders-tab" role="tab" aria-selected="false"
+                        data-tab="output">📁 請求書格納フォルダ <span class="cnt" data-count="output"></span></button>
+            </div>
+
+            <div id="invoice-folders-grid" class="folders-gridwrap"></div>
+
+            <div class="folders-actions">
+                <button type="button" class="btn-sub" id="invoice-folders-add">＋ 人を追加</button>
+                <button type="button" class="btn-sub" id="invoice-folders-add-root"
+                        style="display:none">＋ 会社フォルダを追加</button>
+                <button type="button" class="btn-sub" id="invoice-folders-check">🔄 今月の状態を確認</button>
+                <button type="button" class="btn btn-primary" id="invoice-folders-save" disabled>💾 保存する</button>
+                <span id="invoice-folders-status" class="status-text"></span>
+            </div>
+
+            <div class="hintbox" style="margin-top:10px">
+                パスとファイル名には
+                <b>{YYYY}</b>=2026 ／ <b>{YY}</b>=26 ／ <b>{MM}</b>=07 ／ <b>{M}</b>=7 ／
+                <b>{FY}</b>=年度（4月始まり）が使えます。勤怠ファイル名には <b>*</b> が使えます。
+                <b>*</b> で2件以上見つかった人は、どれを綴じるか決められないため作成せず「要確認」に出します。
+                「今月の状態」は、上の<b>対象月</b>について実際にフォルダを見に行った結果です。
+            </div>
+        </div>
     </div>
 
     <!-- ============================================================ -->
@@ -672,6 +711,8 @@
 
         <div class="actions">
             <button type="button" class="btn btn-primary btn-run-main" id="invoice-preview-btn">🔍 PDFを検索して確認</button>
+            <!-- 開くのは①の中にある同じ一覧。探す場所と提出先は同じフォルダなので設定は1つにしてある。 -->
+            <button type="button" class="btn btn-secondary" id="invoice-folders-open-from-csv">📁 探すフォルダの一覧を見る</button>
             <span id="invoice-status" class="status-text"></span>
         </div>
 

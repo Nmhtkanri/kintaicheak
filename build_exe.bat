@@ -58,6 +58,8 @@ python -m PyInstaller ^
   --hidden-import services.shaho_pdf ^
   --hidden-import services.shaho_writer ^
   --hidden-import services.shaho_its ^
+  --hidden-import services.invoice_pdf ^
+  --hidden-import services.invoice_folders ^
   launcher.py
 
 if errorlevel 1 goto :build_failed

@@ -2934,6 +2934,94 @@ def route_invoice_pdf_run():
 
 
 # =============================================================================
+# 請求書モードが見に行くフォルダの一覧・編集（2026-08-20）
+#   勤怠フォルダ／請求書作成Excel／請求書格納フォルダ の3分類で見せる。
+#   実体は PDF作成設定CSV（人単位）と 対象フォルダCSV（会社単位）の2本。
+# =============================================================================
+
+@app.route("/invoice_folders", methods=["GET"])
+def route_invoice_folders():
+    """一覧と、書き込みできるかどうかを返す。"""
+    from services.invoice_folders import InvoiceFoldersError, load_all
+
+    try:
+        payload = load_all(Config.INVOICE_PDF_SETTINGS_CSV,
+                           Config.INVOICE_TARGET_ROOTS_CSV,
+                           Config.INVOICE_FOLDERS_WRITERS_CSV)
+    except InvoiceFoldersError as exc:
+        return jsonify({"success": False, "errors": [str(exc)]}), 400
+    except Exception as exc:
+        logger.exception("invoice_folders failed")
+        return jsonify({"success": False,
+                        "errors": [f"フォルダ設定を読めませんでした: {exc}"]}), 500
+    payload["success"] = True
+    return jsonify(payload)
+
+
+@app.route("/invoice_folders_check", methods=["POST"])
+def route_invoice_folders_check():
+    """対象月について、各行が今どうなっているかを返す（読み取りのみ）。
+
+    scope で見る範囲を絞る。画面はタブごとに呼ぶので、Excel を起動するのは
+    「請求書作成Excel」タブを開いたときだけになる。
+    """
+    from services.invoice_folders import InvoiceFoldersError, check
+
+    payload = request.get_json(silent=True) or {}
+    month = str(payload.get("month") or "").strip()
+    scope = str(payload.get("scope") or "all").strip()
+    if scope not in {"all", "kintai", "excel", "output"}:
+        scope = "all"
+    try:
+        result = check(month,
+                       people=payload.get("people") or [],
+                       roots=payload.get("roots") or [],
+                       scope=scope)
+    except InvoiceFoldersError as exc:
+        return jsonify({"success": False, "errors": [str(exc)]}), 400
+    except Exception as exc:
+        logger.exception("invoice_folders_check failed")
+        return jsonify({"success": False,
+                        "errors": [f"状態を確認できませんでした: {exc}"]}), 500
+    result["success"] = True
+    return jsonify(result)
+
+
+@app.route("/invoice_folders_save", methods=["POST"])
+def route_invoice_folders_save():
+    """一覧を2本のCSVへ書き戻す。
+
+    書き込みは許可ユーザーのみ。書く前にバックアップを取り、画面を開いた後に
+    他の人が直していたら上書きせず中止する。
+    """
+    from services.invoice_folders import (
+        InvoiceFoldersConflict, InvoiceFoldersError, can_write, save_all)
+
+    payload = request.get_json(silent=True) or {}
+    writable, write_message = can_write(Config.INVOICE_FOLDERS_WRITERS_CSV,
+                                        label="フォルダ設定")
+    if not writable:
+        return jsonify({"success": False, "errors": [write_message]}), 403
+    try:
+        result = save_all(Config.INVOICE_PDF_SETTINGS_CSV,
+                          Config.INVOICE_TARGET_ROOTS_CSV,
+                          people=payload.get("people") or [],
+                          roots=payload.get("roots") or [],
+                          signatures=payload.get("signatures") or {})
+    except InvoiceFoldersConflict as exc:
+        return jsonify({"success": False, "conflict": True, "errors": [str(exc)]}), 409
+    except InvoiceFoldersError as exc:
+        return jsonify({"success": False, "errors": [str(exc)]}), 400
+    except Exception as exc:
+        logger.exception("invoice_folders_save failed")
+        return jsonify({"success": False,
+                        "errors": [f"保存に失敗しました: {exc}"]}), 500
+    result["success"] = True
+    result["write_message"] = write_message
+    return jsonify(result)
+
+
+# =============================================================================
 # 請求書モード — 共有PDF → freee 売上取引インポートCSV
 # =============================================================================
 

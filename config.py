@@ -181,10 +181,17 @@ class Config:
         "INVOICE_BREAKDOWN_CSV", r"Z:\API連携\docs\請求書モード_内訳マスタ.csv")
     INVOICE_DEFAULT_DEPARTMENT = os.environ.get("INVOICE_DEFAULT_DEPARTMENT", "")
     # 提出用PDF（請求書Excelの当月シート＋勤怠PDF）の作成設定。1人1行。
-    # 列: 取引先, 氏名, 請求書Excel, シート名, 勤怠フォルダ, 勤怠ファイル,
+    # 列: 対象, 取引先, 氏名, 請求書Excel, シート名, 勤怠フォルダ, 勤怠ファイル,
     #     出力フォルダ, 出力ファイル名（{YYYY}{YY}{MM}{M}{FY} が使える）
+    # 「対象」は 0 にするとその人を作らない。列が無い場合は全員対象。
     INVOICE_PDF_SETTINGS_CSV = os.environ.get(
         "INVOICE_PDF_SETTINGS_CSV", r"Z:\API連携\docs\請求書モード_PDF作成設定.csv")
+    # 上の2本（PDF作成設定・対象フォルダ）を画面から直せる人。共有exeは5名が使うが、
+    # ここが壊れると別の人の勤怠を綴じた請求書ができうるので絞る。
+    # 列: ユーザー名, 表示名, 備考。CSVが読めなければ誰も書けない（フェイルクローズ）。
+    INVOICE_FOLDERS_WRITERS_CSV = os.environ.get(
+        "INVOICE_FOLDERS_WRITERS_CSV",
+        r"Z:\API連携\docs\請求書モード_書き込み許可ユーザー.csv")
     INVOICE_OUTPUT_DIR = os.environ.get("INVOICE_OUTPUT_DIR", "outputs/invoice")
 
     # ------------------------------------------------------------------

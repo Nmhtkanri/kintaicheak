@@ -276,11 +276,15 @@ def load_writers(path: "str | Path") -> list[dict]:
                 for r in csv.DictReader(f)]
 
 
-def can_write(writers_csv: "str | Path", user: "str | None" = None) -> tuple[bool, str]:
+def can_write(writers_csv: "str | Path", user: "str | None" = None,
+              label: str = "台帳") -> tuple[bool, str]:
     """(書き込み可否, 画面に出す理由) を返す。
 
     許可リストが読めない場合は **書き込み不可** に倒す。台帳は給与に直結するため、
     設定ミスで全員が書ける状態になる方が危ない。
+
+    label は画面に出す対象物の呼び名。台帳以外（請求書モードのフォルダ設定など）
+    から呼ぶときに渡す。判定そのものは同じなので、この関数を使い回す。
     """
     who = user or current_user()
     rows = load_writers(writers_csv)
@@ -291,7 +295,7 @@ def can_write(writers_csv: "str | Path", user: "str | None" = None) -> tuple[boo
     if _norm(who).lower() in allowed:
         return True, f"書き込み可（ユーザー: {who}）"
     names = "・".join(_norm(r.get("表示名") or r.get("ユーザー名")) for r in rows)
-    return False, (f"台帳への書き込みは {names} のみです。現在のユーザー: {who}"
+    return False, (f"{label}への書き込みは {names} のみです。現在のユーザー: {who}"
                    f"（追加する場合は {writers_csv} に1行足してください）")
 
 
