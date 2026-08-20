@@ -55,3 +55,16 @@ def test_front_end_offers_confirm_button():
     assert "invoicePdfLoadCompanies" in js, "会社ボタンの読み込みが無い"
     assert "invoice-pdf-force" in js, "確認して作るボタンが無い"
     assert "needs_confirm" in js, "要確認の表示が無い"
+
+
+def test_button_label_is_short():
+    """★ボタンは短く。「株式会社」や「（旧○○）」まで出すと押しにくい。
+
+    APIへ渡すのは元の正式名のまま（設定CSVと突き合わせるため）。
+    """
+    import pathlib
+    js = pathlib.Path(app_module.__file__).parent.joinpath(
+        "static", "script.js").read_text(encoding="utf-8")
+    assert "function invoicePdfShortName" in js
+    assert "invoicePdfShortName(c.partner)" in js, "ボタン名に短縮を使っていない"
+    assert "body.append('partner', partner)" in js, "APIへは正式名のまま送ること"

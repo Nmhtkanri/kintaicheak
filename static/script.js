@@ -3639,6 +3639,15 @@ if (invoiceExportBtn) {
 // ============================================================
 let invoicePdfCompanies = null;   // 一度読んだら覚えておく
 
+// ボタンに出す短い会社名。「株式会社」や「（旧○○）」まで出すと長くて押しにくい。
+// APIへ渡すのは元の正式名のままにする（設定CSVと突き合わせるため）。
+function invoicePdfShortName(partner) {
+    return String(partner || '')
+        .replace(/[（(][^）)]*[）)]/g, '')
+        .replace(/(株式会社|有限会社|合同会社)/g, '')
+        .trim();
+}
+
 async function invoicePdfLoadCompanies() {
     const target = document.getElementById('invoice-pdf-buttons');
     if (!target || invoicePdfCompanies) return;
@@ -3652,10 +3661,10 @@ async function invoicePdfLoadCompanies() {
         }
         invoicePdfCompanies = data.companies || [];
         target.innerHTML = invoicePdfCompanies.map((c, i) =>
-            '<button type="button" class="btn btn-primary invoice-pdf-run" data-index="' + i + '">'
-            + '📎 ' + escapeHtml(c.partner) + ' の提出用PDFを作る'
-            + '<span style="opacity:.75; font-size:11px; margin-left:6px">('
-            + escapeHtml((c.people || []).join('・')) + ')</span></button>').join(' ');
+            '<button type="button" class="btn btn-primary invoice-pdf-run" data-index="' + i + '"'
+            // 対象者はボタンを長くしないよう吹き出しに回す
+            + ' title="' + escapeHtml((c.people || []).join('・')) + '">'
+            + '📎 ' + escapeHtml(invoicePdfShortName(c.partner)) + '</button>').join(' ');
         target.querySelectorAll('.invoice-pdf-run').forEach(btn => {
             btn.addEventListener('click', () => invoicePdfRun(
                 invoicePdfCompanies[Number(btn.dataset.index)].partner, false));
@@ -3680,7 +3689,7 @@ async function invoicePdfRun(partner, force) {
         status.textContent = '対象月を選んでください';
         return;
     }
-    status.textContent = partner + ' を処理中...';
+    status.textContent = invoicePdfShortName(partner) + ' を処理中...';
     result.innerHTML = '';
     const body = new FormData();
     body.append('month', month);
@@ -3697,7 +3706,7 @@ async function invoicePdfRun(partner, force) {
         status.textContent = (data.errors || []).join(' / ');
         return;
     }
-    status.textContent = partner + '：作成 ' + data.made.length + '件／要確認 '
+    status.textContent = invoicePdfShortName(partner) + '：作成 ' + data.made.length + '件／要確認 '
         + data.needs_confirm.length + '件／作れず ' + data.skipped.length + '件';
 
     let html = '';
