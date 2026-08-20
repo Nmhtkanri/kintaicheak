@@ -5,10 +5,12 @@
 }
 
 :root {
-    /* 画面の最大幅。ヘッダーと本文で共通に使う（全モード共通）。
-       請求書CSVのように列数の多い表を横スクロールなしで見せたいので広めに取り、
-       ウィンドウが狭いときは 100vw に追随させる。 */
+    /* 画面の最大幅。ヘッダーとタブバーが使う（タブ9本＋ヒントが切れないための広さ）。 */
     --app-max-width: min(1680px, calc(100vw - 40px));
+    /* カード（本文）の最大幅。幅拡大（2026-08-19）で本文まで広がり読みにくくなったため、
+       タブバーは広いまま本文だけ旧 1100px 時代の実効幅へ戻す（2026-08-20 谷津さん指定）。
+       1004px = 旧 .main-content 1100px − main padding 16px×2 − .container padding 32px×2 */
+    --card-max-width: 1004px;
 }
 
 body {
@@ -51,6 +53,15 @@ body {
     border-radius: 8px;
     padding: 28px 32px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+}
+
+/* カード（container直下の全要素）は本文幅に収めて中央寄せ。タブバー(.mode-tabs)だけは
+   除外して負マージン＋stickyのまま全幅を使う。.progress-area の margin 左右0 は
+   このルールが specificity で上書きして中央寄せになる（意図どおり）。
+   container直下に「全幅であるべき要素」を将来足すときは :not() への追加を忘れないこと。 */
+.container > :not(.mode-tabs) {
+    max-width: var(--card-max-width);
+    margin-inline: auto;
 }
 
 .workflow-card {
@@ -280,6 +291,8 @@ body {
 .summary-card {
     flex: 1;
     min-width: 120px;
+    /* カードが2〜3枚しかないモード（標準報酬など）で1枚が間延びしないよう上限を切る */
+    max-width: 280px;
     border-radius: 8px;
     padding: 16px 20px;
     text-align: center;
@@ -461,7 +474,7 @@ body {
     margin: 0 4px;
 }
 .legend-ym-hint {
-    font-size: 11px;
+    font-size: 12px;
     color: #999;
 }
 
@@ -537,7 +550,7 @@ body {
     color: #0c5460;
     padding: 2px 8px;
     border-radius: 10px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
 }
 .legend-template-tag.unmatched {
@@ -599,7 +612,7 @@ body {
     display: inline-block;
     margin-left: 8px;
     padding: 2px 8px;
-    font-size: 11px;
+    font-size: 12px;
     border-radius: 10px;
     font-weight: 500;
     vertical-align: middle;
@@ -655,7 +668,7 @@ body {
     border-radius: 10px;
     background: #e8eaf6;
     color: #283593;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     vertical-align: middle;
 }
@@ -700,7 +713,7 @@ body {
     background: #fff3cd;
     border: 1px solid #ffc107;
     border-radius: 10px;
-    font-size: 11px;
+    font-size: 12px;
     color: #6d4c00;
 }
 
@@ -720,7 +733,7 @@ body {
 }
 .legend-employees-hint {
     font-weight: normal;
-    font-size: 11px;
+    font-size: 12px;
     color: #5d6d7e;
     margin-left: 6px;
 }
@@ -784,7 +797,7 @@ body {
 }
 
 /* 夜勤明けの自動設定トレース */
-.ake-before { color: #6b7785; font-size: 11px; }
+.ake-before { color: #6b7785; font-size: 12px; }
 .ake-conflict { background: #fff8e1; }
 
 /* 日別シフト編集（確認画面・従業員ごと） */
@@ -835,7 +848,7 @@ body {
 }
 .legend-shift-row .btn-mini {
     padding: 2px 6px;
-    font-size: 11px;
+    font-size: 12px;
 }
 .legend-employee-shift-count {
     color: #5d6d7e;
@@ -881,7 +894,7 @@ body {
 .md-view h3 { font-size: 13px; margin: 12px 0 4px; color: #4a2070; }
 .md-view h4, .md-view h5 { font-size: 12px; margin: 10px 0 4px; color: #666; }
 .md-view p { margin: 4px 0; }
-.md-view code { background: #f5f5f5; padding: 1px 4px; font-size: 11px; }
+.md-view code { background: #f5f5f5; padding: 1px 4px; font-size: 12px; }
 .keiri-md-li { margin: 2px 0 2px 4px; }
 .keiri-md-sub { margin-left: 22px; color: #555; font-size: 0.95em; }
 .keiri-tab {
@@ -920,7 +933,7 @@ body {
 }
 .mode-tabs-caption {
     color: #8fa1b0;
-    font-size: 11px;
+    font-size: 12px;
     letter-spacing: .06em;
     margin: 0 8px 0 6px;
     flex: none;
@@ -959,7 +972,7 @@ body {
     margin-left: auto;
     padding-left: 12px;
     color: #b8c6d2;
-    font-size: 11.5px;
+    font-size: 12px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1007,7 +1020,7 @@ body {
 /* --- タグ --- */
 .tag {
     display: inline-block;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: normal;
     line-height: 1.5;
     padding: 1px 8px;
@@ -1032,7 +1045,7 @@ body {
     padding: 1px 0;
 }
 .more > summary::-webkit-details-marker { display: none; }
-.more > summary::before { content: "▸"; font-size: 10px; }
+.more > summary::before { content: "▸"; font-size: 12px; }
 .more[open] > summary::before { content: "▾"; }
 .more > summary:hover { text-decoration: underline; }
 .more-body {
@@ -1064,7 +1077,7 @@ body {
     gap: 7px;
     flex-wrap: wrap;
 }
-.field-sub { font-size: 11.5px; color: #6b7783; line-height: 1.6; }
+.field-sub { font-size: 12px; color: #6b7783; line-height: 1.6; }
 .field input[type="text"],
 .field input[type="number"],
 .field input[type="file"],
@@ -1169,17 +1182,17 @@ body {
     gap: 9px;
 }
 .hh-box { border: 1px solid #e6ebef; border-radius: 5px; padding: 7px 9px; }
-.hh-box-title { font-size: 11px; color: #62707c; margin-bottom: 4px; }
+.hh-box-title { font-size: 12px; color: #62707c; margin-bottom: 4px; }
 .hh-bp { border-collapse: collapse; font-size: 13px; }
 .hh-bp th, .hh-bp td { border: 1px solid #e0e6ea; padding: 2px 9px; text-align: center; }
-.hh-bp th { background: #f4f7f9; font-weight: 600; font-size: 11px; }
+.hh-bp th { background: #f4f7f9; font-weight: 600; font-size: 12px; }
 .hh-bp .hh-blank { color: #9aa5ad; }
 .hh-qual { font-size: 12px; margin: 0; padding-left: 17px; }
 .hh-issue { font-size: 12px; margin-top: 5px; padding: 3px 7px; border-radius: 4px; }
 .hh-issue-error { background: #f8d7da; color: #721c24; }
 .hh-issue-warning { background: #fff3cd; color: #856404; }
 .hh-select { padding: 4px 7px; max-width: 100%; font-size: 12px; }
-.hh-reason { font-size: 11px; color: #a05a00; margin-top: 3px; }
+.hh-reason { font-size: 12px; color: #a05a00; margin-top: 3px; }
 /* PDFから読んだときの原票サムネイル。クリックで原寸を別タブに開く */
 .hh-thumb {
     width: 100%;

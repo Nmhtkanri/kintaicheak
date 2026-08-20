@@ -1516,7 +1516,7 @@ function buildScheduleApiBlock(month, filenames) {
             <button type="button" class="sched-api-execute-btn" disabled>② この内容で投入</button>
             <span class="sched-api-status" style="margin-left:8px; font-size:13px"></span>
         </div>
-        <pre class="sched-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; padding:8px; font-size:11px; margin:6px 0"></pre>
+        <pre class="sched-api-log" style="display:none; max-height:220px; overflow:auto; background:#f7f7f7; padding:8px; font-size:12px; margin:6px 0"></pre>
         <div class="sched-api-result" style="display:none; margin-top:8px"></div>
     `;
     const state = { month, filenames, fingerprint: '', planRows: 0, running: false };
@@ -1746,7 +1746,7 @@ function keiriRenderFiles(data) {
     for (const f of data.files || []) {
         const url = '/keiri_download/' + data.ym + '/' + encodeURIComponent(f.filename);
         html += '<tr><td>' + f['種別'] + '</td><td>' + f.filename + '</td><td>' + f['取引数'] + '</td><td>' + f['行数'] + '</td>'
-              + '<td><a class="btn btn-download" style="padding:2px 8px; font-size:11px" href="' + url + '">📥</a></td></tr>';
+              + '<td><a class="btn btn-download" style="padding:2px 8px; font-size:12px" href="' + url + '">📥</a></td></tr>';
     }
     html += '</table>';
     html += '<div class="hint" style="margin-top:4px">出力先: <code>' + data.out_dir + '</code>';
@@ -2140,7 +2140,7 @@ function mailRenderPlans(data) {
             + '<td>' + to + bcc + breakdown + '</td>'
             + '<td>' + mailEsc(p.subject) + '</td>'
             + '<td>' + status + issues + '</td>'
-            + '<td><details><summary style="cursor:pointer">本文</summary><pre style="white-space:pre-wrap; font-size:11px; margin:4px 0">'
+            + '<td><details><summary style="cursor:pointer">本文</summary><pre style="white-space:pre-wrap; font-size:12px; margin:4px 0">'
             + mailEsc(p.body) + '</pre></details></td></tr>';
     }
     html += '</table>';
@@ -2401,7 +2401,7 @@ function hhJinjerBlock(person, roster) {
         const e = j.employee;
         return '<div class="hh-box"><div class="hh-box-title">jinjer 社員（自動一致）</div>'
             + '<div style="font-size:13px">' + escapeHtml(e.employee_id) + '　' + escapeHtml(e.name) + '</div>'
-            + '<div style="font-size:11px; color:#62707c">' + escapeHtml(e.kana)
+            + '<div style="font-size:12px; color:#62707c">' + escapeHtml(e.kana)
             + '／' + escapeHtml(e.birth_date) + '／' + escapeHtml(e.gender) + '</div>'
             + '<input type="hidden" class="hh-emp" data-key="' + escapeHtml(person.key) + '" value="'
             + escapeHtml(e.employee_id) + '"></div>';
@@ -3472,9 +3472,9 @@ function invoiceRenderRows() {
             + sourceNames.map(name => escapeHtml(name)).join('<br>') + '</td>'
             + '<td style="white-space:nowrap">'
             + (!commute ? '<button type="button" class="btn invoice-row-action" data-action="duplicate" data-index="' + index
-                + '" style="padding:2px 6px; font-size:11px">複製</button>' : '')
+                + '" style="padding:2px 6px; font-size:12px">複製</button>' : '')
             + (row._manual_added ? '<button type="button" class="btn invoice-row-action" data-action="delete" data-index="' + index
-                + '" style="padding:2px 6px; font-size:11px; margin-left:4px">削除</button>' : '')
+                + '" style="padding:2px 6px; font-size:12px; margin-left:4px">削除</button>' : '')
             + '</td></tr>';
     });
     html += '</table>';
@@ -3744,15 +3744,15 @@ async function invoicePdfRun(partner, force) {
     let html = '';
     html += invoicePdfList('✅ 作成しました', data.made, m =>
         '<li>' + escapeHtml(m['氏名']) + '：' + escapeHtml(String(m['ページ数'] || '')) + 'ページ　'
-        + '<span style="color:#666; font-size:11px">' + escapeHtml(m['出力先'] || '') + '</span>'
+        + '<span style="color:#666; font-size:12px">' + escapeHtml(m['出力先'] || '') + '</span>'
         + (m['確認事項'] && m['確認事項'].length
-            ? '<br><span style="color:#8a6d00; font-size:11px">確認済みとして作成: '
+            ? '<br><span style="color:#8a6d00; font-size:12px">確認済みとして作成: '
               + escapeHtml(m['確認事項'].join(' / ')) + '</span>' : '')
         + '</li>');
     html += invoicePdfList('⚠ 要確認（まだ作っていません）', data.needs_confirm, m =>
         '<li><b>' + escapeHtml(m['氏名']) + '</b>：'
         + escapeHtml((m['確認事項'] || []).join(' / '))
-        + '<br><span style="color:#666; font-size:11px">'
+        + '<br><span style="color:#666; font-size:12px">'
         + escapeHtml(m['請求書'] || '') + ' ＋ ' + escapeHtml(m['勤怠'] || '') + '</span></li>');
     html += invoicePdfList('⛔ 作れませんでした', data.skipped, m =>
         '<li>' + escapeHtml(m['氏名']) + '：' + escapeHtml(m['理由'] || '') + '</li>');
