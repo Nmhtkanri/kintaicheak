@@ -108,8 +108,7 @@ const MODE_HINTS = {
     match:      '請求勤怠と jinjer の差異を洗い出す',
     csv_export: 'シフト表を読み取って jinjer へ登録する',
     keiri:      'freee 取引インポート用の4CSVを作る',
-    invoice:    '請求書PDFを確認してfreee売上取引CSVを作る',
-    invoice_pdf: '請求書Excelと勤怠PDFを綴じて提出用PDFを作る（提出は手動）',
+    invoice:    '提出用PDFを作る／請求書PDFからfreee売上取引CSVを作る',
     sharoushi:  '社労士へ渡す給与CSVを作る／保険料一覧表PDFの標準報酬をjinjerへ投入する',
     shaho:      '標準報酬月額の検算と保険料突合（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
@@ -157,13 +156,12 @@ function applyModeUI(mode) {
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
     const isInvoice = mode === 'invoice';
-    const isInvoicePdf = mode === 'invoice_pdf';
     const isSharoushi = mode === 'sharoushi';
     const isShaho = mode === 'shaho';
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isInvoice && !isInvoicePdf && !isShaho && !isMail && !isHealthHpm;
+        && !isInvoice && !isShaho && !isMail && !isHealthHpm;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -201,10 +199,10 @@ function applyModeUI(mode) {
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
     // 請求書モード: PDF確認とfreee CSV生成カードのみ表示
     if (invoiceCard) invoiceCard.style.display = isInvoice ? '' : 'none';
-    // 提出用PDF作成モード: 会社ごとのボタンを並べる（初回に一覧を読む）
+    // 請求書モードは「提出用PDFを作る」と「freee CSVを作る」の2カード立て
     if (invoicePdfCard) {
-        invoicePdfCard.style.display = isInvoicePdf ? '' : 'none';
-        if (isInvoicePdf) invoicePdfLoadCompanies();
+        invoicePdfCard.style.display = isInvoice ? '' : 'none';
+        if (isInvoice) invoicePdfLoadCompanies();
     }
     // 社労士モード: 社労士CSV生成カードと、保険料一覧表PDFの投入カード
     if (sharoushiCard) sharoushiCard.style.display = isSharoushi ? '' : 'none';

@@ -6,14 +6,20 @@ def _client():
     return app_module.app.test_client()
 
 
-def test_mode_tab_and_card_exist():
+def test_pdf_and_csv_live_in_one_invoice_mode():
+    """PDF作成とCSV作成は「請求書」モード1つにまとめる（モードは分けない）。"""
     html = _client().get("/").get_data(as_text=True)
-    assert 'name="mode" value="invoice_pdf"' in html, "モードタブが無い"
-    assert 'id="invoice-pdf-card"' in html
+    assert 'name="mode" value="invoice_pdf"' not in html, "モードを分けない"
+    assert 'name="mode" value="invoice"' in html
+    assert 'id="invoice-pdf-card"' in html, "提出用PDFのカードが無い"
+    assert 'id="invoice-card"' in html, "freee CSVのカードが無い"
     assert 'id="invoice-pdf-month"' in html
     assert 'id="invoice-pdf-buttons"' in html, "会社ごとのボタンを並べる場所が無い"
     # 何をするモードかが画面に書かれていること
     assert "提出は手動" in html
+    js = __import__("pathlib").Path(app_module.__file__).parent.joinpath(
+        "static", "script.js").read_text(encoding="utf-8")
+    assert "invoicePdfCard.style.display = isInvoice" in js,         "請求書モードで提出用PDFのカードが出ない"
 
 
 def test_companies_are_grouped_by_partner():
