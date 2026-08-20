@@ -183,29 +183,54 @@ def export_sheet_to_pdf(workbook: Path, sheet: str, out_pdf: Path) -> Path:
         excel.Quit()
 
 
-def check_issue_month(pdf_path: Path, target: date) -> str:
-    """請求書PDFの請求日が対象月かを確かめる。ずれていたら理由を返す。
+def check_dates(pdf_path: Path, target: date) -> list[str]:
+    """請求書PDFの請求日・入金期日が対象月とかみ合っているかを見る。
 
-    前月シートをコピーして作る運用なので、金額だけ直して請求日・請求書番号を
-    戻し忘れることがある（2026-07 の大村さんのシートが実際に6月のままだった）。
-    綴じて提出したあとでは気づけないので、ここで止める。
+    前月シートをコピーして作る運用なので、金額だけ直して請求日・請求書番号・
+    入金期日を戻し忘れることがある（2026-07 の大村さんのシートが実際に
+    請求日 2026-06-30 / INV-260630KOM のまま残っていた）。綴じて提出した
+    あとでは気づけないので、ここで拾って人に確認してもらう。
 
-    請求日らしき記載が見つからないテンプレートもあるので、その場合は止めない。
+    日付の記載が無いテンプレートもあるので、見つからないものは何も言わない。
+
+    Returns:
+        気になる点の一覧。空なら問題なし。
     """
+    import calendar
+
     import pdfplumber
 
     with pdfplumber.open(pdf_path) as pdf:
         text = " ".join((page.extract_text() or "") for page in pdf.pages)
     flat = re.sub(r"\s+", "", text)
-    found = re.search(r"(?:請求日|請求年月日)[:：]?(\d{4})[-/年](\d{1,2})", flat)
-    if not found:
-        return ""
-    year, month = int(found.group(1)), int(found.group(2))
-    if (year, month) == (target.year, target.month):
-        return ""
-    return (f"請求書の請求日が {year}-{month:02d} になっています"
-            f"（対象は {target.year}-{target.month:02d}）。"
-            "前月シートから請求日・請求書番号を直し忘れていませんか")
+    notes: list[str] = []
+
+    issued = re.search(r"(?:請求日|請求年月日)[:：]?(\d{4})[-/年](\d{1,2})", flat)
+    if issued:
+        year, month = int(issued.group(1)), int(issued.group(2))
+        if (year, month) != (target.year, target.month):
+            notes.append(
+                f"請求日が {year}-{month:02d} になっています"
+                f"（対象は {target.year}-{target.month:02d}）")
+
+    due = re.search(r"(?:入金期日|お?支払期日|支払期限)[:：]?(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})",
+                    flat)
+    if due:
+        year, month, day = (int(due.group(1)), int(due.group(2)), int(due.group(3)))
+        try:
+            due_date = date(year, month, min(day, calendar.monthrange(year, month)[1]))
+        except ValueError:
+            due_date = None
+        month_end = date(target.year, target.month,
+                         calendar.monthrange(target.year, target.month)[1])
+        if due_date and due_date <= month_end:
+            notes.append(
+                f"入金期日が {due_date.isoformat()} で、対象月（{month_end.isoformat()}）"
+                "より後になっていません")
+
+    if notes:
+        notes.append("前月シートから請求日・請求書番号・入金期日を直し忘れていませんか")
+    return notes
 
 
 def merge_pdfs(parts: Iterable[os.PathLike[str] | str], out_pdf: Path) -> Path:
@@ -228,11 +253,16 @@ def merge_pdfs(parts: Iterable[os.PathLike[str] | str], out_pdf: Path) -> Path:
 
 def build(month: str, settings: Sequence[dict[str, str]], *,
           work_dir: os.PathLike[str] | str | None = None,
-          dry_run: bool = True) -> dict[str, Any]:
+          dry_run: bool = True, force: bool = False) -> dict[str, Any]:
     """対象月の提出用PDFを作る。
 
-    dry_run のときは何を作るかだけ返し、ファイルは書かない。
-    エラーのある人は作らずに飛ばす（他の人の分は作る）。
+    dry_run でも請求書シートのPDF化までは行い、請求日・入金期日を検査する。
+    そうしないと画面で確認する材料が出ないため。最終PDFの書き出しだけを止める。
+
+    結果は3つに分ける。
+      made          … 作った（dry_run のときは「作れる」）
+      needs_confirm … 日付が対象月とかみ合わない。人が見て問題なければ force で作る
+      skipped       … 材料が揃わない等。force でも作らない
     """
     import tempfile
 
@@ -240,34 +270,38 @@ def build(month: str, settings: Sequence[dict[str, str]], *,
     if not matched:
         raise InvoicePdfError("対象月は YYYY-MM 形式で指定してください")
     target = date(int(matched.group(1)), int(matched.group(2)), 1)
+
     plans = plan(month, settings)
     work = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="invoice_pdf_"))
-    made: list[dict[str, str]] = []
-    skipped: list[dict[str, str]] = []
+    made: list[dict[str, Any]] = []
+    needs_confirm: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
 
     for item in plans:
+        base = {"取引先": item.partner, "氏名": item.person}
         if not item.ok:
-            skipped.append({"取引先": item.partner, "氏名": item.person,
-                            "理由": " / ".join(item.errors)})
+            skipped.append({**base, "理由": " / ".join(item.errors)})
             continue
         detail = {
-            "取引先": item.partner, "氏名": item.person,
+            **base,
             "請求書": f"{item.workbook.name}［{item.sheet}］",
             "勤怠": " / ".join(p.name for p in item.attendance),
             "出力先": str(item.output),
         }
+        sheet_pdf = export_sheet_to_pdf(
+            item.workbook, item.sheet, work / f"{item.person}_請求書.pdf")
+        notes = check_dates(sheet_pdf, target)
+        if notes and not force:
+            needs_confirm.append({**detail, "確認事項": notes})
+            continue
+        detail["確認事項"] = notes          # force で通したときも記録に残す
         if dry_run:
             made.append(detail)
             continue
-        sheet_pdf = export_sheet_to_pdf(
-            item.workbook, item.sheet, work / f"{item.person}_請求書.pdf")
-        stale = check_issue_month(sheet_pdf, target)
-        if stale:
-            skipped.append({"取引先": item.partner, "氏名": item.person, "理由": stale})
-            continue
         merge_pdfs([sheet_pdf, *item.attendance], item.output)
-        detail["ページ数"] = str(1 + len(item.attendance))
+        detail["ページ数"] = 1 + len(item.attendance)
         made.append(detail)
 
-    return {"month": month, "dry_run": dry_run, "made": made, "skipped": skipped,
+    return {"month": month, "dry_run": dry_run, "force": force,
+            "made": made, "needs_confirm": needs_confirm, "skipped": skipped,
             "work_dir": str(work)}

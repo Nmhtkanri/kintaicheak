@@ -94,11 +94,57 @@ def test_bad_month_is_rejected(tmp_path):
         ip.plan("2026/07", _settings(tmp_path))
 
 
-def test_dry_run_makes_nothing(tmp_path):
+def _stub_excel(monkeypatch, tmp_path, notes=()):
+    """Excel COM と PDF読み取りを外す（実機に依存させない）。"""
+    def fake_export(workbook, sheet, out_pdf):
+        out_pdf.parent.mkdir(parents=True, exist_ok=True)
+        out_pdf.write_text("dummy", encoding="utf-8")
+        return out_pdf
+
+    monkeypatch.setattr(ip, "export_sheet_to_pdf", fake_export)
+    monkeypatch.setattr(ip, "check_dates", lambda *_: list(notes))
+    monkeypatch.setattr(ip, "merge_pdfs",
+                        lambda parts, out: (out.write_text("pdf", encoding="utf-8"), out)[1])
+
+
+def test_dry_run_makes_nothing(tmp_path, monkeypatch):
     _prepare(tmp_path)
-    res = ip.build("2026-07", _settings(tmp_path), dry_run=True)
-    assert res["made"] and not res["skipped"]
+    _stub_excel(monkeypatch, tmp_path)
+    res = ip.build("2026-07", _settings(tmp_path), work_dir=tmp_path / "work",
+                   dry_run=True)
+    assert res["made"] and not res["skipped"] and not res["needs_confirm"]
     assert not (tmp_path / "out" / "請求書_202607.pdf").exists()
+
+
+def test_date_mismatch_asks_for_confirmation(tmp_path, monkeypatch):
+    """★請求日が対象月とずれていたら、勝手に作らず人に確認してもらう。"""
+    _prepare(tmp_path)
+    _stub_excel(monkeypatch, tmp_path, notes=["請求日が 2026-06 になっています"])
+    res = ip.build("2026-07", _settings(tmp_path), work_dir=tmp_path / "work",
+                   dry_run=False)
+    assert not res["made"]
+    assert res["needs_confirm"][0]["氏名"] == "山田太郎"
+    assert not (tmp_path / "out" / "請求書_202607.pdf").exists(), "確認前に作らない"
+
+
+def test_force_builds_after_confirmation(tmp_path, monkeypatch):
+    """人が確認したら、そのままの中身で作る。"""
+    _prepare(tmp_path)
+    _stub_excel(monkeypatch, tmp_path, notes=["請求日が 2026-06 になっています"])
+    res = ip.build("2026-07", _settings(tmp_path), work_dir=tmp_path / "work",
+                   dry_run=False, force=True)
+    assert not res["needs_confirm"]
+    assert res["made"][0]["確認事項"], "承知で作ったことを記録に残す"
+    assert (tmp_path / "out" / "請求書_202607.pdf").exists()
+
+
+def test_force_does_not_override_missing_material(tmp_path, monkeypatch):
+    """★材料が揃わないものは force でも作らない（違う人の勤怠を綴じないため）。"""
+    _prepare(tmp_path, attendance=())
+    _stub_excel(monkeypatch, tmp_path)
+    res = ip.build("2026-07", _settings(tmp_path), work_dir=tmp_path / "work",
+                   dry_run=False, force=True)
+    assert not res["made"] and res["skipped"]
 
 
 def test_load_settings_ignores_blank_rows(tmp_path):

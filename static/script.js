@@ -109,6 +109,7 @@ const MODE_HINTS = {
     csv_export: 'シフト表を読み取って jinjer へ登録する',
     keiri:      'freee 取引インポート用の4CSVを作る',
     invoice:    '請求書PDFを確認してfreee売上取引CSVを作る',
+    invoice_pdf: '請求書Excelと勤怠PDFを綴じて提出用PDFを作る（提出は手動）',
     sharoushi:  '社労士へ渡す給与CSVを作る／保険料一覧表PDFの標準報酬をjinjerへ投入する',
     shaho:      '標準報酬月額の検算と保険料突合（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
@@ -144,6 +145,7 @@ function applyModeUI(mode) {
     const kiCard = document.getElementById('ki-card');
     const keiriCard = document.getElementById('keiri-card');
     const invoiceCard = document.getElementById('invoice-card');
+    const invoicePdfCard = document.getElementById('invoice-pdf-card');
     const sharoushiCard = document.getElementById('sharoushi-card');
     const shahoImportCard = document.getElementById('shaho-import-card');
     const shahoCard = document.getElementById('shaho-card');
@@ -155,12 +157,13 @@ function applyModeUI(mode) {
     const isExpense = mode === 'expense';
     const isKeiri = mode === 'keiri';
     const isInvoice = mode === 'invoice';
+    const isInvoicePdf = mode === 'invoice_pdf';
     const isSharoushi = mode === 'sharoushi';
     const isShaho = mode === 'shaho';
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isInvoice && !isShaho && !isMail && !isHealthHpm;
+        && !isInvoice && !isInvoicePdf && !isShaho && !isMail && !isHealthHpm;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -198,6 +201,11 @@ function applyModeUI(mode) {
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
     // 請求書モード: PDF確認とfreee CSV生成カードのみ表示
     if (invoiceCard) invoiceCard.style.display = isInvoice ? '' : 'none';
+    // 提出用PDF作成モード: 会社ごとのボタンを並べる（初回に一覧を読む）
+    if (invoicePdfCard) {
+        invoicePdfCard.style.display = isInvoicePdf ? '' : 'none';
+        if (isInvoicePdf) invoicePdfLoadCompanies();
+    }
     // 社労士モード: 社労士CSV生成カードと、保険料一覧表PDFの投入カード
     if (sharoushiCard) sharoushiCard.style.display = isSharoushi ? '' : 'none';
     if (shahoImportCard) shahoImportCard.style.display = isSharoushi ? '' : 'none';
@@ -3626,4 +3634,94 @@ if (invoiceExportBtn) {
             invoiceRevalidate();
         }
     });
+}
+
+// ============================================================
+// 提出用PDF作成（請求書Excelの当月シート＋勤怠PDF）
+// ============================================================
+let invoicePdfCompanies = null;   // 一度読んだら覚えておく
+
+async function invoicePdfLoadCompanies() {
+    const target = document.getElementById('invoice-pdf-buttons');
+    if (!target || invoicePdfCompanies) return;
+    try {
+        const res = await fetch('/invoice_pdf_companies');
+        const data = await res.json();
+        if (!data.success) {
+            target.innerHTML = '<span class="status-text">'
+                + escapeHtml((data.errors || []).join(' / ')) + '</span>';
+            return;
+        }
+        invoicePdfCompanies = data.companies || [];
+        target.innerHTML = invoicePdfCompanies.map((c, i) =>
+            '<button type="button" class="btn btn-primary invoice-pdf-run" data-index="' + i + '">'
+            + '📎 ' + escapeHtml(c.partner) + ' の提出用PDFを作る'
+            + '<span style="opacity:.75; font-size:11px; margin-left:6px">('
+            + escapeHtml((c.people || []).join('・')) + ')</span></button>').join(' ');
+        target.querySelectorAll('.invoice-pdf-run').forEach(btn => {
+            btn.addEventListener('click', () => invoicePdfRun(
+                invoicePdfCompanies[Number(btn.dataset.index)].partner, false));
+        });
+    } catch (e) {
+        target.innerHTML = '<span class="status-text">設定の読み込みに失敗しました</span>';
+    }
+}
+
+function invoicePdfList(title, items, render) {
+    if (!items || !items.length) return '';
+    return '<div style="margin-bottom:10px"><div style="font-weight:bold; margin-bottom:4px">'
+        + title + '</div><ul style="margin:0 0 0 18px">'
+        + items.map(render).join('') + '</ul></div>';
+}
+
+async function invoicePdfRun(partner, force) {
+    const month = (document.getElementById('invoice-pdf-month').value || '').trim();
+    const status = document.getElementById('invoice-pdf-status');
+    const result = document.getElementById('invoice-pdf-result');
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+        status.textContent = '対象月を選んでください';
+        return;
+    }
+    status.textContent = partner + ' を処理中...';
+    result.innerHTML = '';
+    const body = new FormData();
+    body.append('month', month);
+    body.append('partner', partner);
+    body.append('force', force ? '1' : '0');
+    let data;
+    try {
+        data = await (await fetch('/invoice_pdf_run', { method: 'POST', body })).json();
+    } catch (e) {
+        status.textContent = '通信に失敗しました';
+        return;
+    }
+    if (!data.success) {
+        status.textContent = (data.errors || []).join(' / ');
+        return;
+    }
+    status.textContent = partner + '：作成 ' + data.made.length + '件／要確認 '
+        + data.needs_confirm.length + '件／作れず ' + data.skipped.length + '件';
+
+    let html = '';
+    html += invoicePdfList('✅ 作成しました', data.made, m =>
+        '<li>' + escapeHtml(m['氏名']) + '：' + escapeHtml(String(m['ページ数'] || '')) + 'ページ　'
+        + '<span style="color:#666; font-size:11px">' + escapeHtml(m['出力先'] || '') + '</span>'
+        + (m['確認事項'] && m['確認事項'].length
+            ? '<br><span style="color:#8a6d00; font-size:11px">確認済みとして作成: '
+              + escapeHtml(m['確認事項'].join(' / ')) + '</span>' : '')
+        + '</li>');
+    html += invoicePdfList('⚠ 要確認（まだ作っていません）', data.needs_confirm, m =>
+        '<li><b>' + escapeHtml(m['氏名']) + '</b>：'
+        + escapeHtml((m['確認事項'] || []).join(' / '))
+        + '<br><span style="color:#666; font-size:11px">'
+        + escapeHtml(m['請求書'] || '') + ' ＋ ' + escapeHtml(m['勤怠'] || '') + '</span></li>');
+    html += invoicePdfList('⛔ 作れませんでした', data.skipped, m =>
+        '<li>' + escapeHtml(m['氏名']) + '：' + escapeHtml(m['理由'] || '') + '</li>');
+    if (data.needs_confirm.length) {
+        html += '<button type="button" class="btn btn-secondary" id="invoice-pdf-force">'
+            + '中身を確認しました。このまま作成する（' + data.needs_confirm.length + '件）</button>';
+    }
+    result.innerHTML = html;
+    const forceBtn = document.getElementById('invoice-pdf-force');
+    if (forceBtn) forceBtn.addEventListener('click', () => invoicePdfRun(partner, true));
 }

@@ -2870,6 +2870,68 @@ def keiri_download(ym, filename):
 
 
 # =============================================================================
+# 提出用PDF作成 — 請求書Excelの当月シート＋勤怠PDF → 提出データフォルダ
+# =============================================================================
+
+@app.route("/invoice_pdf_companies", methods=["GET"])
+def route_invoice_pdf_companies():
+    """設定CSVに載っている取引先の一覧を返す（会社ごとにボタンを出すため）。"""
+    from services.invoice_pdf import InvoicePdfError, load_settings
+
+    try:
+        settings = load_settings(Config.INVOICE_PDF_SETTINGS_CSV)
+    except InvoicePdfError as exc:
+        return jsonify({"success": False, "errors": [str(exc)]}), 400
+    companies: list[dict] = []
+    for row in settings:
+        partner = (row.get("取引先") or "").strip()
+        hit = next((c for c in companies if c["partner"] == partner), None)
+        if hit is None:
+            companies.append({"partner": partner, "people": []})
+            hit = companies[-1]
+        hit["people"].append((row.get("氏名") or "").strip())
+    return jsonify({"success": True, "companies": companies,
+                    "settings_csv": Config.INVOICE_PDF_SETTINGS_CSV})
+
+
+@app.route("/invoice_pdf_run", methods=["POST"])
+def route_invoice_pdf_run():
+    """1社ぶんの提出用PDFを作る。
+
+    force=0 のときは請求日・入金期日を検査し、対象月とかみ合わなければ
+    作らずに「要確認」として返す。人が中身を見て問題なければ force=1 で
+    もう一度呼ぶと、そのままの内容で作る。
+
+    共有フォルダに新しいPDFを作るだけで、提出は人が行う。既にあるファイルは
+    上書きしない。
+    """
+    from services.invoice_pdf import InvoicePdfError, build, load_settings
+
+    month = (request.form.get("month") or "").strip()
+    partner = (request.form.get("partner") or "").strip()
+    force = (request.form.get("force") or "") == "1"
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False,
+                        "errors": ["対象月は YYYY-MM 形式で入力してください"]}), 400
+    try:
+        settings = [r for r in load_settings(Config.INVOICE_PDF_SETTINGS_CSV)
+                    if (r.get("取引先") or "").strip() == partner]
+        if not settings:
+            return jsonify({"success": False,
+                            "errors": [f"設定CSVに「{partner}」の行がありません"]}), 400
+        result = build(month, settings, dry_run=False, force=force)
+    except InvoicePdfError as exc:
+        return jsonify({"success": False, "errors": [str(exc)]}), 400
+    except Exception as exc:
+        logger.exception("invoice_pdf_run failed")
+        return jsonify({"success": False,
+                        "errors": [f"提出用PDFの作成に失敗しました: {exc}"]}), 500
+    result["success"] = True
+    result["partner"] = partner
+    return jsonify(result)
+
+
+# =============================================================================
 # 請求書モード — 共有PDF → freee 売上取引インポートCSV
 # =============================================================================
 

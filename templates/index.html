@@ -26,6 +26,10 @@
             <input type="radio" name="mode" value="invoice">
             <span class="mode-tab-face">請求書CSV</span>
         </label>
+        <label class="mode-tab" title="請求書Excelの当月シートと勤怠PDFを綴じて提出用PDFを作る">
+            <input type="radio" name="mode" value="invoice_pdf">
+            <span class="mode-tab-face">請求書PDF</span>
+        </label>
         <label class="mode-tab" title="給与明細から社労士（前田事務所）へ渡すCSVを作る">
             <input type="radio" name="mode" value="sharoushi">
             <span class="mode-tab-face">社労士CSV</span>
@@ -596,6 +600,38 @@
             <div id="keiri-pane-diff" class="keiri-pane md-view" style="display:none"></div>
         </div>
         <div id="keiri-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- ==== 提出用PDF作成: 請求書Excel＋勤怠PDF → 提出データ ==== -->
+    <div class="workflow-card mode-accent acc-keiri" id="invoice-pdf-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-keiri">📎</span>
+            <div>
+                <div class="card-title">
+                    請求書と勤怠を綴じて提出用PDFを作る
+                    <span class="tag tag-safe">共有フォルダに作るだけ・提出は手動</span>
+                </div>
+                <div class="card-lead">
+                    請求書Excelの当月シートをPDFにして、勤怠PDF（業務実績表・タイムシート等）と綴じ、
+                    提出データフォルダへ置きます。金額の入力までは今までどおり人が行ってください。
+                </div>
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">対象月 <span class="required-tag">必須</span></label>
+            <input type="month" id="invoice-pdf-month" class="form-input" style="max-width:200px">
+            <span class="hint" style="margin-left:8px">例: 2026年7月分なら 2026-07</span>
+        </div>
+        <div class="hint" style="margin-bottom:8px">
+            会社ごとにボタンが出ます。押すと、その会社の全員ぶんをまとめて作ります。
+            請求日・入金期日が対象月とかみ合わない人は作らずに「要確認」として出すので、
+            中身を見て問題なければ「確認済みとして作成」を押してください。
+            すでに同じ名前のPDFがある場合は上書きしません。
+        </div>
+        <div id="invoice-pdf-buttons" class="actions" style="padding:0; flex-wrap:wrap"></div>
+        <div id="invoice-pdf-status" class="status-text" style="margin-top:6px"></div>
+        <div id="invoice-pdf-result" style="margin-top:10px"></div>
     </div>
 
     <!-- ============================================================ -->
