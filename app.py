@@ -6,6 +6,7 @@ import uuid
 import logging
 import pickle
 import threading
+import unicodedata
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 from dotenv import load_dotenv
 import pandas as pd
@@ -1211,7 +1212,9 @@ def route_quick_compare():
     kintai_dir_str = _clean_path_input(request.form.get("kintai_dir"))
     jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
     application_csv_str = _clean_path_input(request.form.get("application_csv"))
-    month_label = (request.form.get("month") or "").strip()
+    # 全角で入力された月（２０２６－０７）を半角へ寄せる。NFKC は全角数字と全角ハイフンを
+    # 直すが長音「ー」は直さないので、残りは下の書式チェックで弾く。
+    month_label = unicodedata.normalize("NFKC", request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
     # 自動修正提案値（採用ラベル）の許容しきい値。未指定なら既定値。
     try:
@@ -1229,6 +1232,8 @@ def route_quick_compare():
                       "（必須：打刻修正の申請理由を差異一覧に載せるため）")
     if not month_label:
         errors.append("対象月（YYYY-MM）を入力してください")
+    elif not re.fullmatch(r"[0-9]{4}-[0-9]{2}", month_label):
+        errors.append(f"対象月は半角の YYYY-MM 形式で入力してください（例: 2026-07）: {month_label}")
 
     kintai_dir = _Path(kintai_dir_str) if kintai_dir_str else None
     jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None
@@ -1313,7 +1318,9 @@ def route_batch_compare():
     timesheet_dir_str = _clean_path_input(request.form.get("timesheet_dir"))
     jinjer_dir_str = _clean_path_input(request.form.get("jinjer_dir"))
     application_csv_str = _clean_path_input(request.form.get("application_csv"))
-    month_label = (request.form.get("month") or "").strip()
+    # 全角で入力された月（２０２６－０７）を半角へ寄せる。NFKC は全角数字と全角ハイフンを
+    # 直すが長音「ー」は直さないので、残りは下の書式チェックで弾く。
+    month_label = unicodedata.normalize("NFKC", request.form.get("month") or "").strip()
     output_filename = (request.form.get("output_filename") or "").strip()
     # 自動修正提案値（採用ラベル）の許容しきい値。突合と同じしきい値を使う。
     try:
@@ -1331,6 +1338,8 @@ def route_batch_compare():
                       "（必須：打刻修正の申請理由を差異一覧に載せるため）")
     if not month_label:
         errors.append("対象月（YYYY-MM）を入力してください")
+    elif not re.fullmatch(r"[0-9]{4}-[0-9]{2}", month_label):
+        errors.append(f"対象月は半角の YYYY-MM 形式で入力してください（例: 2026-07）: {month_label}")
 
     timesheet_dir = _Path(timesheet_dir_str) if timesheet_dir_str else None
     jinjer_dir = _Path(jinjer_dir_str) if jinjer_dir_str else None

@@ -344,7 +344,7 @@
 
         <div class="fields">
             <label class="field">
-                <span class="field-label">請求勤怠フォルダ <span class="tag tag-req">必須</span></span>
+                <span class="field-label">請求勤怠フォルダ <span class="tag tag-req">必須</span><span class="callout-hint">対象フォルダ: SAP_Fieldglass, e-staffing, Excel, PDF, ERCSTS</span></span>
                 <input type="text" id="bc-timesheet-dir" placeholder="例: Y:\給与明細\R8年\6月\請求勤怠データ\SAP_Fieldglass">
                 <span class="field-sub">サブフォルダも含めて形式を自動判定します。単一ファイルの指定も可。</span>
             </label>
@@ -355,7 +355,7 @@
             </label>
             <label class="field">
                 <span class="field-label">jinjer 申請データ（打刻修正申請）CSV <span class="tag tag-req">必須</span></span>
-                <input type="text" id="bc-application-csv" placeholder="例: C:\...\jinjer_申請データ_打刻修正申請_..._2026_05.csv">
+                <input type="text" id="bc-application-csv" placeholder="例: Y:\給与明細\R8年\8月\打刻申請修正データ\jinjer_申請データ_打刻修正申請_9637_2026_07_01_2026_07_31.csv">
                 <span class="field-sub">「打刻修正時コメント」列に申請理由を載せるために使います。</span>
             </label>
             <label class="field field-inline">
@@ -1340,7 +1340,10 @@
                 <div id="pr-flagged-area" style="display:none; margin-bottom:8px">
                     <div class="section-title" style="font-size:13px; margin-bottom:2px">金額・経路の要確認（定期代突合・実費突合）</div>
                     <div class="hint" style="margin-bottom:4px">申請と jinjer の登録（通勤費マスタ）の言い分を並べています。差し戻すかどうかはここで判断できます。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
-                    <div style="max-height:540px; overflow:auto; border:1px solid #ddd; background:#fbfcfd; padding:0 10px 6px">
+                    <!-- ステータス絞り込み。中身は prPaintFlagged が実データから作る（固定のボタンは置かない） -->
+                    <div class="pr-filter" id="pr-flagged-filter"></div>
+                    <!-- カードを広げた分だけ枠も高くする（1画面に見えるカード数を保つため） -->
+                    <div style="max-height:700px; overflow:auto; border:1px solid #ddd; background:#fbfcfd; padding:0 10px 6px">
                         <div id="pr-flagged-table"></div>
                     </div>
                 </div>
@@ -1752,11 +1755,38 @@
         });
     }
 
+    // ----- 対象月の入力を半角に矯正する（勤怠チェック・経費チェックで共用）-----
+    // 対象月は半角の YYYY-MM だけを受け付ける。全角で打たれても半角へ直す。
+    // IME 変換中(isComposing)に書き戻すと変換が壊れるので、確定後の compositionend でも走らせる。
+    // 1か所にまとめてあるのは、片方だけ直して挙動がズレるのを防ぐため。
+    function attachMonthNormalizer(id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const normalize = () => {
+            const v = el.value;
+            const half = v.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+                          .replace(/[－ー―‐−]/g, '-')
+                          .replace(/[\s　]/g, '');
+            if (half !== v) el.value = half;   // 変わる時だけ書き戻す（カーソル飛び防止）
+        };
+        el.addEventListener('input', e => { if (!e.isComposing) normalize(); });
+        el.addEventListener('compositionend', normalize);
+    }
+    attachMonthNormalizer('bc-month');   // 勤怠チェック（一括）
+    attachMonthNormalizer('ex-month');   // 経費チェック（①集計・②精査・③仕訳追記で共通の欄）
+
     // ----- batch_compare（一括）-----
+
     const bcRunBtn = document.getElementById('bc-run-btn');
     if (bcRunBtn) {
         bcRunBtn.addEventListener('click', async () => {
             hideError('bc-error-area');
+            // 検証は disabled にする前に。ここで return するとボタンが押せないまま固まる
+            const bcMonth = document.getElementById('bc-month').value.trim();
+            if (!/^[0-9]{4}-[0-9]{2}$/.test(bcMonth)) {
+                showError('bc-error-area', ['対象月は半角の YYYY-MM 形式で入力してください（例: 2026-07）']);
+                return;
+            }
             document.getElementById('bc-result-area').style.display = 'none';
             document.getElementById('bc-status').textContent = '処理中...（請求勤怠の解析・突合・差異一覧。件数により数分かかります）';
             bcRunBtn.disabled = true;
@@ -1765,7 +1795,7 @@
             fd.append('timesheet_dir', document.getElementById('bc-timesheet-dir').value);
             fd.append('jinjer_dir', document.getElementById('bc-jinjer-dir').value);
             fd.append('application_csv', document.getElementById('bc-application-csv').value);
-            fd.append('month', document.getElementById('bc-month').value);
+            fd.append('month', bcMonth);
             fd.append('output_filename', document.getElementById('bc-output-filename').value);
 
             try {
@@ -2136,10 +2166,65 @@
     // jinjer API を叩かないので数秒で終わる。承認が進むたび何度でも実行する前提で、
     // 前回の出力と突き合わせて 新規/継続/解消 を出す。
     // 金額・経路の要確認行は画面にも出す（差し戻し判断のたびにxlsxを開かずに済むように）。
+    //
+    // 精査の対象は「承認完了＋進行中」の両方（取下げ・否認だけ除外）。差し戻せるのは
+    // 進行中の人だけなので、ステータスで絞り込めるようにしている。押した絞り込みは
+    // 再実行しても保つ（承認が進むたびに回す運用で、毎回押し直さずに済むように）。
+    let prFlaggedRows = [];
+    let prFlaggedStatus = 'すべて';
+
+    // 絞り込みの選択肢は実データから拾う。jinjer側のステータスが増えても取りこぼさず、
+    // どのボタンにも入らない行（＝画面から消える行）が出ないようにするため。
+    function prFlaggedStatusOf(r) {
+        return String(r['ステータス'] || '').trim() || '(ステータスなし)';
+    }
+    function prFlaggedStatusKinds() {
+        const order = ['進行中', '承認完了'];   // 差し戻せる進行中を先頭に
+        const found = [];
+        prFlaggedRows.forEach(r => {
+            const s = prFlaggedStatusOf(r);
+            if (found.indexOf(s) < 0) found.push(s);
+        });
+        return found.sort((a, b) => {
+            const ia = order.indexOf(a), ib = order.indexOf(b);
+            return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+        });
+    }
+
     function prRenderFlagged(rows) {
+        prFlaggedRows = rows || [];
+        // 前回選んだステータスが今回は0件（例: 進行中が全部承認された）なら「すべて」に戻す。
+        // 空の画面を見て「要確認が消えた」と勘違いしないように。
+        if (prFlaggedStatus !== 'すべて' && prFlaggedStatusKinds().indexOf(prFlaggedStatus) < 0) {
+            prFlaggedStatus = 'すべて';
+        }
+        prPaintFlagged();
+    }
+
+    function prPaintFlagged() {
         const area = document.getElementById('pr-flagged-area');
         const list = document.getElementById('pr-flagged-table');
-        if (!rows || !rows.length) { area.style.display = 'none'; list.innerHTML = ''; return; }
+        const bar = document.getElementById('pr-flagged-filter');
+        const all = prFlaggedRows;
+        if (!all.length) {
+            area.style.display = 'none';
+            list.innerHTML = '';
+            if (bar) bar.innerHTML = '';
+            return;
+        }
+        const rows = prFlaggedStatus === 'すべて'
+            ? all : all.filter(r => prFlaggedStatusOf(r) === prFlaggedStatus);
+        if (bar) {
+            const kinds = ['すべて'].concat(prFlaggedStatusKinds());
+            bar.innerHTML = kinds.map(k => {
+                const n = (k === 'すべて') ? all.length
+                    : all.filter(r => prFlaggedStatusOf(r) === k).length;
+                return '<button type="button" class="pr-filter-btn'
+                    + (k === prFlaggedStatus ? ' is-on' : '') + '" data-status="'
+                    + escapeHtml(k) + '">' + escapeHtml(k)
+                    + '<span class="pr-filter-n">' + n + '</span></button>';
+            }).join('') + '<span class="pr-filter-note">差し戻せるのは進行中だけです</span>';
+        }
         const esc = (v) => escapeHtml(String(v === undefined || v === null ? '' : v));
         const num = (v) => (v === undefined || v === null || v === '') ? '' : Number(v).toLocaleString();
         // 判定コードを日本語バッジで示す（色は経路突合レビューのグループ色と同じトーン）
@@ -2158,7 +2243,7 @@
             const diff = Number(r['差額'] || 0);
             const isNew = r['前回比'] === '新規';
             const badge = '<span style="display:inline-block; font-size:12px; font-weight:bold;'
-                + ' border-radius:4px; padding:0 8px; margin-right:8px; background:' + j.bg
+                + ' border-radius:4px; padding:0 8px; margin-right:8px; line-height:1.7; background:' + j.bg
                 + '; color:' + j.edge + '">' + esc(r['判定']) + ' ' + esc(j.label) + '</span>';
             const newTag = isNew
                 ? '<span style="font-size:12px; font-weight:bold; color:#ab2318; margin-left:10px">● 新規</span>'
@@ -2166,7 +2251,7 @@
                                  + esc(r['前回比']) + '</span>' : '');
             const meta = [r['利用日'], r['ステータス']].filter(Boolean).map(esc).join(' ・ ');
             const master = r['マスタ経路'] ? esc(r['マスタ経路']) : '<span style="color:#aaa">登録なし</span>';
-            const routes = '<div style="display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:1px 8px; margin-top:2px">'
+            const routes = '<div style="display:grid; grid-template-columns:3.5em minmax(0,1fr); gap:7px 12px; margin-top:8px">'
                 + '<span style="color:#8a97a3">申請</span><span>' + esc(r['申請経路'] || '—') + '</span>'
                 + '<span style="color:#8a97a3">jinjer</span><span>' + master
                 + (r['経路判定'] && r['経路判定'] !== '一致'
@@ -2177,12 +2262,12 @@
             if (r['説明']) notes.push(esc(r['説明']));
             if (r['テレワーク重複']) notes.push('テレワーク重複: ' + esc(r['テレワーク重複']));
             const why = notes.length
-                ? '<div style="margin-top:3px"><span style="color:#14608f; background:#eef5fa;'
-                  + ' border-radius:4px; padding:1px 8px; display:inline-block">' + notes.join(' ／ ')
+                ? '<div style="margin-top:9px"><span style="color:#14608f; background:#eef5fa;'
+                  + ' border-radius:4px; padding:4px 11px; display:inline-block">' + notes.join(' ／ ')
                   + '</span></div>' : '';
             const biko = r['備考']
-                ? '<div style="color:#8a5a00; margin-top:2px">備考: ' + esc(r['備考']) + '</div>' : '';
-            const amount = '<div style="display:grid; grid-template-columns:auto auto; gap:0 10px;'
+                ? '<div style="color:#8a5a00; margin-top:8px">備考: ' + esc(r['備考']) + '</div>' : '';
+            const amount = '<div style="display:grid; grid-template-columns:auto auto; gap:7px 10px;'
                 + ' text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap">'
                 + '<span style="color:#8a97a3">申請</span><span>' + num(applied) + '円</span>'
                 + '<span style="color:#8a97a3">jinjer</span><span>' + num(masterAmt) + '円</span>'
@@ -2192,10 +2277,10 @@
             // 金額はカード右端でなく中央付近（経路の右隣）に置く。画面が広いと右端では
             // 視線移動が大きすぎるため（2026-08-19 谷津さん要望）
             return '<div style="border:1px solid #dde4ea; border-left:4px solid ' + j.edge
-                + '; border-radius:6px; padding:6px 12px; margin:6px 0; background:'
-                + (isNew ? '#fffafa' : '#ffffff') + '; font-size:12.5px; display:grid;'
+                + '; border-radius:6px; padding:15px 16px; margin:12px 0; background:'
+                + (isNew ? '#fffafa' : '#ffffff') + '; font-size:12.5px; line-height:2.05; display:grid;'
                 + ' grid-template-columns:minmax(0,700px) max-content; justify-content:start;'
-                + ' gap:2px 3.5em; align-items:start">'
+                + ' gap:7px 3.5em; align-items:start">'
                 + '<div>'
                 +   '<div>' + badge + '<b>' + esc(r['氏名']) + '</b>'
                 +   '<span style="color:#888; margin-left:6px">' + esc(r['社員番号']) + '</span>'
@@ -2223,8 +2308,24 @@
             glist.forEach(r => html += cardHtml(r));
         });
         rest.forEach(r => html += cardHtml(r));
+        if (!rows.length) {
+            html = '<div style="color:#8a97a3; font-size:12.5px; padding:12px 2px">「'
+                + escapeHtml(prFlaggedStatus) + '」に該当する要確認はありません（すべて＝'
+                + all.length + '件）。上の「すべて」で戻せます。</div>';
+        }
         list.innerHTML = html;
         area.style.display = '';
+    }
+
+    // 絞り込みボタンは描き直すたびに作り直すので、親に1回だけ委譲で付ける
+    const prFilterBar = document.getElementById('pr-flagged-filter');
+    if (prFilterBar) {
+        prFilterBar.addEventListener('click', (ev) => {
+            const btn = ev.target.closest('.pr-filter-btn');
+            if (!btn) return;
+            prFlaggedStatus = btn.dataset.status;
+            prPaintFlagged();
+        });
     }
 
     const prRunBtn = document.getElementById('pr-run-btn');
