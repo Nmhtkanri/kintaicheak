@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.batch_runner import run_batch_compare, gather_timesheet_files  # noqa: E402
 
 
-def _write_estaffing_csv(path):
+def _write_estaffing_csv(path, extra_rows=()):
     """e-staffing形式の請求勤怠（AI不要で直接パースされる形式）。"""
     headers = [
         "スタッフ氏名", "就業年月日", "開始時刻", "終了時刻", "休憩時間", "備考コメント",
@@ -20,6 +20,8 @@ def _write_estaffing_csv(path):
         w.writerow(headers)
         w.writerow(["山田 太郎", "2026/5/1", "9:00", "18:00", "1:00", ""])
         w.writerow(["山田 太郎", "2026/5/2", "9:00", "18:00", "1:00", ""])
+        for row in extra_rows:
+            w.writerow(row)
 
 
 def _write_jinjer_generic_csv(path):
@@ -59,11 +61,38 @@ def test_run_batch_compare_end_to_end(tmp_path):
     df = pd.read_excel(out, sheet_name="差異一覧", dtype=object)
     assert "確認区分" in df.columns
     assert (df["差異種別"] == "出勤").any()
-    # 未処理・未マッチシートが追記されている
+    # 未処理・未マッチシートが先頭にある（開いた時に最初に目に入る）
     xl = pd.ExcelFile(out)
-    assert "未処理・未マッチ" in xl.sheet_names
+    assert xl.sheet_names[0] == "未処理・未マッチ"
+    assert xl.sheet_names[-1] == "サマリ"
     # e-staffing CSV は直接パースされ、解析スキップは無い
     assert skipped == []
+
+
+def test_unprocessed_sheet_lists_jinjer_unregistered(tmp_path):
+    """jinjer に居ない人（氏名→従業員ID 解決不可）を未処理・未マッチシートに氏名で出す。"""
+    from openpyxl import load_workbook
+
+    ts_dir = tmp_path / "請求勤怠"
+    ts_dir.mkdir()
+    # 佐藤 花子 は jinjer 汎用データに居ない＝jinjer勤怠未登録者
+    _write_estaffing_csv(ts_dir / "estaffing.csv",
+                         extra_rows=[["佐藤 花子", "2026/5/1", "9:00", "18:00", "1:00", ""]])
+    jinjer = tmp_path / "汎用データ.csv"
+    _write_jinjer_generic_csv(jinjer)
+    out = tmp_path / "差異一覧.xlsx"
+
+    result, _skipped, _unsubmitted = run_batch_compare(
+        timesheet_dir=ts_dir, jinjer_dir=jinjer, output_path=out,
+        month_label="2026-05", log_func=lambda _m: None,
+    )
+
+    assert result.ok, result.error
+    assert "佐藤 花子" in result.unmatched_names
+    ws = load_workbook(out)["未処理・未マッチ"]
+    col_a = "\n".join(str(row[0]) for row in ws.iter_rows(values_only=True) if row[0])
+    assert "jinjer勤怠未登録者" in col_a
+    assert "佐藤 花子" in col_a
 
 
 def test_gather_timesheet_files_skips_temp_and_aggregate_dirs(tmp_path):

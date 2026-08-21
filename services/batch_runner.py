@@ -6,7 +6,8 @@
   - 申請データCSV（任意）: 打刻修正時コメント用。
   - 対象月。
 
-出力: 差異一覧xlsx（トリアージ済み）＋「未処理・未マッチ」シート（解析できなかった請求勤怠・未提出者）。
+出力: 差異一覧xlsx（トリアージ済み）＋先頭の「未処理・未マッチ」シート
+      （解析できなかった請求勤怠・未提出者・jinjer勤怠未登録者）。
 グループはまたがない（複数グループは従来どおり別々に実行）。
 """
 from __future__ import annotations
@@ -53,12 +54,19 @@ def gather_timesheet_files(timesheet_dir: Path) -> list[Path]:
 
 
 def _append_unprocessed_sheet(
-    output_path: Path, skipped: list[tuple[str, str]], unsubmitted: list[str]
+    output_path: Path,
+    skipped: list[tuple[str, str]],
+    unsubmitted: list[str],
+    unmatched: list[str] | None = None,
 ) -> None:
-    """差異一覧xlsx に「未処理・未マッチ」シートを追記する。
+    """差異一覧xlsx に「未処理・未マッチ」シートを追記し、先頭シートにする。
 
     skipped: 解析できなかった請求勤怠ファイル [(ファイル名, 理由)]。
     unsubmitted: jinjer にいるが請求勤怠が無い（＝未提出の）氏名。
+    unmatched: jinjer未登録（請求勤怠に勤務があるが氏名→従業員IDを解決できない）氏名。
+
+    このシートは「人が手を打たないと落ちたままになるもの」だけを集めた確認用なので、
+    ブックを開いた時に最初に目に入るよう先頭へ置く（2026-08-20 谷津さん要望）。
     """
     if not output_path.exists():
         return
@@ -67,7 +75,8 @@ def _append_unprocessed_sheet(
     except Exception:
         return
     ws = wb.create_sheet("未処理・未マッチ")
-    bold = Font(bold=True)
+    bold = Font(bold=True, size=12)
+    body = Font(size=12)
     head_fill = PatternFill(start_color="F4B084", end_color="F4B084", fill_type="solid")
 
     r = 1
@@ -79,11 +88,11 @@ def _append_unprocessed_sheet(
     ws.cell(row=r, column=2).font = bold
     r += 1
     for name, reason in skipped:
-        ws.cell(row=r, column=1, value=name)
-        ws.cell(row=r, column=2, value=reason)
+        ws.cell(row=r, column=1, value=name).font = body
+        ws.cell(row=r, column=2, value=reason).font = body
         r += 1
     if not skipped:
-        ws.cell(row=r, column=1, value="（なし）")
+        ws.cell(row=r, column=1, value="（なし）").font = body
         r += 1
 
     r += 1
@@ -93,13 +102,31 @@ def _append_unprocessed_sheet(
     ws.cell(row=r, column=1).font = bold
     r += 1
     for name in unsubmitted:
-        ws.cell(row=r, column=1, value=name)
+        ws.cell(row=r, column=1, value=name).font = body
         r += 1
     if not unsubmitted:
-        ws.cell(row=r, column=1, value="（なし）")
+        ws.cell(row=r, column=1, value="（なし）").font = body
+        r += 1
+
+    # jinjer に勤怠が無い人。請求勤怠側には勤務があるので、放置すると給与未反映になる。
+    r += 1
+    ws.cell(row=r, column=1,
+            value="● jinjer勤怠未登録者（請求勤怠に勤務があるが氏名→従業員IDを解決できない）").font = bold
+    r += 1
+    ws.cell(row=r, column=1, value="氏名").fill = head_fill
+    ws.cell(row=r, column=1).font = bold
+    r += 1
+    for name in (unmatched or []):
+        ws.cell(row=r, column=1, value=name).font = body
+        r += 1
+    if not unmatched:
+        ws.cell(row=r, column=1, value="（なし）").font = body
 
     ws.column_dimensions["A"].width = 40
     ws.column_dimensions["B"].width = 50
+    # create_sheet 直後は末尾にいるので、その分だけ前へ動かして先頭にする（offset は相対量）
+    wb.move_sheet(ws, offset=-(len(wb.sheetnames) - 1))
+    wb.active = 0
     wb.save(output_path)
 
 
@@ -183,7 +210,8 @@ def run_batch_compare(
 
     # 6. 未処理・未マッチシートを追記
     if result.ok:
-        _append_unprocessed_sheet(Path(output_path), skipped, unsubmitted)
+        _append_unprocessed_sheet(Path(output_path), skipped, unsubmitted,
+                                  result.unmatched_names)
     return result, skipped, unsubmitted
 
 
@@ -193,6 +221,6 @@ def _fail(msg, output_path, logs, month_label, skipped, unsubmitted, log_func):
     log_func(f"[error] {msg}")
     logs.append(LogEntry("ERROR", msg))
     write_excel(Path(output_path), [], logs, month_label)
-    _append_unprocessed_sheet(Path(output_path), skipped, unsubmitted)
+    _append_unprocessed_sheet(Path(output_path), skipped, unsubmitted, [])
     result = CompareResult(ok=False, output_path=Path(output_path), logs=logs, error=msg)
     return result, skipped, unsubmitted

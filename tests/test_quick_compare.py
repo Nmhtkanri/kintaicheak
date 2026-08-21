@@ -255,17 +255,22 @@ def test_compute_diffs_converts_overnight_punch_out_to_jinjer_format():
 
 
 def test_diff_columns_include_manual_review_fields():
-    # 「手入力修正値」は「打刻修正」に改名済み
-    assert "打刻修正" in DIFF_COLUMNS
-    assert "手入力修正値" not in DIFF_COLUMNS
     assert "手入力休憩1" in DIFF_COLUMNS
     assert "手入力復帰1" in DIFF_COLUMNS
     assert "手入力休憩時間" in DIFF_COLUMNS
+    # 2026-08-20 廃止（打刻修正の旧名「手入力修正値」も含めて出さない）
+    assert "打刻修正" not in DIFF_COLUMNS
+    assert "手入力修正値" not in DIFF_COLUMNS
+    assert "自動修正提案値" not in DIFF_COLUMNS
 
 
 def test_diff_columns_include_schedule_and_leave_fields():
-    for col in ("出勤予定", "退勤予定", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別"):
+    for col in ("スケジュール出勤", "スケジュール退勤", "休憩予定", "復帰予定",
+                "休日休暇名1", "休日休暇名1：種別"):
         assert col in DIFF_COLUMNS
+    # 旧名（jinjer 側の内部キー名と同じ）では出力しない
+    assert "出勤予定" not in DIFF_COLUMNS
+    assert "退勤予定" not in DIFF_COLUMNS
     # 有休/AM有休/PM有休 は汎用データ194列に該当列が無く常に空のため出力しない
     for col in ("有休", "AM有休", "PM有休"):
         assert col not in DIFF_COLUMNS
@@ -448,8 +453,8 @@ def test_diff_columns_layout_identity_first():
     assert DIFF_COLUMNS[:4] == ["従業員ID", "氏名", "対象日付", "差異種別"]
     # 従業員IDは先頭(A列)へ移動済み
     assert DIFF_COLUMNS.index("従業員ID") == 0
-    # 打刻修正(手入力)は人間判断より右
-    assert DIFF_COLUMNS.index("打刻修正") > DIFF_COLUMNS.index("人間判断")
+    # 手入力欄は人間判断より右
+    assert DIFF_COLUMNS.index("手入力休憩1") > DIFF_COLUMNS.index("人間判断")
     # 行ID・元突合結果ファイルは削除済み
     assert "行ID" not in DIFF_COLUMNS
     assert "元突合結果ファイル" not in DIFF_COLUMNS
@@ -476,7 +481,8 @@ def test_triage_column_present_and_placed():
 
 def test_schedule_leave_columns_left_of_judgment():
     """有休も判断材料なので、予定/休日休暇は人間判断より左に置く。"""
-    for col in ("出勤予定", "退勤予定", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別"):
+    for col in ("スケジュール出勤", "スケジュール退勤", "休憩予定", "復帰予定",
+                "休日休暇名1", "休日休暇名1：種別"):
         assert DIFF_COLUMNS.index(col) < DIFF_COLUMNS.index("人間判断")
     # 復帰予定は 休憩予定 と 休日休暇名1 の間に挿入
     assert DIFF_COLUMNS.index("休憩予定") < DIFF_COLUMNS.index("復帰予定") < DIFF_COLUMNS.index("休日休暇名1")
@@ -511,31 +517,37 @@ def test_human_judgment_conditional_formatting(tmp_path):
     assert decoded.count('type="cellIs"') >= 2
 
 
-def test_manual_input_columns_have_text_format(tmp_path):
-    """手入力列（打刻修正/手入力休憩1/手入力復帰1/手入力休憩時間）は文字列書式('@')。
-
-    既定の書式だと Excel が「31:00」を経過時間、「7:00」を時刻型へ自動変換して保存し、
-    openpyxl 経由で timedelta/time になって quick_export の転記が壊れる（2026-07-09 の事故）。
-    生成時に '@' を設定しておけば入力値がそのまま文字列で保存される。
-    """
-    from openpyxl import load_workbook
-    from quick_compare import write_excel, DiffRow, MANUAL_INPUT_TEXT_COLUMNS
-
-    drows = [
+def _sample_diff_rows(count=2):
+    from quick_compare import DiffRow
+    return [
         DiffRow(
             row_id=i, emp_id=f"100{i}", name="山田 太郎", target_date=f"2026-05-0{i}", kind="出勤",
             kintai_value="9:00", jinjer_value="9:30", diff_minutes="30",
             warn_level="INFO", warn_reason="", auto_fix_value="9:00",
             finalized="", source_file="x.xlsx",
         )
-        for i in (1, 2)
+        for i in range(1, count + 1)
     ]
+
+
+def test_manual_input_columns_have_text_format(tmp_path):
+    """手入力列（手入力休憩1/手入力復帰1）は文字列書式('@')。
+
+    既定の書式だと Excel が「31:00」を経過時間、「7:00」を時刻型へ自動変換して保存し、
+    openpyxl 経由で timedelta/time になって quick_export の転記が壊れる（2026-07-09 の事故）。
+    生成時に '@' を設定しておけば入力値がそのまま文字列で保存される。
+    手入力休憩時間は数式列なので '@' の対象外（付けると数式が文字列表示に化ける）。
+    """
+    from openpyxl import load_workbook
+    from quick_compare import write_excel, MANUAL_INPUT_TEXT_COLUMNS
+
+    drows = _sample_diff_rows()
     out = tmp_path / "d.xlsx"
     write_excel(out, drows, [], "2026-05")
 
     wb = load_workbook(out)
     ws = wb["差異一覧"]
-    assert MANUAL_INPUT_TEXT_COLUMNS == ["打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間"]
+    assert MANUAL_INPUT_TEXT_COLUMNS == ["手入力休憩1", "手入力復帰1"]
     for header in MANUAL_INPUT_TEXT_COLUMNS:
         col_idx = DIFF_COLUMNS.index(header) + 1
         # 全データ行（人間判断プルダウンと同じ範囲 = 2行目〜1+件数行目）に設定される
@@ -552,6 +564,76 @@ def test_manual_input_columns_have_text_format(tmp_path):
     assert dvs[0].formula1 == '"請求勤怠,jinjer勤怠,保留"'
     judge_letter = ws.cell(row=1, column=judge_col).column_letter
     assert str(dvs[0].sqref) == f"{judge_letter}2:{judge_letter}3"
+
+
+def test_manual_break_total_is_formula(tmp_path):
+    """手入力休憩時間は休憩1・復帰1から計算する数式（手入力させない）。"""
+    from openpyxl import load_workbook
+    from quick_compare import write_excel
+
+    out = tmp_path / "d.xlsx"
+    write_excel(out, _sample_diff_rows(), [], "2026-05")
+
+    wb = load_workbook(out)
+    ws = wb["差異一覧"]
+    start_letter = ws.cell(row=1, column=DIFF_COLUMNS.index("手入力休憩1") + 1).column_letter
+    end_letter = ws.cell(row=1, column=DIFF_COLUMNS.index("手入力復帰1") + 1).column_letter
+    total_col = DIFF_COLUMNS.index("手入力休憩時間") + 1
+
+    for r_idx in (2, 3):
+        cell = ws.cell(row=r_idx, column=total_col)
+        assert cell.value.startswith("=IF(AND(")
+        # 自分の行の休憩1・復帰1を参照する
+        assert f"{start_letter}{r_idx}" in cell.value
+        assert f"{end_letter}{r_idx}" in cell.value
+        # 数式列に '@' を付けると Excel で文字列表示に化けるため General のまま
+        assert cell.number_format == "General"
+
+
+def test_manual_break_total_locked_and_sheet_protected(tmp_path):
+    """手入力休憩時間だけロックし、他のセルは今までどおり編集できる。"""
+    from openpyxl import load_workbook
+    from quick_compare import write_excel
+
+    out = tmp_path / "d.xlsx"
+    write_excel(out, _sample_diff_rows(), [], "2026-05")
+
+    wb = load_workbook(out)
+    ws = wb["差異一覧"]
+    total_col = DIFF_COLUMNS.index("手入力休憩時間") + 1
+    judge_col = DIFF_COLUMNS.index("人間判断") + 1
+
+    assert ws.protection.sheet is True
+    assert ws.protection.autoFilter is False   # False=許可（フィルタの絞り込みは使える）
+    for r_idx in (2, 3):
+        assert ws.cell(row=r_idx, column=total_col).protection.locked is True
+        # 人間判断・手入力休憩1 は入力できる
+        assert ws.cell(row=r_idx, column=judge_col).protection.locked is False
+        assert ws.cell(row=r_idx, column=DIFF_COLUMNS.index("手入力休憩1") + 1).protection.locked is False
+    # ヘッダー行はロックのまま（列名を書き換えられると手順3の転記が壊れる）
+    assert ws.cell(row=1, column=1).protection.locked is True
+
+
+def test_sheet_order_and_header_style(tmp_path):
+    """サマリは最後尾。開いた時は差異一覧。ヘッダーは12pt・折り返し。"""
+    from openpyxl import load_workbook
+    from quick_compare import write_excel
+
+    out = tmp_path / "d.xlsx"
+    write_excel(out, _sample_diff_rows(), [], "2026-05")
+
+    wb = load_workbook(out)
+    assert wb.sheetnames[0] == "差異一覧"
+    assert wb.sheetnames[-1] == "サマリ"
+    assert wb.active.title == "差異一覧"
+
+    ws = wb["差異一覧"]
+    head = ws.cell(row=1, column=1)
+    assert head.font.size == 12
+    assert head.font.bold is True
+    assert head.alignment.wrap_text is True
+    assert ws.row_dimensions[1].height == 32
+    assert ws.cell(row=2, column=1).font.size == 12
 
 
 def test_recommend_judge_label_new_rule():

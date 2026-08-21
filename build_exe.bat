@@ -60,6 +60,10 @@ python -m PyInstaller ^
   --hidden-import services.shaho_its ^
   --hidden-import services.invoice_pdf ^
   --hidden-import services.invoice_folders ^
+  --hidden-import services.expense_check ^
+  --hidden-import services.jinjer_api_client ^
+  --hidden-import services.keihi_payroll_import ^
+  --hidden-import services.keihi_summary ^
   launcher.py
 
 if errorlevel 1 goto :build_failed

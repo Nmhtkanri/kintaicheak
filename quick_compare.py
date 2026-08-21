@@ -7,9 +7,9 @@
 
 出力:
   差異一覧_<YYYY-MM>.xlsx
-    - サマリ
-    - 差異一覧（人間判断プルダウン・警告レベル付き）
+    - 差異一覧（人間判断プルダウン・警告レベル付き）※先頭シート
     - 取込ログ
+    - サマリ（最後尾）
 
 設計書: docs/PLAN_5月本番_3営業日MVP.md  /  docs/DESIGN_月次マスター_P0_P3.md
 """
@@ -27,7 +27,7 @@ from typing import Any
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Protection
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import CellIsRule
@@ -63,15 +63,17 @@ OVER_BREAK_HOURS = 2       # 休憩 2h 超で WARN
 DEFAULT_RECOMMEND_THRESHOLD_MIN = 10
 
 # ===== 出力xlsx 列定義 =====
-# 「人間判断」を「自動修正提案値」の直後に置く。判断列を提案値のすぐ隣にすることで、
-# ユーザーが手入力欄（時刻を入れる列）へ 請求勤怠/jinjer勤怠/保留 を誤入力するのを防ぐ。
 # 判断値: 「請求勤怠」=請求勤怠を正としてjinjerへ書き戻す / 「jinjer勤怠」=jinjerを正（書き戻さない） / 「保留」。
 # 手入力欄（任意・上級者向け）は右側へ寄せる。
-# ※ quick_export 側は列名で読むため、列順を変えても後方互換は保たれる。
 # 横スクロールを減らすため「判断に必要な列」を左へ集約する。
 # 識別3列(氏名/対象日付/差異種別)はウィンドウ枠固定。コメント2列は判断材料なので人間判断の左へ。
 # 手入力・参考(予定/休日休暇/ID/トレーサビリティ)は右へ寄せる。
 # ※ quick_export は列名で読むため、列順を変えても後方互換は保たれる。
+# 2026-08-20 谷津さん指定で「自動修正提案値」「打刻修正」を廃止（25列→23列）。
+#   自動修正提案値は採用ラベルを出すだけで判断は確認区分の色で足りていた。
+#   打刻修正（提案値と違う時刻を人が指定して書き戻す欄）は使われておらず、
+#   代わりに jinjer 画面で直接修正し人間判断=保留にする運用へ。
+#   ※ quick_export 側は列名で読むので、旧フォーマットの差異一覧は従来どおり処理できる。
 DIFF_COLUMNS = [
     # 識別（ウィンドウ枠固定）。従業員IDを先頭(A列)へ。
     "従業員ID", "氏名", "対象日付", "差異種別",
@@ -83,11 +85,11 @@ DIFF_COLUMNS = [
     "打刻時コメント",       # 汎用データ#96「打刻時コメント」より（出勤:/退勤: 両方）
     "打刻修正時コメント",   # 申請データCSVの「理由」より
     "警告理由",
-    "出勤予定", "退勤予定", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別",
+    "スケジュール出勤", "スケジュール退勤", "休憩予定", "復帰予定", "休日休暇名1", "休日休暇名1：種別",
     # 判断（入力）
     "人間判断", "判断メモ",
-    # 反映（手入力・普段使わない）。自動修正提案値は採用ラベル（請求勤怠/jinjer勤怠）。
-    "自動修正提案値", "打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間",
+    # 反映（手入力・普段使わない）。手入力休憩時間は休憩1/復帰1から自動計算する数式列。
+    "手入力休憩1", "手入力復帰1", "手入力休憩時間",
     # 参考（右端・普段見ない）。
     "実績確定状況",
 ]
@@ -97,7 +99,9 @@ DIFF_COLUMNS = [
 # 自動変換して保存し、openpyxl 経由で timedelta/time となって quick_export の転記が
 # 壊れる（2026-07-09 の事故。quick_export 側の正規化と二重の防御）。
 # 文字列書式なら入力値がそのまま保存され、入力者にも「31:00」のまま見える。
-MANUAL_INPUT_TEXT_COLUMNS = ["打刻修正", "手入力休憩1", "手入力復帰1", "手入力休憩時間"]
+# ※「手入力休憩時間」は数式列（TEXT()が文字列を返す）ため '@' の対象外。'@' を付けると
+#   ユーザーが F2→Enter した瞬間に数式が文字列として表示されてしまう。
+MANUAL_INPUT_TEXT_COLUMNS = ["手入力休憩1", "手入力復帰1"]
 
 # 汎用データから転記する予定・有休 列のキャノニカル名 → (候補ヘッダー, 完全一致のみか)
 # 有休系は完全一致のみ（部分一致だと「有休」が「AM有休」「PM有休」を誤ヒットするため）。
@@ -1462,6 +1466,10 @@ TRIAGE_FILL = {
 # 縞を塗ったあとに個別セルへ上塗りするので、そちらが優先で残る。
 # 緑はトリアージの E2EFDA / INFO の C6EFCE と紛れない薄さにしてある。
 STRIPE_FILL = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+# 文字サイズは全シート 12pt に統一（2026-08-20 谷津さん要望。既定の11ptだと見づらい）
+BASE_FONT_SIZE = 12
+DATA_FONT = Font(size=BASE_FONT_SIZE)
+HEADER_FONT = Font(bold=True, size=BASE_FONT_SIZE)
 
 
 def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry], month_label: str) -> None:
@@ -1501,8 +1509,8 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
     ]
     for r_idx, (label, value) in enumerate(summary_data, start=1):
         c1 = ws_sum.cell(row=r_idx, column=1, value=label)
-        c1.font = Font(bold=True)
-        ws_sum.cell(row=r_idx, column=2, value=value)
+        c1.font = HEADER_FONT
+        ws_sum.cell(row=r_idx, column=2, value=value).font = DATA_FONT
     ws_sum.column_dimensions["A"].width = 22
     ws_sum.column_dimensions["B"].width = 28
 
@@ -1512,12 +1520,20 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         c = ws.cell(row=1, column=col_idx, value=header)
         # 「人間判断」列は入力すべき列だと一目で分かるよう、ヘッダーを目立たせる
         c.fill = JUDGE_HEADER_FILL if header == "人間判断" else HEADER_FILL
-        c.font = Font(bold=True)
-        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.font = HEADER_FONT
+        # ヘッダーは折り返して表示（列幅をデータに合わせて詰めても列名が全部読める）
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 32   # 折り返した2行分の高さ
     ws.auto_filter.ref = f"A1:{get_column_letter(len(DIFF_COLUMNS))}1"
     # A〜G列(従業員ID/氏名/対象日付/差異種別/請求勤怠値/jinjer値/差分(分))とヘッダー行を固定。
     # 右へスクロールしても差異の中身ごと見える（2026-08-13 谷津さん要望で E2 → H2 に拡大）。
     ws.freeze_panes = "H2"
+
+    # 「手入力休憩時間」は休憩1・復帰1から自動計算する数式列（手入力させない。下の
+    # シート保護でこの列だけロックする）。列文字は列順の変更に追随するよう都度算出する。
+    break_start_col = get_column_letter(DIFF_COLUMNS.index("手入力休憩1") + 1)
+    break_end_col = get_column_letter(DIFF_COLUMNS.index("手入力復帰1") + 1)
+    break_calc_idx = DIFF_COLUMNS.index("手入力休憩時間") + 1
 
     # データ行（列名→値の対応で書き込み、列順の変更に強くする）
     for r_idx, drow in enumerate(diff_rows, start=2):
@@ -1525,8 +1541,8 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "従業員ID": drow.emp_id,
             "氏名": drow.name,
             "対象日付": drow.target_date,
-            "出勤予定": drow.sched_in,
-            "退勤予定": drow.sched_out,
+            "スケジュール出勤": drow.sched_in,
+            "スケジュール退勤": drow.sched_out,
             "休憩予定": drow.sched_break,
             "復帰予定": drow.sched_break_end,
             "有休": drow.yukyu,
@@ -1542,18 +1558,24 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             "警告理由": drow.warn_reason,
             "打刻時コメント": drow.punch_comment,
             "打刻修正時コメント": drow.jinjer_stamp_comment,
-            "自動修正提案値": drow.recommend_judge,  # 採用ラベル（請求勤怠/jinjer勤怠）
             "人間判断": drow.judge_default,   # トリアージの既定値を事前入力（要確認は空欄）
             "判断メモ": "",
-            "打刻修正": "",        # 出勤/退勤の提案値を人間が上書きしたい場合のみ
             "手入力休憩1": "",     # 休憩差異を承認して汎用データに反映する場合のみ
             "手入力復帰1": "",
-            "手入力休憩時間": "",
+            # 手入力休憩時間は下の数式で自動計算（row_values には入れない）
             "実績確定状況": drow.finalized,  # 参考表示
         }
+        # 休憩1・復帰1 が両方入っていれば休憩時間を計算する。MOD で日跨ぎ休憩も正の値になり、
+        # TEXT が "h:mm" の文字列を返すので手順3は手入力時と同じ形で読める。
+        break_formula = (
+            f'=IF(AND({break_start_col}{r_idx}<>"",{break_end_col}{r_idx}<>""),'
+            f'IFERROR(TEXT(MOD({break_end_col}{r_idx}-{break_start_col}{r_idx},1),"h:mm"),""),"")'
+        )
         for c_idx, header in enumerate(DIFF_COLUMNS, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=row_values.get(header, ""))
+            value = break_formula if header == "手入力休憩時間" else row_values.get(header, "")
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
             cell.alignment = Alignment(vertical="center")
+            cell.font = DATA_FONT
             if r_idx % 2 == 0:   # 先頭データ行(2行目)が緑、次が白…の縞
                 cell.fill = STRIPE_FILL
         # 深刻さ（DANGER/WARN/INFO）は「警告理由」セルの色で表す（警告レベル列は廃止）
@@ -1600,21 +1622,46 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
             font=Font(bold=True, color="000000"),
         ))
 
-    # 列幅（列名で指定。列順を変えても崩れない）
+    # 列幅（列名で指定。列順を変えても崩れない）。ヘッダーは折り返し表示なので、
+    # 時刻・数値しか入らない列は中身の幅まで詰めて横スクロールを減らす。
     width_map = {
-        "従業員ID": 12, "氏名": 16, "対象日付": 12,
-        "出勤予定": 10, "退勤予定": 10, "休憩予定": 10, "復帰予定": 10,
+        "従業員ID": 10, "氏名": 16, "対象日付": 11,
+        "スケジュール出勤": 8, "スケジュール退勤": 8, "休憩予定": 8, "復帰予定": 8,
         "有休": 8, "AM有休": 8, "PM有休": 8,
         "休日休暇名1": 14, "休日休暇名1：種別": 12,
-        "差異種別": 10, "請求勤怠値": 10, "jinjer値": 10, "差分(分)": 8,
-        "確認区分": 14, "警告理由": 40, "自動修正提案値": 14,
+        "差異種別": 10, "請求勤怠値": 9, "jinjer値": 9, "差分(分)": 7,
+        "確認区分": 14, "警告理由": 44,
         "人間判断": 12, "判断メモ": 28,
         "打刻時コメント": 40, "打刻修正時コメント": 40,
-        "打刻修正": 14, "手入力休憩1": 14, "手入力復帰1": 14, "手入力休憩時間": 14,
-        "実績確定状況": 12,
+        "手入力休憩1": 10, "手入力復帰1": 10, "手入力休憩時間": 10,
+        "実績確定状況": 10,
     }
     for i, header in enumerate(DIFF_COLUMNS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width_map.get(header, 14)
+
+    # シート保護（2026-08-20 谷津さん指定）。「手入力休憩時間」は自動計算の数式なので
+    # 手で書き換えられないよう固定する。それ以外のデータセルは今までどおり編集できる
+    # ように先に解除しておく（Excel は既定で全セルがロック扱いのため）。
+    # ヘッダー行(1行目)はロックのまま残す＝列名を書き換えられると手順3の転記が静かに壊れるため。
+    # パスワードは付けないので、必要になれば「校閲→シート保護の解除」でいつでも外せる。
+    # ※ ロックされたセルを含む範囲は Excel の仕様で並べ替えができない（フィルタの絞り込みは可）。
+    unlocked = Protection(locked=False)
+    locked = Protection(locked=True)
+    last_data_row = 1 + len(diff_rows)
+    for row in ws.iter_rows(min_row=2, max_row=last_data_row + 300,
+                            min_col=1, max_col=len(DIFF_COLUMNS) + 4):
+        for cell in row:
+            cell.protection = unlocked
+    for r_idx in range(2, last_data_row + 1):
+        ws.cell(row=r_idx, column=break_calc_idx).protection = locked
+    prot = ws.protection
+    prot.sheet = True        # 保護ON（True=禁止 / False=許可。sheet だけ True=保護ON）
+    prot.autoFilter = False  # フィルタの絞り込みは許可
+    prot.sort = False
+    prot.formatCells = False
+    prot.formatColumns = False
+    prot.formatRows = False
+    prot.insertRows = False
 
     # スケジュール開始合わせ（参考シート。手順3が読んで出勤予定時刻を自動で合わせる）
     if sched_aligns:
@@ -1624,15 +1671,16 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
         for c_idx, h in enumerate(sa_headers, start=1):
             c = ws_sa.cell(row=1, column=c_idx, value=h)
             c.fill = HEADER_FILL
-            c.font = Font(bold=True)
+            c.font = HEADER_FONT
         for r_idx, r in enumerate(sched_aligns, start=2):
-            ws_sa.cell(row=r_idx, column=1, value=r.emp_id)
-            ws_sa.cell(row=r_idx, column=2, value=r.name)
-            ws_sa.cell(row=r_idx, column=3, value=r.target_date)
-            ws_sa.cell(row=r_idx, column=4, value=r.jinjer_value)
+            for c_idx, v in enumerate(
+                [r.emp_id, r.name, r.target_date, r.jinjer_value], start=1
+            ):
+                ws_sa.cell(row=r_idx, column=c_idx, value=v).font = DATA_FONT
             c5 = ws_sa.cell(row=r_idx, column=5, value=r.kintai_value)
+            c5.font = DATA_FONT
             c5.number_format = "@"   # Excelの時刻型変換を防ぐ（手入力列と同じ理由）
-            ws_sa.cell(row=r_idx, column=6, value=r.warn_reason)
+            ws_sa.cell(row=r_idx, column=6, value=r.warn_reason).font = DATA_FONT
         for i, w in enumerate([12, 16, 12, 14, 18, 60], start=1):
             ws_sa.column_dimensions[get_column_letter(i)].width = w
         ws_sa.freeze_panes = "A2"
@@ -1640,20 +1688,25 @@ def write_excel(output_path: Path, diff_rows: list[DiffRow], logs: list[LogEntry
                           value="※このシートの確認・編集は不要です。手順3の書き戻しが"
                                 "出勤予定時刻だけを上の値に自動で合わせます（打刻は触りません）。"
                                 "合わせたくない行は削除してください。")
-        note.font = Font(color="808080")
+        note.font = Font(color="808080", size=BASE_FONT_SIZE)
 
     # 取込ログ
     ws_log = wb.create_sheet("取込ログ")
-    ws_log.cell(row=1, column=1, value="severity").font = Font(bold=True)
-    ws_log.cell(row=1, column=2, value="message").font = Font(bold=True)
-    ws_log.cell(row=1, column=3, value="source").font = Font(bold=True)
+    ws_log.cell(row=1, column=1, value="severity").font = HEADER_FONT
+    ws_log.cell(row=1, column=2, value="message").font = HEADER_FONT
+    ws_log.cell(row=1, column=3, value="source").font = HEADER_FONT
     for r_idx, entry in enumerate(logs, start=2):
-        ws_log.cell(row=r_idx, column=1, value=entry.severity)
-        ws_log.cell(row=r_idx, column=2, value=entry.message)
-        ws_log.cell(row=r_idx, column=3, value=entry.source)
+        for c_idx, v in enumerate([entry.severity, entry.message, entry.source], start=1):
+            ws_log.cell(row=r_idx, column=c_idx, value=v).font = DATA_FONT
     ws_log.column_dimensions["A"].width = 10
     ws_log.column_dimensions["B"].width = 80
     ws_log.column_dimensions["C"].width = 32
+
+    # 「サマリ」は wb.active として index 0 に作られる。最後尾へ回し、開いたときに
+    # 差異一覧が出るようにする（2026-08-20 谷津さん要望）。offset は相対移動量なので
+    # 「サマリが先頭にいる」前提でシート数-1 だけ後ろへずらす。
+    wb.move_sheet("サマリ", offset=len(wb.sheetnames) - 1)
+    wb.active = 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
@@ -1676,6 +1729,9 @@ class CompareResult:
     name_map_size: int = 0
     error: str = ""
     logs: list[LogEntry] = field(default_factory=list)
+    # 「jinjer未登録」（請求勤怠に勤務があるが氏名→従業員IDを解決できない）人の氏名。
+    # 一括モードが「未処理・未マッチ」シートに一覧として載せる。
+    unmatched_names: list[str] = field(default_factory=list)
 
 
 def run_quick_compare(
@@ -1769,6 +1825,14 @@ def run_quick_compare(
     )
     result.diff_count = len(diff_rows)
     log_func(f"[info] 差異・警告 合計 {len(diff_rows)} 件")
+
+    # jinjer未登録（氏名→従業員ID を解決できない）人の氏名。1人1行に集約済みだが
+    # 念のため重複を除いて出現順を保つ。一括モードが未処理・未マッチシートに載せる。
+    result.unmatched_names = list(dict.fromkeys(
+        r.name for r in diff_rows if r.kind == DIFF_KIND_UNMATCHED and r.name
+    ))
+    if result.unmatched_names:
+        log_func(f"[info] jinjer勤怠未登録者 {len(result.unmatched_names)} 名")
 
     by_level = {LEVEL_DANGER: 0, LEVEL_WARN: 0, LEVEL_INFO: 0}
     for r in diff_rows:
