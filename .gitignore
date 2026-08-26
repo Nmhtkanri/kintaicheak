@@ -13,3 +13,18 @@ tests/__pycache__/
 # 業務データ（個人情報を含む可能性）
 汎用データテンプレート/
 shift_sessions/
+
+# ビルド作業ログ
+build_*.log
+build_*.log.err
+
+# ローカル環境固有
+.claude/settings.local.json
+.claude/worktrees/
+*.lnk
+
+# 本番はZ:\API連携\docs\を参照（画面から編集される運用データ）
+docs/請求書モード_*.csv
+
+# pptx生成時の一時マニフェスト
+マニュアル/artifact-build-manifest.json
