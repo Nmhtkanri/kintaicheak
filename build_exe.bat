@@ -64,6 +64,10 @@ python -m PyInstaller ^
   --hidden-import services.jinjer_api_client ^
   --hidden-import services.keihi_payroll_import ^
   --hidden-import services.keihi_summary ^
+  --collect-submodules services.daicho ^
+  --hidden-import win32com.client.dynamic ^
+  --hidden-import pythoncom ^
+  --hidden-import win32timezone ^
   launcher.py
 
 if errorlevel 1 goto :build_failed

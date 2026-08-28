@@ -324,6 +324,24 @@ def test_job_waits_while_shaho_lock_alive(job_paths, monkeypatch):
     assert attach_job.read_progress()["state"] == "cancelled"
 
 
+def test_shaho_import_waits_for_haken_attach_lock(job_paths, tmp_path):
+    """相互ロックの逆方向: 派遣台帳の添付ロックが生きていれば標報投入は止まる（2026-08-28決定）。"""
+    import json as _json
+    from config import Config
+    from services.shaho_writer import ShahoWriteError, acquire_lock
+
+    shaho_lock = tmp_path / "shaho_own.lock"
+    Path(Config.HAKEN_ATTACH_LOCK_FILE).write_text(
+        _json.dumps({"user": "添付ジョブ", "started_at": dt.datetime.now().isoformat(), "count": 165}),
+        encoding="utf-8")
+    with pytest.raises(ShahoWriteError, match="派遣台帳"):
+        acquire_lock("2026-09", 1, path=str(shaho_lock))
+    # 添付ロックが消えれば取れる
+    Path(Config.HAKEN_ATTACH_LOCK_FILE).unlink()
+    assert acquire_lock("2026-09", 1, path=str(shaho_lock))
+    assert shaho_lock.exists()
+
+
 def test_job_lock_conflict_becomes_error(job_paths, monkeypatch):
     import json as _json
     from config import Config

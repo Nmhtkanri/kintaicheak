@@ -509,6 +509,18 @@ def acquire_lock(target_ym: str, count: int, *, path: str = None,
     """
     path = path or Config.SHAHO_IMPORT_LOCK_FILE
     now = datetime.datetime.now()
+    # 派遣台帳のjinjer添付（デタッチ子プロセス・3時間級）が動いていれば止まる。
+    # 添付側は標報投入ロックを見て待つので、これで双方向の防衛になる（2026-08-28決定）
+    try:
+        from services.daicho.attach_job import own_lock_info
+        haken_held = own_lock_info()
+    except Exception:  # noqa: BLE001 — 相互ロックの確認失敗で投入自体は止めない
+        haken_held = None
+    if haken_held:
+        raise ShahoWriteError(
+            f"いま派遣台帳のjinjer添付ジョブが動いています（{haken_held.get('user', '不明')} が "
+            f"{haken_held.get('started_at', '?')} に開始）。jinjerのレート制限はテナント単位のため、"
+            "添付が終わってから実行してください")
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
