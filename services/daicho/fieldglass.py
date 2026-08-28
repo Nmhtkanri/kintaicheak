@@ -269,6 +269,32 @@ def contract_from_workorder(wo: WorkOrder, src, q_end: dt.date, person=None, det
             cpi["休憩時間1 終了時間"] = (detail.get("breakEnd") or "").strip()
             for n in ("1 時間", "2 開始時間", "2 終了時間", "2 時間", "3 開始時間", "3 終了時間", "3 時間"):
                 cpi[f"休憩時間{n}"] = ""
+        # --- ここから下は新レポート（fieldglass_report）だけが持つキー。
+        #     旧 details JSON には無い＝legacy モードの出力は変わらない ---
+        sup = detail.get("supervisor") or {}
+        if (sup.get("name") or "").strip():
+            cpi[f"{_CMD} 指揮命令者部署"] = (sup.get("department") or "").strip() or wo.business_unit
+            cpi[f"{_CMD} 指揮命令者役職"] = (sup.get("title") or "").strip()
+            cpi[f"{_CMD} 指揮命令者氏名"] = sup["name"].strip()
+        if (detail.get("orgUnit") or "").strip():
+            tc["組織単位"] = detail["orgUnit"].strip()
+        if (detail.get("orgChief") or "").strip():
+            tc["組織の長の職名"] = detail["orgChief"].strip()
+        if (detail.get("siteTenure") or "").strip():
+            tc["事業所抵触日"] = detail["siteTenure"].strip()
+        if (detail.get("workOffice") or "").strip():
+            cpi[f"{_CMD} 事業所の名称"] = detail["workOffice"].strip()
+            tc["就業先正式事業所名称"] = ""   # 引き継ぎの旧名称より現行値を優先させる
+        if (detail.get("workAddress") or "").strip():
+            cpi[f"{_CMD} 事業所の所在地及び就業場所"] = detail["workAddress"].strip()
+        if (detail.get("conveniences") or "").strip():
+            for n in ("診療施設", "給食施設", "休憩室", "更衣室", "その他2", "その他3"):
+                tc[f"便宜供与：{n}"] = ""
+            tc["便宜供与：その他1"] = detail["conveniences"].strip()
+        if (detail.get("agreementTarget") or "").strip():
+            cpi["協定対象派遣労働者に該当するか否かの別"] = detail["agreementTarget"].strip()
+        if (detail.get("training") or "").strip():
+            cpi["教育訓練"] = detail["training"].strip()
     if person is not None:
         cpi["労働者氏名"] = person.name
         tc["スタッフ姓（日本語）"] = person.sei

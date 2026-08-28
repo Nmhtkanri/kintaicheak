@@ -211,7 +211,8 @@ def build_record(c: Contract, person: Person | None, match_state: str,
     # --- その他 ---
     f["便宜供与"] = _conveniences(c)
     f["安全及び衛生"] = c.t("安全及び衛生")
-    f["教育訓練の日時及び内容"] = MANUAL
+    # FGの新レポートは教育訓練の記載を持つ（e-staffing・旧details JSONでは常に空＝従来どおり手書き）
+    f["教育訓練の日時及び内容"] = c.c("教育訓練") or MANUAL
     f["キャリアコンサルティングの日時及び内容"] = MANUAL
     f["雇用安定措置の内容"] = MANUAL
     f["苦情の処理状況"] = c.t("苦情処理結果") or "申出なし"

@@ -19,11 +19,20 @@ PATTERN_CPI = "CPInmht*.csv"
 PATTERN_ROSTER = "従業員一覧*.xlsx"
 PATTERN_FG_WO = "*WorkOrder*.csv"
 PATTERN_FG_DETAILS = "*fieldglass_details*.json"
+# 2026-08-28〜: Fieldglass レポートスケジュールでメール添付が届く新形式（四半期ごと）
+PATTERN_FG_UAL_REPORT = "*ユニアデックス*業務内容*.xlsx"
+PATTERN_FG_ERICSSON = "派遣元管理台帳作成用*.csv"
+
+
+def _glob_newest(folder: Path, pattern: str) -> list[Path]:
+    # Excel が開いている間のロックファイル（~$〜.xlsx）は拾わない
+    files = [p for p in folder.glob(pattern) if not p.name.startswith("~$")]
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def newest(folder: Path, pattern: str) -> Path:
     """folder 直下で pattern に合う mtime 最新の1本。無ければ FileNotFoundError。"""
-    files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = _glob_newest(folder, pattern)
     if not files:
         raise FileNotFoundError(f"入力が見つかりません: {folder}\\{pattern}")
     return files[0]
@@ -31,7 +40,7 @@ def newest(folder: Path, pattern: str) -> Path:
 
 def newest_or_none(folder: Path, pattern: str) -> Path | None:
     """newest と同じ選び方で、無ければ None（Fieldglass 系は任意入力のため）。"""
-    files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = _glob_newest(folder, pattern)
     return files[0] if files else None
 
 
@@ -161,40 +170,73 @@ def check_freshness(quarter: str, quick: bool = False) -> dict:
                          note="" if (age is not None and age <= 30)
                          else "30日より古いキャッシュです。buildの「jinjer人マスタをAPIから取り直す」で更新できます"))
 
-    # --- Fieldglass WorkOrder CSV（任意。mtime＋期内WO件数）---
-    fg = newest_or_none(config.INPUT_DIR, PATTERN_FG_WO)
-    if fg is None:
-        rows.append(_row("fg_wo", "Fieldglass WorkOrder CSV", verdict="warn",
-                         note="見つかりません（Fieldglass 分は台帳に入りません）"))
-    else:
-        row = _row("fg_wo", "Fieldglass WorkOrder CSV", filename=fg.name,
-                   date=_fmt(_mtime_dt(fg)), date_source="更新日時")
+    # --- Fieldglass（新レポートがあればそれが正。無ければ旧2段構えを表示）---
+    ual = newest_or_none(config.INPUT_DIR, PATTERN_FG_UAL_REPORT)
+    if ual is not None:
+        m = _DATE_8.search(ual.name)
+        u_date = dt.datetime.strptime(m.group(1), "%Y%m%d").date() if m else _mtime_dt(ual).date()
+        row = _row("fg_ual_report", "FG新レポート（ユニアデックス）", filename=ual.name,
+                   date=_fmt(u_date), date_source="ファイル名" if m else "更新日時",
+                   note="旧 WO CSV＋詳細JSON の代わりにこれ1本を読みます")
         if not quick:
             try:
-                from .fieldglass import load_workorders, workorders_in_quarter
-                n = len(workorders_in_quarter(load_workorders(fg), q_start, q_end))
+                from .fieldglass import workorders_in_quarter
+                from .fieldglass_report import load_ual_report
+                wos, _s, _w = load_ual_report(ual)
+                n = len(workorders_in_quarter(wos, q_start, q_end))
                 row["in_quarter"] = n
                 if n == 0:
                     row["verdict"] = "warn"
                     row["note"] = "対象期に重なるWOが0件（期のズレたレポートの疑い）"
             except Exception as e:  # noqa: BLE001
-                row["note"] = f"WO件数を数えられませんでした: {e}"
+                row["verdict"] = "warn"
+                row["note"] = f"レポートを読めませんでした: {e}"
         rows.append(row)
-
-    # --- SAP詳細 JSON（任意。名前の _YYYYMMDD。WOより古ければズレ検知）---
-    det = newest_or_none(config.INPUT_DIR, PATTERN_FG_DETAILS)
-    if det is None:
-        rows.append(_row("fg_details", "SAP詳細 JSON (fieldglass_details)", verdict="warn",
-                         note="見つかりません（派遣先責任者等は引き継ぎ値になります）"))
     else:
-        m = _DATE_8.search(det.name)
-        d_date = dt.datetime.strptime(m.group(1), "%Y%m%d").date() if m else _mtime_dt(det).date()
-        row = _row("fg_details", "SAP詳細 JSON (fieldglass_details)", filename=det.name,
-                   date=_fmt(d_date), date_source="ファイル名" if m else "更新日時")
-        if fg is not None and d_date < _mtime_dt(fg).date():
-            row["verdict"] = "warn"
-            row["note"] = "WorkOrder CSV より古い詳細です（取得日のズレ。2段構えの片方だけ更新の疑い）"
-        rows.append(row)
+        fg = newest_or_none(config.INPUT_DIR, PATTERN_FG_WO)
+        if fg is None:
+            rows.append(_row("fg_wo", "Fieldglass WorkOrder CSV", verdict="warn",
+                             note="見つかりません（Fieldglass 分は台帳に入りません）"))
+        else:
+            row = _row("fg_wo", "Fieldglass WorkOrder CSV", filename=fg.name,
+                       date=_fmt(_mtime_dt(fg)), date_source="更新日時")
+            if not quick:
+                try:
+                    from .fieldglass import load_workorders, workorders_in_quarter
+                    n = len(workorders_in_quarter(load_workorders(fg), q_start, q_end))
+                    row["in_quarter"] = n
+                    if n == 0:
+                        row["verdict"] = "warn"
+                        row["note"] = "対象期に重なるWOが0件（期のズレたレポートの疑い）"
+                except Exception as e:  # noqa: BLE001
+                    row["note"] = f"WO件数を数えられませんでした: {e}"
+            rows.append(row)
+
+        det = newest_or_none(config.INPUT_DIR, PATTERN_FG_DETAILS)
+        if det is None:
+            rows.append(_row("fg_details", "SAP詳細 JSON (fieldglass_details)", verdict="warn",
+                             note="見つかりません（派遣先責任者等は引き継ぎ値になります）"))
+        else:
+            m = _DATE_8.search(det.name)
+            d_date = dt.datetime.strptime(m.group(1), "%Y%m%d").date() if m else _mtime_dt(det).date()
+            row = _row("fg_details", "SAP詳細 JSON (fieldglass_details)", filename=det.name,
+                       date=_fmt(d_date), date_source="ファイル名" if m else "更新日時")
+            if fg is not None and d_date < _mtime_dt(fg).date():
+                row["verdict"] = "warn"
+                row["note"] = "WorkOrder CSV より古い詳細です（取得日のズレ。2段構えの片方だけ更新の疑い）"
+            rows.append(row)
+
+    # --- FG新レポート（エリクソン。直接契約3人の現行値上書きに使う）---
+    eric = newest_or_none(config.INPUT_DIR, PATTERN_FG_ERICSSON)
+    if eric is None:
+        rows.append(_row("fg_ericsson", "FG新レポート（エリクソン）", verdict="info",
+                         note="無し（エリクソン分は手入力マスタの値のまま）"))
+    else:
+        m = _DATE_8.search(eric.name)
+        e_date = dt.datetime.strptime(m.group(1), "%Y%m%d").date() if m else _mtime_dt(eric).date()
+        rows.append(_row("fg_ericsson", "FG新レポート（エリクソン）", filename=eric.name,
+                         date=_fmt(e_date), date_source="ファイル名" if m else "更新日時",
+                         verdict="info", note="直接契約（エリクソン3人）の責任者・就業時間を現行値に更新"))
 
     # --- 直接契約マスタ（固定名。自動＋手入力の結合で期内件数）---
     from .direct import AUTO_CSV, MANUAL_CSV

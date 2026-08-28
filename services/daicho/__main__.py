@@ -49,7 +49,8 @@ def cmd_build(args) -> int:
         result = build_quarter(
             args.quarter, tc=args.tc, cpi=args.cpi, roster=args.roster,
             template=args.template, out_dir=args.out_dir, fg=args.fg,
-            fg_details=args.fg_details, no_fg=args.no_fg, jinjer_api=args.jinjer_api)
+            fg_details=args.fg_details, no_fg=args.no_fg, jinjer_api=args.jinjer_api,
+            fg_mode=args.fg_mode)
     except FileNotFoundError as e:
         raise SystemExit(str(e))
     for note in result["notes"]:
@@ -180,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     p2.add_argument("--fg", help="Fieldglass WorkOrder CSV（省略時は input の最新 *WorkOrder*.csv）")
     p2.add_argument("--fg-details", help="SAP詳細JSON（省略時は input の最新 *fieldglass_details*.json）")
     p2.add_argument("--no-fg", action="store_true", help="Fieldglass 分を含めない")
+    p2.add_argument("--fg-mode", choices=["auto", "legacy", "report"], default="auto",
+                    help="auto=新レポートがあれば使う / legacy=旧WO CSV＋詳細JSON / report=新レポート必須")
     p2.add_argument("--jinjer-api", action="store_true",
                     help="jinjer API から退職者込みの人マスタを再取得してキャッシュ（無指定ならキャッシュを使う）")
     p2.set_defaults(func=cmd_build)

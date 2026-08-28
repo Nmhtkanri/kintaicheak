@@ -11,7 +11,8 @@ from pathlib import Path
 
 from . import config
 from .estaffing import contracts_in_quarter, load_contracts
-from .inputs import (PATTERN_CPI, PATTERN_FG_DETAILS, PATTERN_FG_WO, PATTERN_ROSTER,
+from .inputs import (PATTERN_CPI, PATTERN_FG_DETAILS, PATTERN_FG_ERICSSON,
+                     PATTERN_FG_UAL_REPORT, PATTERN_FG_WO, PATTERN_ROSTER,
                      PATTERN_TC, newest, newest_or_none)
 from .records import build_record
 from .roster import load_roster
@@ -21,10 +22,13 @@ from .writer import write_quarter
 
 def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None,
                   out_dir=None, fg=None, fg_details=None, no_fg: bool = False,
-                  jinjer_api: bool = False) -> dict:
+                  jinjer_api: bool = False, fg_mode: str = "auto") -> dict:
     """台帳xlsx・一覧CSV・警告CSVを out_dir へ生成し、結果サマリの dict を返す。
 
     入力が見つからないときは FileNotFoundError（CLI 側で SystemExit に変換する）。
+    fg_mode: auto=新レポート（fieldglass_report）が input にあればそれを使う /
+             report=新レポート必須 / legacy=旧 WO CSV＋details JSON（移設前と同一出力）。
+    エリクソンの直接契約上書きも legacy では行わない（比較検証のため）。
     戻り値: {quarter, label, counts, match, n_warn, paths, inputs, global_warnings,
              notes, summary}
     """
@@ -65,29 +69,49 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
         records.append(build_record(c, person, state, q_start, q_end, generated_at=started))
 
     # --- SAP Fieldglass（2026年4月以降のユニアデックス分）---
+    if fg_mode not in ("auto", "legacy", "report"):
+        raise ValueError(f"fg_mode は auto / legacy / report のいずれか: {fg_mode!r}")
     fg_records: list = []
     fg_note = ""
     fg_path = None
     det_path = None
+    report_path = None
+    use_report = False
+    fg_src_name = ""
     if not no_fg:
-        if fg:
-            fg_path = Path(fg)
-        else:
-            fg_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_WO)
-    if fg_path is not None:
+        if fg_mode != "legacy" and not fg:
+            report_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_UAL_REPORT)
+        use_report = fg_mode == "report" or (fg_mode == "auto" and report_path is not None)
+        if fg_mode == "report" and report_path is None:
+            raise FileNotFoundError(
+                f"入力が見つかりません: {config.INPUT_DIR}\\{PATTERN_FG_UAL_REPORT}")
+        if not use_report:
+            report_path = None
+            if fg:
+                fg_path = Path(fg)
+            else:
+                fg_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_WO)
+    if use_report or fg_path is not None:
         from .fieldglass import (FG_CARRIED_FIELDS, apply_defaults, contract_from_workorder,
                                  derive_defaults, detail_has_schedule, fill_from_person,
                                  load_details, load_workorders, name_candidates, workorders_in_quarter)
         from .roster import normalize_name
         det_by_staff: dict = {}
         det_by_wo: dict = {}
-        if fg_details:
-            det_path = Path(fg_details)
+        if use_report:
+            from .fieldglass_report import load_ual_report
+            wos_all, det_by_staff, det_by_wo = load_ual_report(report_path)
+            fg_src_name = report_path.name
         else:
-            det_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_DETAILS)
-        if det_path is not None:
-            det_by_staff, det_by_wo = load_details(det_path)
-        wos = workorders_in_quarter(load_workorders(fg_path), q_start, q_end)
+            if fg_details:
+                det_path = Path(fg_details)
+            else:
+                det_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_DETAILS)
+            if det_path is not None:
+                det_by_staff, det_by_wo = load_details(det_path)
+            wos_all = load_workorders(fg_path)
+            fg_src_name = fg_path.name
+        wos = workorders_in_quarter(wos_all, q_start, q_end)
         if wos:
             latest_by_name: dict = {}
             for c in contracts:
@@ -149,22 +173,42 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
                         "e-staffing標準値・jinjer属性で補完＝契約書面での確認推奨")
                 if len(wo.supervisors) > 1:
                     rec.warnings.append(f"FG: スーパーバイザが{len(wo.supervisors)}名登録 → 指揮命令者の特定要確認")
+                if use_report and wo.end is None:
+                    # 新レポートは「最新の終了日」が空のWOがまれにある（実測: 即日終了の1件）。
+                    # 旧CSVには実終了日が入っていたため、継続中扱いで期末まで延ばした事実を人に見せる
+                    rec.warnings.append("FG: レポートの終了日が空（継続中として期末まで延長）"
+                                        "→ 中止・即日終了のWOでないか実際の終了日を要確認")
                 if any(k in es_hit_names for k in cands):
                     rec.warnings.append("FG: 同じ四半期に e-staffing 契約もある（二重か、2派遣先か要確認）")
                 rec.fields["備考"] = (f"SAP Fieldglass WO {wo.wo_id} 改訂{wo.revision}（求人情報 {wo.job_posting_id}）"
                                      f"／{src_note}／派遣許可番号 {rec.fields.get('派遣許可番号', '')}"
                                      f"／作成 {started:%Y/%m/%d %H:%M}")
+                if detail and (detail.get("monthlyStdLower") or detail.get("monthlyStdUpper")):
+                    rec.fields["備考"] += (f"／月間標準時間 {detail.get('monthlyStdLower', '')}"
+                                          f"〜{detail.get('monthlyStdUpper', '')}時間")
                 fg_records.append(rec)
             records += fg_records
-            fg_note = (f"Fieldglass: {fg_path.name} → WO {len(wos)}件（SAP詳細あり {n_detail} / 引き継ぎ元あり {carried} / 元なし {len(wos) - carried}）。"
+            fg_note = (f"Fieldglass: {fg_src_name} → WO {len(wos)}件（SAP詳細あり {n_detail} / 引き継ぎ元あり {carried} / 元なし {len(wos) - carried}）。"
                        f"責任者・業務内容等はSAP詳細の現行値、36協定・保険・抵触日（と詳細の無い分）は直近e-staffing契約からの引き継ぎ"
-                       + (f"／詳細: {det_path.name}" if det_path is not None else "／SAP詳細JSONなし"))
+                       + (f"／詳細: {det_path.name}" if det_path is not None
+                          else ("／新レポート1本読み（詳細JSONなし運用）" if use_report else "／SAP詳細JSONなし")))
 
     # --- 直接契約（紙/Excel契約 → マスタCSV）---
     direct_records: list = []
     from .direct import contract_from_row, load_master, rows_in_quarter
     d_master = load_master()
     d_hit = rows_in_quarter(d_master, q_start, q_end)
+    # エリクソンの新レポートがあれば、直接契約マスタの該当行へ現行値を上書きする
+    # （レポートに期間・WOが無いため行は増やさない。legacy モードでは行わない＝比較検証用）
+    eric_note = ""
+    if d_hit and fg_mode != "legacy":
+        eric_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_ERICSSON)
+        if eric_path is not None:
+            from .fieldglass_report import apply_ericsson_report, load_ericsson_report
+            n_upd, unmatched = apply_ericsson_report(
+                load_ericsson_report(eric_path), d_hit, source_name=eric_path.name)
+            eric_note = (f"エリクソン: {eric_path.name} の現行値で直接契約 {n_upd}行を更新"
+                         + (f"／突合できず: {'・'.join(n for n in unmatched if n)}" if unmatched else ""))
     if d_hit:
         from .fieldglass import apply_defaults as _apply_d, derive_defaults as _derive_d, fill_from_person as _fill_d
         from .roster import normalize_name as _nn
@@ -190,13 +234,15 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
                                  + f"／作成 {started:%Y/%m/%d %H:%M}")
             rec.warnings.append(f"直接契約: 契約書（{row.get('様式') or '?'}）から抽出"
                                 + (f"。{len(filled)}項目を標準値・jinjerで補完" if filled else ""))
+            if row.get("_エリクソン注記"):
+                rec.warnings.append(f"直接契約: {row['_エリクソン注記']}")
             if _nn(sei, mei) in covered_names:
                 rec.warnings.append("直接契約: 同じ四半期に e-staffing/Fieldglass の契約もある（重複か2契約か要確認）")
             direct_records.append(rec)
         records += direct_records
 
     global_warnings = [f"入力: 契約データ={tc.name} / 契約書・通知書データ={cpi.name} / 従業員一覧={roster_path.name}"
-                       + (f" / Fieldglass={fg_path.name}" if fg_records else "")
+                       + (f" / Fieldglass={fg_src_name}" if fg_records else "")
                        + (" / 直接契約マスタ" if direct_records else "")]
     if direct_records:
         global_warnings.append(f"直接契約: マスタ {len(d_master)}行のうち {len(d_hit)}行がこの四半期に該当")
@@ -204,6 +250,8 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
         global_warnings.append(api_note)
     if fg_note:
         global_warnings.append(fg_note)
+    if eric_note:
+        global_warnings.append(eric_note)
     global_warnings += load_warnings + roster.warnings
     if match["none"] or match["ambiguous"]:
         global_warnings.append(
@@ -229,7 +277,7 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
         "n_warn": n_warn,
         "paths": {k: str(v) for k, v in paths.items()},
         "inputs": {"tc": tc.name, "cpi": cpi.name, "roster": roster_path.name,
-                   "fg": fg_path.name if fg_path is not None else "",
+                   "fg": fg_src_name, "fg_mode": ("report" if use_report else "legacy"),
                    "fg_details": det_path.name if det_path is not None else ""},
         "global_warnings": global_warnings,
         "notes": notes,
