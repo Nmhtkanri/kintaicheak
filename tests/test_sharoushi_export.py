@@ -50,8 +50,8 @@ V2_COLUMN_NAMES = [
     "深夜残業時間", "休日出勤時間", "休日深夜時間", "控除時間", "超過時間",
     "出勤日数", "欠勤日数", "有給休暇取得日数計", "有給休暇残（翌月繰越分）",
     "基本給", "みなし給", "役職手当", "リーダー手当", "顧客対応当番手当",
-    "調整手当", "テレワーク手当", "定常外業務対応手当", "その他手当", "過不足調整",
-    "課税通勤費", "非課税通勤費", "通信手当", "過不足調整", "総支給額", "課税対象額",
+    "調整手当", "テレワーク手当", "定常外業務対応手当", "その他手当", "差額調整",
+    "課税通勤費", "非課税通勤費", "通信手当", "支給過不足調整", "総支給額", "課税対象額",
     "社保調整", "雇用保険料", "健康保険料", "介護保険料", "厚生年金保険料",
     "子ども・子育て支援金", "年調過不足額", "所得税", "住民税", "社宅家賃", "貸付金返済",
     "社会保険料計", "控除合計", "差引支給額", "口座1振込額", "立替金（顧客請求分）",
@@ -475,12 +475,27 @@ class LayoutTests(unittest.TestCase):
                                   "職能手当", "営業手当", "現場管理費", "家賃手当",
                                   "欠勤控除額", "課税対象額"])
 
-    def test_duplicate_display_names_have_distinct_col_ids(self):
-        """同じ見出しの列があっても列IDは別（過不足調整＝差額調整／支給過不足調整）。"""
-        self.assertEqual(COL_LABELS["sagaku_chosei"], COL_LABELS["shikyu_kabusoku_chosei"])
-        self.assertEqual(LAYOUT_V2.column_names.count("過不足調整"), 2)
-        self.assertNotEqual(LAYOUT_V2.index_of("sagaku_chosei"),
-                            LAYOUT_V2.index_of("shikyu_kabusoku_chosei"))
+    def test_v2_headings_are_unique(self):
+        """V2 の見出しは重複なし。旧60列は「過不足調整」「超過時間」が2つずつあって、
+        どちらが差額調整でどちらが支給過不足調整か読めなかった（2026-08-28 谷津さん指摘）。"""
+        names = LAYOUT_V2.column_names
+        dup = sorted({x for x in names if names.count(x) > 1})
+        self.assertEqual(dup, [], "見出しが重複している: %s" % dup)
+
+    def test_v2_uses_jinjer_item_names_for_the_two_chosei_columns(self):
+        self.assertEqual(COL_LABELS["sagaku_chosei"], "差額調整")            # allowance24
+        self.assertEqual(COL_LABELS["shikyu_kabusoku_chosei"], "支給過不足調整")  # allowance54
+        self.assertEqual(LAYOUT_V2.column_names[23], "差額調整")             # X列
+        self.assertEqual(LAYOUT_V2.column_names[27], "支給過不足調整")        # AB列
+
+    def test_v1_keeps_the_old_headings(self):
+        """V1 は「昔どおりの形」を再現するのが役目なので見出しは変えない。"""
+        self.assertEqual(LAYOUT_V1.column_names[35], "過不足調整")   # AJ列
+        self.assertEqual(LAYOUT_V1.column_names[40], "過不足調整")   # AO列
+        self.assertEqual(LAYOUT_V1.column_names.count("過不足調整"), 2)
+        self.assertEqual(set(LAYOUT_V1.labels),
+                         {"sagaku_chosei", "shikyu_kabusoku_chosei"})
+        self.assertEqual(LAYOUT_V2.labels, {})
 
     def test_resolve_layout(self):
         self.assertIs(resolve_layout("V1"), LAYOUT_V1)
@@ -525,9 +540,16 @@ class LayoutCorrespondenceTests(unittest.TestCase):
                              "V2[%d] %s と V1[%d] %s が違う"
                              % (i2, V2_COLUMN_NAMES[i2], i1, V1_COLUMN_NAMES[i1]))
 
+    # V2 で見出しだけ変えた列（中身は同じ）。V1 は旧ファイルどおり「過不足調整」のまま。
+    RENAMED = {23: ("過不足調整", "差額調整"), 27: ("過不足調整", "支給過不足調整")}
+
     def test_shared_column_headings_match(self):
         for i2, i1 in V2_TO_V1_INDEX.items():
             if i1 is None:
+                continue
+            if i2 in self.RENAMED:
+                self.assertEqual((V1_COLUMN_NAMES[i1], V2_COLUMN_NAMES[i2]),
+                                 self.RENAMED[i2])
                 continue
             self.assertEqual(V1_COLUMN_NAMES[i1], V2_COLUMN_NAMES[i2])
 

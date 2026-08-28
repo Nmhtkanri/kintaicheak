@@ -90,11 +90,11 @@ COL_LABELS = {
     "telework_teate": "テレワーク手当",
     "teijogai_gyomu_teate": "定常外業務対応手当",
     "sonota_teate": "その他手当",
-    "sagaku_chosei": "過不足調整",            # allowance24 差額調整
+    "sagaku_chosei": "差額調整",              # allowance24
     "kazei_tsukinhi": "課税通勤費",
     "hikazei_tsukinhi": "非課税通勤費",
     "tsushin_teate": "通信手当",
-    "shikyu_kabusoku_chosei": "過不足調整",   # allowance54 支給過不足調整（↑と同じ見出し）
+    "shikyu_kabusoku_chosei": "支給過不足調整",  # allowance54
     "soushikyu_gaku": "総支給額",
     "kazei_taisho_gaku": "課税対象額",
     # --- 控除 ---
@@ -135,11 +135,21 @@ class Layout(object):
     列IDが None の要素は「見出しだけあって中身は常に空」の列（V1 の名残）。
     silent_hidden は「この形式では列を持たないのが仕様」の列ID。ここに挙げたものは
     金額があっても hidden_with_amount の警告に出さない。
+    labels はこのレイアウトだけの見出し上書き（V1 は旧ファイルの見出しを保つために使う）。
     """
 
-    def __init__(self, key, label, entries, silent_hidden=()):
+    def __init__(self, key, label, items, silent_hidden=(), labels=None):
+        names = dict(COL_LABELS)
+        for cid in (labels or {}):
+            assert cid in COL_LABELS, cid
+        names.update(labels or {})
+        entries = []
+        for it in items:
+            # ('見出し',) と書いたところは「見出しだけあって中身は常に空」の列
+            entries.append((None, it[0]) if isinstance(it, tuple) else (it, names[it]))
         self.key = key
         self.label = label
+        self.labels = dict(labels or {})
         self.entries = tuple(entries)
         self.silent_hidden = frozenset(silent_hidden)
         self.column_names = [name for _cid, name in self.entries]
@@ -160,14 +170,8 @@ class Layout(object):
 
 
 def _entries(*items):
-    """列IDの並び → entries。('見出し',) と書いたところは「常に空の列」になる。"""
-    out = []
-    for it in items:
-        if isinstance(it, tuple):
-            out.append((None, it[0]))
-        else:
-            out.append((it, COL_LABELS[it]))
-    return tuple(out)
+    """列IDの並び。('見出し',) と書いたところは「常に空の列」になる。"""
+    return items
 
 
 # 新49列（2026-08-28〜）。常に空だった13列を削り、課税対象額・社保調整・社宅家賃・
@@ -210,15 +214,18 @@ LAYOUT_V1 = Layout("V1", "旧60列", _entries(
     "shaho_kei", "kojo_gokei", "sashihiki_shikyu", "koza1_furikomi",
     "tatekaekin_kyaku", "tatekaekin", "sonota", "genkin_shikyu",
 ), silent_hidden=("kazei_taisho_gaku", "shaho_chosei",
-                  "shataku_yachin", "kashitsukekin_hensai"))
+                  "shataku_yachin", "kashitsukekin_hensai"),
+   # 見出しは旧ファイルのまま。V1 は「昔どおりの形」を再現するのが役目で、見本 231 行との
+   # 突合とバイト一致の土台になっている。名前を直すのは V2 だけ（2026-08-28 谷津さん）。
+   labels={"sagaku_chosei": "過不足調整", "shikyu_kabusoku_chosei": "過不足調整"})
 
 LAYOUTS = {LAYOUT_V2.key: LAYOUT_V2, LAYOUT_V1.key: LAYOUT_V1}
 DEFAULT_LAYOUT_KEY = LAYOUT_V2.key
 
-# 見出しの取り違えを import 時に落とす（V1/V2 で同じ列IDに別の見出しを付けていないか）
+# 見出しの取り違えを import 時に落とす（上書きを宣言していない列が COL_LABELS と違わないか）
 for _lay in LAYOUTS.values():
     for _cid, _name in _lay.entries:
-        assert _cid is None or COL_LABELS[_cid] == _name, (_lay.key, _cid, _name)
+        assert _cid is None or _cid in _lay.labels or COL_LABELS[_cid] == _name,             (_lay.key, _cid, _name)
 
 # 計算に使う source_key
 K_KOYOHOKEN = "salary_deduction_items:deduction28"
