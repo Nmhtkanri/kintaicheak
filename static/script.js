@@ -2773,7 +2773,8 @@ function sharoushiRenderResult(data) {
     document.getElementById('sharoushi-cnt-ledger').textContent =
         (data.ledger_applied || []).length;
     const warnCount = (data.unknown || []).length + (data.unmapped_systems || []).length
-        + (data.multi_statement || []).length;
+        + (data.multi_statement || []).length + (data.hidden || []).length
+        + (data.all_zero || []).length;
     document.getElementById('sharoushi-cnt-warn').textContent = warnCount;
 
     const dlUrl = (fn) => '/sharoushi_download/' + encodeURIComponent(data.ym) + '/'
@@ -2782,7 +2783,8 @@ function sharoushiRenderResult(data) {
     document.getElementById('sharoushi-file').innerHTML =
         '<table class="keiri-md-table"><tr><th>ファイル</th><th>内容</th><th></th></tr>'
         + '<tr><td>' + escapeHtml(data.filename) + '</td><td>' + data.rows + '人 / '
-        + data.columns + '列</td><td><a class="btn btn-sm" href="' + dlUrl(data.filename)
+        + data.columns + '列（' + escapeHtml(data.layout_label || '') + '）'
+        + '</td><td><a class="btn btn-sm" href="' + dlUrl(data.filename)
         + '">ダウンロード</a></td></tr>'
         + '<tr><td>' + escapeHtml(data.biko_filename || '') + '</td><td>イレギュラー発生分の理由 '
         + bikoN + '件</td><td><a class="btn btn-sm" href="' + dlUrl(data.biko_filename)
@@ -2815,6 +2817,25 @@ function sharoushiRenderResult(data) {
             + escapeHtml(data.multi_statement.join('、'))
             + '<div class="hint">基本給が入っている明細を採用しました。</div></div>';
     }
+    if ((data.hidden || []).length) {
+        wh += '<div class="alert alert-warning"><b>この形式に列が無い控除項目に金額があります'
+            + '（' + data.hidden.length + '件）</b>'
+            + '<div class="hint">金額は控除合計には入っていますが、明細としては社労士へ渡りません。'
+            + '列を用意するかどうか決めてください。</div>'
+            + '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th>'
+            + '<th>項目</th><th>金額</th></tr>'
+            + data.hidden.map(h => '<tr><td>' + escapeHtml(h['社員番号']) + '</td><td>'
+                + escapeHtml(h['氏名']) + '</td><td>' + escapeHtml(h['項目']) + '</td><td>'
+                + escapeHtml(h['金額']) + '</td></tr>').join('')
+            + '</table></div>';
+    }
+    if ((data.all_zero || []).length) {
+        wh += '<div class="alert alert-warning"><b>'
+            + escapeHtml(data.all_zero.map(z => z['項目']).join('、'))
+            + ' が全員ゼロです</b>'
+            + '<div class="hint">jinjer 側で項目が移設された可能性があります。'
+            + '列マッピングCSVの source_key を確認してください。</div></div>';
+    }
     if ((data.biko_pending || []).length) {
         wh += '<div class="alert alert-warning">イレギュラー発生分のうち <b>'
             + data.biko_pending.length + '件</b> の理由が未入力です'
@@ -2838,6 +2859,19 @@ function sharoushiRenderResult(data) {
                 + escapeHtml(a['金額']) + '</td><td>' + escapeHtml(a['メモ'] || '') + '</td></tr>').join('')
             + '</table></div>';
     }
+    if ((data.details || []).length) {
+        dh += '<div style="margin-top:6px"><b>社宅家賃・貸付金返済・社保調整の発生者</b>'
+            + '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th>'
+            + '<th>項目</th><th style="text-align:right">金額</th></tr>'
+            + data.details.map(d => '<tr><td>' + escapeHtml(d['社員番号']) + '</td><td>'
+                + escapeHtml(d['氏名']) + '</td><td>' + escapeHtml(d['項目'])
+                + (d['列あり'] ? '' : '（この形式では列なし）') + '</td>'
+                + '<td style="text-align:right">' + escapeHtml(d['金額']) + '</td></tr>').join('')
+            + '</table>'
+            + '<div class="hint">jinjer の入力先は月によって揺れます（2026-05 は貸付金返済が'
+            + '社宅家賃の枠に入っていました）。名前と項目の組み合わせが先月と変わっていないか'
+            + '確かめてください。</div></div>';
+    }
     if ((data.excluded || []).length) {
         dh += '<div class="hint" style="margin-top:6px">対象外: '
             + data.excluded.map(e => escapeHtml(e['社員番号']) + '（' + escapeHtml(e['理由']) + '）')
@@ -2848,6 +2882,10 @@ function sharoushiRenderResult(data) {
         + escapeHtml(data.ledger_path || '（未設定）') + '</div>';
     document.getElementById('sharoushi-detail').innerHTML = dh;
 
+    const pvLayout = document.getElementById('sharoushi-preview-layout');
+    if (pvLayout) {
+        pvLayout.textContent = '（' + (data.layout_label || '') + '・' + data.columns + '列）';
+    }
     document.getElementById('sharoushi-preview').textContent = (data.preview || []).join('\n');
     document.getElementById('sharoushi-result-area').style.display = 'block';
 }
@@ -2907,6 +2945,7 @@ if (sharoushiRunBtn) {
         fd.append('mapping_csv', document.getElementById('sharoushi-mapping-csv').value);
         fd.append('ledger_csv', document.getElementById('sharoushi-ledger-csv').value);
         fd.append('refresh', document.getElementById('sharoushi-refresh').checked ? '1' : '0');
+        fd.append('layout', document.getElementById('sharoushi-legacy').checked ? 'V1' : 'V2');
         if (allowUnknown) fd.append('allow_unknown', '1');
 
         sharoushiRunBtn.disabled = true;

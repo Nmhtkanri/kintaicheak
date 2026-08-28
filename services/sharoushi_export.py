@@ -1,11 +1,18 @@
-r"""社労士モード: jinjer 給与明細 → 社労士（前田事務所）へ渡す給与CSV（60列・cp932）。
+r"""社労士モード: jinjer 給与明細 → 社労士（前田事務所）へ渡す給与CSV（49列・cp932）。
 
 入力は jinjer の給与明細 API **1本だけ**。statements[].basic_info に氏名と給与体系が
 入っているので、従業員マスタの別取得は要らない。キャッシュは経理モードと共用する
 （outputs/keiri/raw/salary_statements_{ym}.json）。jinjer への書き込みは一切しない。
 
+⚠ 列は「番号」ではなく **列ID（スラッグ）** で指す。
+  2026-08-28 に「構造的に常に空だった13列」を削って 60列 → 49列 にしたため、番号で書くと
+  古い表がそのまま**別の列**を指してしまう。列マッピングCSVも `列id` をキーにしてあり、
+  旧スキーマ（列番号）のファイルは読まずにエラーで止める。
+  出力の並びは Layout が持つ（LAYOUT_V2 = 新49列 / LAYOUT_V1 = 旧60列）。
+  LAYOUT_V1 は社労士の受け入れ確認が済むまでの控え。**済んだら V1 一式を撤去する。**
+
 列の対応は **給与体系ごとに変わる**（月給制1/2/3・時給制1・管理監督者）。対応表は
-Z:\API連携\docs\社労士モード_列マッピング.csv に外出ししてあり、直せば exe の再ビルド
+Z:\API連携\docs\社労士モード_列マッピング_v2.csv に外出ししてあり、直せば exe の再ビルド
 なしで次回実行から効く。ファイルが無いときはこのモジュール内の既定表で動く。
 
 ⚠ 立替金・その他の扱い（2026-08-14 谷津さん指示・2026-07 実データ 231 行で検証済み）
@@ -15,18 +22,27 @@ Z:\API連携\docs\社労士モード_列マッピング.csv に外出しして�
     差引支給額   = 差引支給額(payment1) そのまま（**何も引かない**。マイナスも据え置き）
   立替金2種と「その他」（経費精算）は報酬ではないので、総支給額と口座1振込額の両方から外す。
   差引支給額には乗ったままなので、この3つを引いた額が実際の振込額になる。
-  社宅家賃・貸付金返済・社保調整には専用列が無く、社会保険料計／控除合計の中にだけ乗る。
+
+⚠ 社保調整・社宅家賃・貸付金返済は V2 で専用列を持つが、**合計欄の式は変えていない**。
+  社会保険料計・控除合計はどちらも source_key から直接足しているので、専用列を作ったことで
+  二重計上にはならない。「合計に足し忘れでは？」と KOJO_GOKEI_KEYS を触らないこと。
 
 ⚠ 給与計算後に発生した追加支給（jinjer に入っていない）は追加支給台帳 CSV で足す。
-  台帳の額は 差引支給額(54) と立替金列(56/57) に加算し、口座1(55) と総支給額(41) は据え置く。
+  台帳の額は 差引支給額 と立替金列に加算し、口座1 と総支給額 は据え置く。
   これで「jinjer に立替金として入っていたら」と同じ形になる。
 
 決定事項（2026-08-14 谷津さん）:
-  1. 時給制の超過・深夜・休日の**金額**は差額調整(allowance24)に含まれるので明細列は空のまま
+  1. 時給制の超過・深夜・休日の**金額**は差額調整(allowance24)に含まれるので明細列を持たない
   2. 時給制の勤怠**時間**列は見本ファイルどおり（列名と中身がずれているが直さない）
   3. 社員番号 20YY 始まり以外は出さない（7777777・9999999 とも除外）
-  4. allowance15／allowance12 は全員一律で「調整手当」列。「職能手当」列は常に空
+  4. allowance15／allowance12 は全員一律で「調整手当」列
   5. 追加支給は台帳 CSV から（上記）
+
+決定事項（2026-08-28 谷津さん）:
+  6. 「欠勤控除」列(deduction1・2026-04〜08 の5か月とも全員ゼロ)を「社保調整」(deduction4)へ転用
+  7. 常に空だった13列を削除。課税対象額(other7)を埋め、社宅家賃・貸付金返済に専用列を作る
+  8. 貸付金返済は月によって deduction2（社宅家賃の枠）へ入る（2026-05 実績）。
+     列マッピングの「社員番号条件」で正しい列へ寄せる
 """
 
 from __future__ import annotations
@@ -44,30 +60,165 @@ from services.keiri_engine import fetch_statements, ym_compact
 # ---------------------------------------------------------------------------
 # 列定義
 # ---------------------------------------------------------------------------
-CSV_COLUMNS = [
-    "社員番号", "氏名", "給与体系", "基本勤務時間", "みなし時間", "超過時間",
-    "深夜残業時間", "休日出勤時間", "休日深夜時間", "控除時間", "超過時間",
-    "出勤日数", "欠勤日数", "有給休暇取得日数計", "有給休暇残（翌月繰越分）",
-    "基本給", "みなし給", "超過時間分", "深夜残業分", "休日出勤分", "休日深夜分",
-    "控除精算", "超過精算分", "超過調整分", "役職手当", "リーダー手当", "職能手当",
-    "顧客対応当番手当", "営業手当", "調整手当", "現場管理費", "テレワーク手当",
-    "定常外業務対応手当", "家賃手当", "その他手当", "過不足調整", "欠勤控除額",
-    "課税通勤費", "非課税通勤費", "通信手当", "過不足調整", "総支給額", "課税対象額",
-    "欠勤控除", "雇用保険料", "健康保険料", "介護保険料", "厚生年金保険料",
-    "子ども・子育て支援金", "年調過不足額", "所得税", "住民税", "社会保険料計",
-    "控除合計", "差引支給額", "口座1振込額", "立替金（顧客請求分）", "立替金",
-    "その他", "現金支給額",
-]
-COL_N = len(CSV_COLUMNS)          # 60
+# 出力1列を指す論理ID → 社労士へ渡すCSVの見出し。
+# 列の並びが変わっても意味が変わらないので、マッピング表・台帳・テストはすべてこの ID で書く
+# （物理的な列番号は Layout の中にしか出てこない）。
+COL_LABELS = {
+    # --- 見出し ---
+    "emp_no": "社員番号",
+    "emp_name": "氏名",
+    "salary_system": "給与体系",
+    # --- 勤怠時間（給与体系ごとに中身が変わる。列名と中身のズレは見本どおり据え置き） ---
+    "kihon_kinmu_jikan": "基本勤務時間",
+    "minashi_jikan": "みなし時間",
+    "shinya_zangyo_jikan": "深夜残業時間",
+    "kyujitsu_shukkin_jikan": "休日出勤時間",
+    "kyujitsu_shinya_jikan": "休日深夜時間",
+    "kojo_jikan": "控除時間",
+    "choka_jikan": "超過時間",
+    "shukkin_nissu": "出勤日数",
+    "kekkin_nissu": "欠勤日数",
+    "yukyu_shutoku_nissu": "有給休暇取得日数計",
+    "yukyu_zan": "有給休暇残（翌月繰越分）",
+    # --- 支給 ---
+    "kihonkyu": "基本給",
+    "minashikyu": "みなし給",
+    "yakushoku_teate": "役職手当",
+    "leader_teate": "リーダー手当",
+    "kyakutaio_touban_teate": "顧客対応当番手当",
+    "chosei_teate": "調整手当",
+    "telework_teate": "テレワーク手当",
+    "teijogai_gyomu_teate": "定常外業務対応手当",
+    "sonota_teate": "その他手当",
+    "sagaku_chosei": "過不足調整",            # allowance24 差額調整
+    "kazei_tsukinhi": "課税通勤費",
+    "hikazei_tsukinhi": "非課税通勤費",
+    "tsushin_teate": "通信手当",
+    "shikyu_kabusoku_chosei": "過不足調整",   # allowance54 支給過不足調整（↑と同じ見出し）
+    "soushikyu_gaku": "総支給額",
+    "kazei_taisho_gaku": "課税対象額",
+    # --- 控除 ---
+    "shaho_chosei": "社保調整",
+    "koyo_hokenryo": "雇用保険料",
+    "kenko_hokenryo": "健康保険料",
+    "kaigo_hokenryo": "介護保険料",
+    "kosei_nenkin": "厚生年金保険料",
+    "kodomo_kosodate": "子ども・子育て支援金",
+    "nencho_kabusoku": "年調過不足額",
+    "shotokuzei": "所得税",
+    "juminzei": "住民税",
+    "shataku_yachin": "社宅家賃",
+    "kashitsukekin_hensai": "貸付金返済",
+    "kekkin_kojo": "欠勤控除",                # V1 のみ（V2 では社保調整に転用した）
+    # --- 合計・振込 ---
+    "shaho_kei": "社会保険料計",
+    "kojo_gokei": "控除合計",
+    "sashihiki_shikyu": "差引支給額",
+    "koza1_furikomi": "口座1振込額",
+    "tatekaekin_kyaku": "立替金（顧客請求分）",
+    "tatekaekin": "立替金",
+    "sonota": "その他",
+    "genkin_shikyu": "現金支給額",
+}
+ALL_COL_IDS = frozenset(COL_LABELS)
 
-# 計算で埋める列（マッピング表では扱わない）
-COL_SOUSHIKYU = 41                # 総支給額
-COL_KAZEI_TAISHO = 42             # 課税対象額（見本では常に空欄。埋めない）
-COL_SHAHO_KEI = 52                # 社会保険料計
-COL_KOJO_GOKEI = 53               # 控除合計
-COL_SASHIHIKI = 54                # 差引支給額
-COL_KOZA1 = 55                    # 口座1振込額
-COMPUTED_COLUMNS = (COL_SOUSHIKYU, COL_SHAHO_KEI, COL_KOJO_GOKEI, COL_SASHIHIKI, COL_KOZA1)
+# 氏名などマッピングで上書きされては困る列
+RESERVED_COL_IDS = frozenset({"emp_no", "emp_name", "salary_system"})
+# 計算で埋める列（マッピング表では指定できない）
+COMPUTED_COL_IDS = frozenset({"soushikyu_gaku", "shaho_kei", "kojo_gokei",
+                              "sashihiki_shikyu", "koza1_furikomi"})
+
+
+class Layout(object):
+    """出力CSVの列の並び。entries は (列ID または None, 見出し) の並び。
+
+    列IDが None の要素は「見出しだけあって中身は常に空」の列（V1 の名残）。
+    silent_hidden は「この形式では列を持たないのが仕様」の列ID。ここに挙げたものは
+    金額があっても hidden_with_amount の警告に出さない。
+    """
+
+    def __init__(self, key, label, entries, silent_hidden=()):
+        self.key = key
+        self.label = label
+        self.entries = tuple(entries)
+        self.silent_hidden = frozenset(silent_hidden)
+        self.column_names = [name for _cid, name in self.entries]
+        self.col_ids = tuple(cid for cid, _name in self.entries if cid)
+        self._index = {cid: i for i, (cid, _name) in enumerate(self.entries) if cid}
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __repr__(self):
+        return "<Layout %s %d列>" % (self.key, len(self.entries))
+
+    def has(self, col_id):
+        return col_id in self._index
+
+    def index_of(self, col_id):
+        return self._index[col_id]
+
+
+def _entries(*items):
+    """列IDの並び → entries。('見出し',) と書いたところは「常に空の列」になる。"""
+    out = []
+    for it in items:
+        if isinstance(it, tuple):
+            out.append((None, it[0]))
+        else:
+            out.append((it, COL_LABELS[it]))
+    return tuple(out)
+
+
+# 新49列（2026-08-28〜）。常に空だった13列を削り、課税対象額・社保調整・社宅家賃・
+# 貸付金返済に列を与えたもの。社労士へ渡す正本。
+LAYOUT_V2 = Layout("V2", "新49列", _entries(
+    "emp_no", "emp_name", "salary_system",
+    "kihon_kinmu_jikan", "minashi_jikan", "shinya_zangyo_jikan",
+    "kyujitsu_shukkin_jikan", "kyujitsu_shinya_jikan", "kojo_jikan", "choka_jikan",
+    "shukkin_nissu", "kekkin_nissu", "yukyu_shutoku_nissu", "yukyu_zan",
+    "kihonkyu", "minashikyu", "yakushoku_teate", "leader_teate",
+    "kyakutaio_touban_teate", "chosei_teate", "telework_teate",
+    "teijogai_gyomu_teate", "sonota_teate", "sagaku_chosei",
+    "kazei_tsukinhi", "hikazei_tsukinhi", "tsushin_teate", "shikyu_kabusoku_chosei",
+    "soushikyu_gaku", "kazei_taisho_gaku",
+    "shaho_chosei", "koyo_hokenryo", "kenko_hokenryo", "kaigo_hokenryo",
+    "kosei_nenkin", "kodomo_kosodate", "nencho_kabusoku", "shotokuzei", "juminzei",
+    "shataku_yachin", "kashitsukekin_hensai",
+    "shaho_kei", "kojo_gokei", "sashihiki_shikyu", "koza1_furikomi",
+    "tatekaekin_kyaku", "tatekaekin", "sonota", "genkin_shikyu",
+))
+
+# 旧60列（〜2026-08 支給分）。社労士の受け入れ確認が済むまでの控え。**済んだら撤去する。**
+# 中身が空の13列は jinjer に対応項目が無いか一度も金額が出たことがなく、構造的に常に空だった。
+LAYOUT_V1 = Layout("V1", "旧60列", _entries(
+    "emp_no", "emp_name", "salary_system",
+    "kihon_kinmu_jikan", "minashi_jikan", ("超過時間",),
+    "shinya_zangyo_jikan", "kyujitsu_shukkin_jikan", "kyujitsu_shinya_jikan",
+    "kojo_jikan", "choka_jikan",
+    "shukkin_nissu", "kekkin_nissu", "yukyu_shutoku_nissu", "yukyu_zan",
+    "kihonkyu", "minashikyu",
+    ("超過時間分",), ("深夜残業分",), ("休日出勤分",), ("休日深夜分",),
+    ("控除精算",), ("超過精算分",), ("超過調整分",),
+    "yakushoku_teate", "leader_teate", ("職能手当",), "kyakutaio_touban_teate",
+    ("営業手当",), "chosei_teate", ("現場管理費",), "telework_teate",
+    "teijogai_gyomu_teate", ("家賃手当",), "sonota_teate", "sagaku_chosei",
+    ("欠勤控除額",), "kazei_tsukinhi", "hikazei_tsukinhi", "tsushin_teate",
+    "shikyu_kabusoku_chosei", "soushikyu_gaku", ("課税対象額",),
+    "kekkin_kojo", "koyo_hokenryo", "kenko_hokenryo", "kaigo_hokenryo",
+    "kosei_nenkin", "kodomo_kosodate", "nencho_kabusoku", "shotokuzei", "juminzei",
+    "shaho_kei", "kojo_gokei", "sashihiki_shikyu", "koza1_furikomi",
+    "tatekaekin_kyaku", "tatekaekin", "sonota", "genkin_shikyu",
+), silent_hidden=("kazei_taisho_gaku", "shaho_chosei",
+                  "shataku_yachin", "kashitsukekin_hensai"))
+
+LAYOUTS = {LAYOUT_V2.key: LAYOUT_V2, LAYOUT_V1.key: LAYOUT_V1}
+DEFAULT_LAYOUT_KEY = LAYOUT_V2.key
+
+# 見出しの取り違えを import 時に落とす（V1/V2 で同じ列IDに別の見出しを付けていないか）
+for _lay in LAYOUTS.values():
+    for _cid, _name in _lay.entries:
+        assert _cid is None or COL_LABELS[_cid] == _name, (_lay.key, _cid, _name)
 
 # 計算に使う source_key
 K_KOYOHOKEN = "salary_deduction_items:deduction28"
@@ -83,6 +234,7 @@ K_KEKKIN = "salary_deduction_items:deduction1"
 K_SHATAKU = "salary_deduction_items:deduction2"
 K_KASHITSUKE = "salary_deduction_items:deduction3"
 K_KOYO_TAISHO = "salary_other_items:other5"        # 雇用保険対象額＝立替金・その他を含まない支給計
+K_KAZEI_TAISHO = "salary_other_items:other7"       # 課税対象額（V2 の「課税対象額」列）
 K_SONOTA = "salary_items:allowance52"
 K_TATEKAE_KYAKU = "salary_items:allowance50"
 K_TATEKAE = "salary_items:allowance51"
@@ -91,7 +243,9 @@ K_PAYMENT2 = "salary_payment_items:payment2"
 
 # 社会保険料計 ＝ この6つの合計（社保調整を含む。2023019 で実証）
 SHAHO_KEI_KEYS = (K_KOYOHOKEN, K_KENPO, K_KAIGO, K_KONEN, K_KODOMO, K_SHAHO_CHOSEI)
-# 控除合計 ＝ 社会保険料計 ＋ この6つ（専用列が無い社宅家賃・貸付金返済もここに乗る）
+# 控除合計 ＝ 社会保険料計 ＋ この6つ
+# ⚠ V2 で社保調整・社宅家賃・貸付金返済に専用列を作ったが、**この式は変えない**。
+#   列はあくまで表示で、合計はここで source_key から直接足している。足すと二重計上になる。
 KOJO_GOKEI_KEYS = (K_SHOTOKUZEI, K_JUMINZEI, K_NENCHO, K_KEKKIN, K_SHATAKU, K_KASHITSUKE)
 
 # 計算式で使うので「未知項目」に数えない source_key
@@ -110,7 +264,7 @@ IGNORED_KEYS = {
     "salary_items:allowance7": "前月基礎時給。単価であって支給額ではない",
 }
 # allowance2 だけは体系で意味が変わるので、体系別名で「出さなくてよい形」かを見分ける。
-# 月給制＝みなし給（→16列目へ）／時給制の 2026-07 以前＝前月超過勤務（→出さない）。
+# 月給制＝みなし給（→みなし給の列へ）／時給制の 2026-07 以前＝前月超過勤務（→出さない）。
 # どちらでもない名前になったら未知項目として止める（jinjer 側の設定変更に気づくため）。
 K_ALLOWANCE2 = "salary_items:allowance2"
 IGNORABLE_LABEL_PREFIXES = ("前月",)
@@ -120,85 +274,108 @@ IGNORABLE_LABEL_PREFIXES = ("前月",)
 # 判定することで、月で切らずに両方の期間を同じコードで通せる。
 MINASHI_LABELS = ("当月みなし時間外手当", "当月みなし深夜手当", "みなし手当", "みなし給")
 
-# 既定の列マッピング。(列番号, 給与体系, source_key, 体系別名条件)
-#   給与体系が空 = 全体系共通 / 体系別名条件が空 = 条件なし
-#   同じ (列番号, 給与体系) の行が複数あるときは **合計** する
+# 発生した人を毎回内訳に出す控除項目。人数が少なく、jinjer 側の入力先が揺れるので
+# 「先月と同じ顔ぶれか」を人が見て確かめられるようにしておく（→ 決定事項8）。
+DETAIL_DEDUCTION_COL_IDS = ("shaho_chosei", "shataku_yachin",
+                            "kashitsukekin_hensai", "kekkin_kojo")
+# レイアウトに列があるのに全員ゼロなら知らせる列。
+# salary_other_items は WATCHED_ARRAYS に入っていないため、jinjer が other7 を移設しても
+# 未知項目検知には掛からない。7,900万円の列が丸ごとゼロで社労士へ渡るのを防ぐ唯一の網。
+EXPECTED_NONZERO_COL_IDS = ("kazei_taisho_gaku", "soushikyu_gaku")
+
+# 既定の列マッピング。(列ID, 給与体系, 社員番号条件, source_key, 体系別名条件)
+#   給与体系が空 = 全体系共通 / 体系別名条件が空 = 条件なし / 社員番号条件が空 = 全員
+#   同じ (列ID, 給与体系) の行が複数あるときは **合計** する
 #     （調整手当は 2026-08 支給分から allowance15 → allowance12 へ移設されたので
 #       両方を残す。片方は必ずゼロなので合計しても二重計上にならない）
+#   社員番号条件つきの行は、同じ source_key の条件なし行より **優先** する
+#     （その社員に限り条件なし行を無効にする。→ 決定事項8 の貸付金返済）
 DEFAULT_COLUMN_MAPPING = [
     # --- 勤怠（給与体系ごとに中身が変わる。管理監督者は勤怠列を出さない） ---
-    (3, "時給制1", "salary_attendance_items:kintai1", ""),
-    (6, "時給制1", "salary_attendance_items:kintai3", ""),
-    (7, "時給制1", "salary_attendance_items:kintai4", ""),
-    (8, "時給制1", "salary_attendance_items:kintai3", ""),
-    (11, "時給制1", "salary_attendance_items:kintai10", ""),
-    (12, "時給制1", "salary_attendance_items:kintai11", ""),
-    (13, "時給制1", "salary_attendance_items:kintai13", ""),
-    (14, "時給制1", "salary_attendance_items:kintai14", ""),
-    (3, "月給制1", "salary_attendance_items:kintai1", ""),
-    (4, "月給制1", "salary_attendance_items:kintai2", ""),
-    (9, "月給制1", "salary_attendance_items:kintai4", ""),
-    (10, "月給制1", "salary_attendance_items:kintai5", ""),
-    (11, "月給制1", "salary_attendance_items:kintai10", ""),
-    (12, "月給制1", "salary_attendance_items:kintai11", ""),
-    (13, "月給制1", "salary_attendance_items:kintai13", ""),
-    (14, "月給制1", "salary_attendance_items:kintai14", ""),
-    (3, "月給制2", "salary_attendance_items:kintai1", ""),
-    (4, "月給制2", "salary_attendance_items:kintai2", ""),
-    (9, "月給制2", "salary_attendance_items:kintai4", ""),
-    (10, "月給制2", "salary_attendance_items:kintai5", ""),
-    (11, "月給制2", "salary_attendance_items:kintai10", ""),
-    (12, "月給制2", "salary_attendance_items:kintai11", ""),
-    (13, "月給制2", "salary_attendance_items:kintai13", ""),
-    (14, "月給制2", "salary_attendance_items:kintai14", ""),
-    (3, "月給制3", "salary_attendance_items:kintai1", ""),
-    (4, "月給制3", "salary_attendance_items:kintai2", ""),
-    (9, "月給制3", "salary_attendance_items:kintai4", ""),
-    (10, "月給制3", "salary_attendance_items:kintai5", ""),
-    (11, "月給制3", "salary_attendance_items:kintai10", ""),
-    (12, "月給制3", "salary_attendance_items:kintai11", ""),
-    (13, "月給制3", "salary_attendance_items:kintai13", ""),
-    (14, "月給制3", "salary_attendance_items:kintai14", ""),
+    ("kihon_kinmu_jikan", "時給制1", "", "salary_attendance_items:kintai1", ""),
+    ("shinya_zangyo_jikan", "時給制1", "", "salary_attendance_items:kintai3", ""),
+    ("kyujitsu_shukkin_jikan", "時給制1", "", "salary_attendance_items:kintai4", ""),
+    ("kyujitsu_shinya_jikan", "時給制1", "", "salary_attendance_items:kintai3", ""),
+    ("shukkin_nissu", "時給制1", "", "salary_attendance_items:kintai10", ""),
+    ("kekkin_nissu", "時給制1", "", "salary_attendance_items:kintai11", ""),
+    ("yukyu_shutoku_nissu", "時給制1", "", "salary_attendance_items:kintai13", ""),
+    ("yukyu_zan", "時給制1", "", "salary_attendance_items:kintai14", ""),
+    ("kihon_kinmu_jikan", "月給制1", "", "salary_attendance_items:kintai1", ""),
+    ("minashi_jikan", "月給制1", "", "salary_attendance_items:kintai2", ""),
+    ("kojo_jikan", "月給制1", "", "salary_attendance_items:kintai4", ""),
+    ("choka_jikan", "月給制1", "", "salary_attendance_items:kintai5", ""),
+    ("shukkin_nissu", "月給制1", "", "salary_attendance_items:kintai10", ""),
+    ("kekkin_nissu", "月給制1", "", "salary_attendance_items:kintai11", ""),
+    ("yukyu_shutoku_nissu", "月給制1", "", "salary_attendance_items:kintai13", ""),
+    ("yukyu_zan", "月給制1", "", "salary_attendance_items:kintai14", ""),
+    ("kihon_kinmu_jikan", "月給制2", "", "salary_attendance_items:kintai1", ""),
+    ("minashi_jikan", "月給制2", "", "salary_attendance_items:kintai2", ""),
+    ("kojo_jikan", "月給制2", "", "salary_attendance_items:kintai4", ""),
+    ("choka_jikan", "月給制2", "", "salary_attendance_items:kintai5", ""),
+    ("shukkin_nissu", "月給制2", "", "salary_attendance_items:kintai10", ""),
+    ("kekkin_nissu", "月給制2", "", "salary_attendance_items:kintai11", ""),
+    ("yukyu_shutoku_nissu", "月給制2", "", "salary_attendance_items:kintai13", ""),
+    ("yukyu_zan", "月給制2", "", "salary_attendance_items:kintai14", ""),
+    ("kihon_kinmu_jikan", "月給制3", "", "salary_attendance_items:kintai1", ""),
+    ("minashi_jikan", "月給制3", "", "salary_attendance_items:kintai2", ""),
+    ("kojo_jikan", "月給制3", "", "salary_attendance_items:kintai4", ""),
+    ("choka_jikan", "月給制3", "", "salary_attendance_items:kintai5", ""),
+    ("shukkin_nissu", "月給制3", "", "salary_attendance_items:kintai10", ""),
+    ("kekkin_nissu", "月給制3", "", "salary_attendance_items:kintai11", ""),
+    ("yukyu_shutoku_nissu", "月給制3", "", "salary_attendance_items:kintai13", ""),
+    ("yukyu_zan", "月給制3", "", "salary_attendance_items:kintai14", ""),
     # --- 支給（全体系共通） ---
-    (15, "", "salary_items:allowance1", ""),
-    (16, "", "salary_items:allowance2", "|".join(MINASHI_LABELS)),
-    (24, "", "salary_items:allowance10", ""),
-    (25, "", "salary_items:allowance11", ""),
-    (27, "", "salary_items:allowance13", ""),
-    (29, "", "salary_items:allowance15", ""),      # 〜2026-07 支給分の調整手当
-    (29, "", "salary_items:allowance12", ""),      # 2026-08 支給分〜の調整手当
-    (31, "", "salary_items:allowance18", ""),
-    (32, "", "salary_items:allowance19", ""),
+    ("kihonkyu", "", "", "salary_items:allowance1", ""),
+    ("minashikyu", "", "", "salary_items:allowance2", "|".join(MINASHI_LABELS)),
+    ("yakushoku_teate", "", "", "salary_items:allowance10", ""),
+    ("leader_teate", "", "", "salary_items:allowance11", ""),
+    ("kyakutaio_touban_teate", "", "", "salary_items:allowance13", ""),
+    ("chosei_teate", "", "", "salary_items:allowance15", ""),   # 〜2026-07 支給分の調整手当
+    ("chosei_teate", "", "", "salary_items:allowance12", ""),   # 2026-08 支給分〜の調整手当
+    ("telework_teate", "", "", "salary_items:allowance18", ""),
+    ("teijogai_gyomu_teate", "", "", "salary_items:allowance19", ""),
     # 「その他手当」は jinjer に2つある（allowance20 と 21）。経費の追加投入がどちらの ID に
     # 着地するかは jinjer 側のテンプレート設定が決めるため、両方を同じ列に入れて合計する。
     # 実測: 2026-07 は allowance21 に3名、2026-08 は allowance20 に2名（同月に両方は出ない）。
-    (34, "", "salary_items:allowance20", ""),
-    (34, "", "salary_items:allowance21", ""),
-    (35, "", "salary_items:allowance24", ""),
-    (37, "", "salary_items:allowance34", ""),
-    (38, "", "salary_items:allowance35", ""),
-    (39, "", "salary_items:allowance16", ""),
-    (40, "", "salary_items:allowance54", ""),
-    (56, "", K_TATEKAE_KYAKU, ""),
-    (57, "", K_TATEKAE, ""),
-    (58, "", K_SONOTA, ""),
-    (59, "", "salary_items:allowance53", ""),
+    ("sonota_teate", "", "", "salary_items:allowance20", ""),
+    ("sonota_teate", "", "", "salary_items:allowance21", ""),
+    ("sagaku_chosei", "", "", "salary_items:allowance24", ""),
+    ("kazei_tsukinhi", "", "", "salary_items:allowance34", ""),
+    ("hikazei_tsukinhi", "", "", "salary_items:allowance35", ""),
+    ("tsushin_teate", "", "", "salary_items:allowance16", ""),
+    ("shikyu_kabusoku_chosei", "", "", "salary_items:allowance54", ""),
+    ("tatekaekin_kyaku", "", "", K_TATEKAE_KYAKU, ""),
+    ("tatekaekin", "", "", K_TATEKAE, ""),
+    ("sonota", "", "", K_SONOTA, ""),
+    ("genkin_shikyu", "", "", "salary_items:allowance53", ""),
     # --- 控除（全体系共通） ---
-    (43, "", K_KEKKIN, ""),
-    (44, "", K_KOYOHOKEN, ""),
-    (45, "", K_KENPO, ""),
-    (46, "", K_KAIGO, ""),
-    (47, "", K_KONEN, ""),
-    (48, "", K_KODOMO, ""),
-    (49, "", K_NENCHO, ""),
-    (50, "", K_SHOTOKUZEI, ""),
-    (51, "", K_JUMINZEI, ""),
+    ("kekkin_kojo", "", "", K_KEKKIN, ""),
+    ("koyo_hokenryo", "", "", K_KOYOHOKEN, ""),
+    ("kenko_hokenryo", "", "", K_KENPO, ""),
+    ("kaigo_hokenryo", "", "", K_KAIGO, ""),
+    ("kosei_nenkin", "", "", K_KONEN, ""),
+    ("kodomo_kosodate", "", "", K_KODOMO, ""),
+    ("nencho_kabusoku", "", "", K_NENCHO, ""),
+    ("shotokuzei", "", "", K_SHOTOKUZEI, ""),
+    ("juminzei", "", "", K_JUMINZEI, ""),
+    ("shaho_chosei", "", "", K_SHAHO_CHOSEI, ""),
+    ("shataku_yachin", "", "", K_SHATAKU, ""),
+    ("kashitsukekin_hensai", "", "", K_KASHITSUKE, ""),
+    # ⚠ 役員貸付金返済は jinjer の入力先が月によって deduction2（社宅家賃の枠）へ揺れる。
+    #   2026-05 実測: 2023004 の 341,659 が deduction2 に入っていた（2026-06〜08 は deduction3）。
+    #   社員番号条件つきのこの行が条件なし行より優先されるので、この人の deduction2 は
+    #   社宅家賃列には出ず貸付金返済列に入る。経理モードの keiri_engine.YAKUIN_LOAN と対。
+    #   jinjer 側で項目を整理するときは **両方** を直すこと。
+    ("kashitsukekin_hensai", "", "2023004", K_SHATAKU, ""),
+    # --- その他項目 ---
+    ("kazei_taisho_gaku", "", "", K_KAZEI_TAISHO, ""),
 ]
 
-MAPPING_CSV_COLS = ["列番号", "列名", "給与体系", "source_key", "体系別名条件", "備考"]
+MAPPING_CSV_COLS = ["列id", "列名", "給与体系", "社員番号条件",
+                    "source_key", "体系別名条件", "備考"]
 LEDGER_COLS = ["支給月", "社員番号", "氏名", "項目", "金額", "メモ"]
-# 追加支給台帳で指定できる項目 → 列番号。差引支給額にも同額を足す
-LEDGER_ITEM_COLUMNS = {"立替金（顧客請求分）": 56, "立替金": 57}
+# 追加支給台帳で指定できる項目 → 列ID。差引支給額にも同額を足す
+LEDGER_ITEM_COL_IDS = {"立替金（顧客請求分）": "tatekaekin_kyaku", "立替金": "tatekaekin"}
 
 # ---------------------------------------------------------------------------
 # 備考（イレギュラー発生分の理由）
@@ -248,53 +425,126 @@ def _read_csv_rows(path):
     raise SharoushiExportError(f"文字コードを判別できませんでした: {path}")
 
 
+def _read_csv_table(path):
+    """BOM付きUTF-8 → cp932 → UTF-8 の順に試して (見出しリスト, 行 dict のリスト) を返す。"""
+    raw = open(path, "rb").read()
+    for enc in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            rd = csv.DictReader(io.StringIO(raw.decode(enc)))
+            rows = list(rd)
+            return list(rd.fieldnames or []), rows
+        except UnicodeDecodeError:
+            continue
+    raise SharoushiExportError(f"文字コードを判別できませんでした: {path}")
+
+
+def resolve_layout(layout):
+    """レイアウトのキー（'V1'/'V2'）または Layout そのもの → Layout。"""
+    if isinstance(layout, Layout):
+        return layout
+    key = _txt(layout).upper() or DEFAULT_LAYOUT_KEY
+    if key not in LAYOUTS:
+        raise SharoushiExportError(
+            "CSVの形式 '%s' は使えません（使えるのは %s）"
+            % (layout, " / ".join("%s=%s" % (k, v.label) for k, v in LAYOUTS.items())))
+    return LAYOUTS[key]
+
+
 def load_column_mapping(path=None):
     """列マッピングを読む。CSV が無ければ既定表を使う。
 
+    ⚠ キーは **列id**（列番号ではない）。2026-08-28 に列を削って番号が総ずれしたので、
+      番号で書かれた旧スキーマのファイルはエラーで止める（黙って別の列へ入るのを防ぐ）。
+
     戻り値 dict:
-      by_col   : {列番号: [(給与体系, source_key, 体系別名条件tuple)]}
-      keys     : マッピングに出てくる source_key の集合（未知項目の判定に使う）
-      path     : 実際に使ったパス（既定表なら None）
-      rows_n   : 行数
+      by_col       : {列ID: [(給与体系, 社員番号条件, source_key, 体系別名条件tuple)]}
+      keys         : マッピングに出てくる source_key の集合（未知項目の判定に使う）
+      emp_specific : {社員番号: {社員番号条件つき行が押さえた source_key}}
+      path         : 実際に使ったパス（既定表なら None）
+      rows_n       : 行数
     """
     path = path if path is not None else Config.SHAROUSHI_COLUMN_MAPPING_CSV
     rows = None
     used = None
     if path and os.path.exists(path):
-        raw = _read_csv_rows(path)
+        fieldnames, raw = _read_csv_table(path)
+        if not fieldnames:
+            raise SharoushiExportError(
+                f"{path} の見出し行が読めませんでした（中身が空ではありませんか）")
+        if "列id" not in fieldnames:
+            raise SharoushiExportError(
+                f"{path} は旧スキーマ（列番号）の列マッピングです。2026-08-28 に列を削って"
+                "番号がずれたため、このまま読むと値が別の列へ入ります。"
+                "`python tools/build_sharoushi_masters.py` で「列id」形式に作り直してください。")
         rows = []
         for i, r in enumerate(raw, start=2):
-            col_txt = _txt(r.get("列番号"))
-            if not col_txt or col_txt.startswith("#"):
+            col_id = _txt(r.get("列id"))
+            if not col_id or col_id.startswith("#"):
                 continue
-            try:
-                col = int(col_txt)
-            except ValueError:
+            if col_id not in ALL_COL_IDS:
                 raise SharoushiExportError(
-                    f"{path} {i}行目: 列番号 '{col_txt}' が数値ではありません")
-            if not 0 <= col < COL_N:
+                    f"{path} {i}行目: 列id '{col_id}' はありません"
+                    f"（使えるのは {' / '.join(sorted(ALL_COL_IDS))}）")
+            if col_id in RESERVED_COL_IDS:
                 raise SharoushiExportError(
-                    f"{path} {i}行目: 列番号 {col} は 0〜{COL_N - 1} の範囲外です")
-            if col in COMPUTED_COLUMNS:
+                    f"{path} {i}行目: 列 {col_id}（{COL_LABELS[col_id]}）は"
+                    "社員番号・氏名など固定の列なのでマッピングでは指定できません")
+            if col_id in COMPUTED_COL_IDS:
                 raise SharoushiExportError(
-                    f"{path} {i}行目: 列 {col}（{CSV_COLUMNS[col]}）は計算で埋める列なので"
+                    f"{path} {i}行目: 列 {col_id}（{COL_LABELS[col_id]}）は計算で埋める列なので"
                     "マッピングでは指定できません")
+            # 列名は注記だが、列id と食い違っていたら人が誤解しているので止める
+            name = _txt(r.get("列名"))
+            if name and name != COL_LABELS[col_id]:
+                raise SharoushiExportError(
+                    f"{path} {i}行目: 列id '{col_id}' の列名は "
+                    f"'{COL_LABELS[col_id]}' です（'{name}' と書かれています）")
             key = _txt(r.get("source_key"))
             if ":" not in key:
                 raise SharoushiExportError(
                     f"{path} {i}行目: source_key '{key}' は "
                     "'salary_items:allowance1' の形式で書いてください")
-            rows.append((col, _txt(r.get("給与体系")), key, _txt(r.get("体系別名条件"))))
+            rows.append((col_id, _txt(r.get("給与体系")), _txt(r.get("社員番号条件")),
+                         key, _txt(r.get("体系別名条件"))))
         used = path
     if rows is None:
-        rows = [(c, s, k, lab) for c, s, k, lab in DEFAULT_COLUMN_MAPPING]
+        rows = [tuple(r) for r in DEFAULT_COLUMN_MAPPING]
     by_col = defaultdict(list)
     keys = set()
-    for col, system, key, labels in rows:
+    emp_specific = defaultdict(set)
+    for col_id, system, emp_cond, key, labels in rows:
         cond = tuple(normalize_label(x) for x in labels.split("|") if x.strip())
-        by_col[col].append((system, key, cond))
+        by_col[col_id].append((system, emp_cond, key, cond))
         keys.add(key)
-    return {"by_col": dict(by_col), "keys": keys, "path": used, "rows_n": len(rows)}
+        if emp_cond:
+            emp_specific[emp_cond].add(key)
+    return {"by_col": dict(by_col), "keys": keys,
+            "emp_specific": {k: frozenset(v) for k, v in emp_specific.items()},
+            "path": used, "rows_n": len(rows)}
+
+
+# 既定表を書き出すときに付ける備考（列id + source_key で引く）
+_MAPPING_NOTES = {
+    ("minashikyu", "salary_items:allowance2"):
+        "体系別名で判定。時給制の「前月超過勤務」を除くため",
+    ("chosei_teate", "salary_items:allowance15"): "調整手当（〜2026-07 支給分）",
+    ("chosei_teate", "salary_items:allowance12"):
+        "調整手当（2026-08 支給分〜。allowance15 から移設）",
+    ("sonota_teate", "salary_items:allowance20"):
+        "その他手当は jinjer に2つあるので両方を同じ列に入れて合計する",
+    ("sonota_teate", "salary_items:allowance21"):
+        "その他手当は jinjer に2つあるので両方を同じ列に入れて合計する",
+    ("kazei_taisho_gaku", K_KAZEI_TAISHO):
+        "課税対象額。旧60列では常に空欄だったが 2026-08-28 から埋める",
+    ("shaho_chosei", K_SHAHO_CHOSEI):
+        "社保調整。旧60列の「欠勤控除」列を転用した（欠勤控除は5か月とも全員ゼロ）",
+    ("shataku_yachin", K_SHATAKU): "社宅家賃",
+    ("kashitsukekin_hensai", K_KASHITSUKE): "貸付金返済",
+    ("kashitsukekin_hensai", K_SHATAKU):
+        "⚠ 役員貸付金返済。jinjer の入力先が月によって deduction2（社宅家賃の枠）へ"
+        "揺れる実績があるため、この社員の deduction2 は貸付金返済列へ寄せる（2026-05 実績）。"
+        "経理モードの keiri_engine.YAKUIN_LOAN と対になっているので直すときは両方見ること",
+}
 
 
 def export_default_mapping(path, overwrite=False):
@@ -309,18 +559,11 @@ def export_default_mapping(path, overwrite=False):
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=MAPPING_CSV_COLS)
         w.writeheader()
-        for col, system, key, labels in DEFAULT_COLUMN_MAPPING:
-            note = ""
-            if col == 16:
-                note = "体系別名で判定。時給制の「前月超過勤務」を除くため"
-            elif key == "salary_items:allowance15":
-                note = "調整手当（〜2026-07 支給分）"
-            elif key == "salary_items:allowance12":
-                note = "調整手当（2026-08 支給分〜。allowance15 から移設）"
-            elif key in ("salary_items:allowance20", "salary_items:allowance21"):
-                note = "その他手当は jinjer に2つあるので両方を同じ列に入れて合計する"
-            w.writerow({"列番号": col, "列名": CSV_COLUMNS[col], "給与体系": system,
-                        "source_key": key, "体系別名条件": labels, "備考": note})
+        for col_id, system, emp_cond, key, labels in DEFAULT_COLUMN_MAPPING:
+            w.writerow({"列id": col_id, "列名": COL_LABELS[col_id], "給与体系": system,
+                        "社員番号条件": emp_cond, "source_key": key,
+                        "体系別名条件": labels,
+                        "備考": _MAPPING_NOTES.get((col_id, key), "")})
     return path
 
 
@@ -339,10 +582,10 @@ def load_extra_ledger(path=None):
         if not ym or not emp:
             continue
         item = _txt(r.get("項目"))
-        if item not in LEDGER_ITEM_COLUMNS:
+        if item not in LEDGER_ITEM_COL_IDS:
             raise SharoushiExportError(
                 f"{path} {i}行目: 項目 '{item}' は台帳では扱えません"
-                f"（使えるのは {' / '.join(LEDGER_ITEM_COLUMNS)}）")
+                f"（使えるのは {' / '.join(LEDGER_ITEM_COL_IDS)}）")
         amount = to_number(r.get("金額"))
         if amount is None:
             raise SharoushiExportError(
@@ -497,51 +740,67 @@ def item_labels(payroll_info):
 
 
 def build_row(emp, basic_info, payroll_info, mapping, ledger_entries=None):
-    """1人分の 60 列と、その人の未知項目・台帳適用結果を返す。
+    """1人分の値を **列IDの dict** で返す（並べるのは render_row の仕事）。
 
-    Returns: {"row": [...], "unknown": [...], "ledger_applied": [...], "system": str}
+    ⚠ マッピングが1行もヒットしなかった列は dict に **入れない**。社労士側の取り込みは
+      空欄と 0 を区別するので、ここで 0.0 を埋めてはいけない。
+
+    Returns: {"values": {列ID: 値}, "unknown": [...], "ledger_applied": [...], "system": str}
     """
     flat = flatten_payroll(payroll_info)
     labels = item_labels(payroll_info)
     system = _txt((basic_info or {}).get("salary_system", {}).get("name"))
     g = lambda k: flat.get(k, 0.0)                                    # noqa: E731
 
-    row = [""] * COL_N
-    row[0] = emp
-    row[1] = ("%s %s" % (_txt((basic_info or {}).get("last_name")),
-                         _txt((basic_info or {}).get("first_name")))).strip()
-    row[2] = system
+    values = {
+        "emp_no": emp,
+        "emp_name": ("%s %s" % (_txt((basic_info or {}).get("last_name")),
+                                _txt((basic_info or {}).get("first_name")))).strip(),
+        "salary_system": system,
+    }
 
     # --- マッピングで埋める列 ---
+    # 社員番号条件つきの行が押さえた source_key は、その社員に限り条件なし行を無効にする
+    # （例: 2023004 の deduction2 は「社宅家賃」ではなく「貸付金返済」列へ入れる）。
+    claimed = mapping.get("emp_specific", {}).get(emp, frozenset())
     used_keys = set()
-    for col, specs in mapping["by_col"].items():
+    for col_id, specs in mapping["by_col"].items():
         total = None
-        for spec_system, key, cond in specs:
+        for spec_system, spec_emp, key, cond in specs:
             if spec_system and spec_system != system:
+                continue
+            if spec_emp:
+                if spec_emp != emp:
+                    continue
+            elif key in claimed:
+                # この社員はこの source_key を別の列に取られている。列自体は在るので
+                # 0 にしておく（その人だけ空欄になって列の中身が不揃いになるのを防ぐ）。
+                total = total or 0.0
                 continue
             if cond and normalize_label(labels.get(key, "")) not in cond:
                 continue
             total = (total or 0.0) + g(key)
             used_keys.add(key)
         if total is not None:
-            row[col] = total
+            values[col_id] = total
 
     # --- 計算で埋める列 ---
     # 総支給額は雇用保険対象額そのもの。jinjer の雇用保険対象額は 立替金2種・その他 を
     # 含まないので、それだけで「報酬でないものを除いた支給計」になっている。
-    row[COL_SOUSHIKYU] = g(K_KOYO_TAISHO)
-    row[COL_SHAHO_KEI] = sum(g(k) for k in SHAHO_KEI_KEYS)
-    row[COL_KOJO_GOKEI] = row[COL_SHAHO_KEI] + sum(g(k) for k in KOJO_GOKEI_KEYS)
-    row[COL_SASHIHIKI] = g(K_PAYMENT1)
+    values["soushikyu_gaku"] = g(K_KOYO_TAISHO)
+    values["shaho_kei"] = sum(g(k) for k in SHAHO_KEI_KEYS)
+    values["kojo_gokei"] = values["shaho_kei"] + sum(g(k) for k in KOJO_GOKEI_KEYS)
+    values["sashihiki_shikyu"] = g(K_PAYMENT1)
     # 差引支給額には 立替金2種・その他 が乗っているので、実際の振込額はそれらを引いた額。
-    row[COL_KOZA1] = g(K_PAYMENT2) - g(K_TATEKAE) - g(K_TATEKAE_KYAKU) - g(K_SONOTA)
+    values["koza1_furikomi"] = (g(K_PAYMENT2) - g(K_TATEKAE)
+                                - g(K_TATEKAE_KYAKU) - g(K_SONOTA))
 
     # --- 追加支給台帳（jinjer に無い後追いの支給） ---
     applied = []
     for entry in (ledger_entries or []):
-        col = LEDGER_ITEM_COLUMNS[entry["項目"]]
-        row[col] = (row[col] or 0.0) + entry["金額"]
-        row[COL_SASHIHIKI] += entry["金額"]       # 口座1と総支給額は据え置き
+        col_id = LEDGER_ITEM_COL_IDS[entry["項目"]]
+        values[col_id] = (values.get(col_id) or 0.0) + entry["金額"]
+        values["sashihiki_shikyu"] += entry["金額"]   # 口座1と総支給額は据え置き
         applied.append(entry)
 
     # --- 未知項目の検知（金額があるのに出力にも計算にも乗っていない支給・控除） ---
@@ -554,13 +813,64 @@ def build_row(emp, basic_info, payroll_info, mapping, ledger_entries=None):
         if key in used_keys or key in FORMULA_KEYS or key in IGNORED_KEYS:
             continue
         label = labels.get(key, "")
-        # allowance2 が 16列目に乗らなかった＝みなし給ではない。時給制の「前月〜」なら
+        # allowance2 が「みなし給」列に乗らなかった＝みなし給ではない。時給制の「前月〜」なら
         # 意図どおりなので見逃し、それ以外の名前なら設定変更を疑って止める。
         if key == K_ALLOWANCE2 and label.startswith(IGNORABLE_LABEL_PREFIXES):
             continue
         unknown.append({"source_key": key, "label": label,
                         "金額": value, "給与体系": system})
-    return {"row": row, "unknown": unknown, "ledger_applied": applied, "system": system}
+    return {"values": values, "unknown": unknown,
+            "ledger_applied": applied, "system": system}
+
+
+def render_row(values, layout):
+    """列IDの dict → そのレイアウトの1行。列IDが None の列と未設定の列は空欄。"""
+    return [values.get(col_id, "") if col_id else "" for col_id, _name in layout.entries]
+
+
+def hidden_with_amount(values, layout):
+    """この形式に列が無いのに金額がある項目（silent_hidden に挙げたものは除く）。
+
+    V2 では「欠勤控除」(deduction1) が該当する。金額は控除合計には入るが明細としては
+    渡らないので、発生したことに誰も気づけなくなるのを防ぐ。
+    """
+    out = []
+    for col_id, value in values.items():
+        if layout.has(col_id) or col_id in layout.silent_hidden:
+            continue
+        if isinstance(value, str) or not value:
+            continue
+        out.append({"列id": col_id, "項目": COL_LABELS[col_id], "金額": value})
+    out.sort(key=lambda d: d["列id"])
+    return out
+
+
+def detail_deductions(values, layout):
+    """毎回内訳に出す控除項目のうち、金額があるもの。
+
+    人数が少なく jinjer 側の入力先が揺れる項目なので、「先月と同じ顔ぶれか」を
+    人が見て確かめられるようにしておく（→ 決定事項8 の貸付金返済↔社宅家賃）。
+    """
+    out = []
+    for col_id in DETAIL_DEDUCTION_COL_IDS:
+        value = values.get(col_id)
+        if isinstance(value, str) or not value:
+            continue
+        out.append({"列id": col_id, "項目": COL_LABELS[col_id], "金額": value,
+                    "列あり": layout.has(col_id)})
+    return out
+
+
+def all_zero_columns(rows, layout):
+    """レイアウトに列があるのに全員ゼロ／空の列（jinjer 側の項目移設を疑う）。"""
+    out = []
+    for col_id in EXPECTED_NONZERO_COL_IDS:
+        if not layout.has(col_id) or not rows:
+            continue
+        i = layout.index_of(col_id)
+        if all(not r[i] for r in rows):
+            out.append({"列id": col_id, "項目": COL_LABELS[col_id]})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -578,13 +888,18 @@ def pick_statement(statements):
     return best
 
 
-def build_rows(data, month, mapping, ledger=None):
-    """API の生 data[] → 行リスト。社員番号順に並べる。
+def build_rows(data, month, mapping, ledger=None, layout=None):
+    """API の生 data[] → そのレイアウトの行リスト。社員番号順に並べる。
 
-    Returns: {"rows", "unknown", "excluded", "ledger_applied", "systems", "multi_statement"}
+    layout は **必ず渡すこと**（既定値を持たせていないのは V1/V2 の取り違えを防ぐため）。
+
+    Returns: {"rows", "unknown", "excluded", "ledger_applied", "systems",
+              "multi_statement", "unmapped_systems", "hidden", "details", "all_zero"}
     """
+    layout = resolve_layout(layout)
     ledger = ledger or {}
-    rows, unknown, excluded, applied, multi = [], [], [], [], []
+    built_rows, unknown, excluded, applied, multi = [], [], [], [], []
+    hidden, details = [], []
     systems = defaultdict(int)
     known_systems = mapping_systems(mapping)
     unmapped_systems = set()
@@ -612,23 +927,32 @@ def build_rows(data, month, mapping, ledger=None):
             # 体系別（勤怠列）のマッピングが1行も無い、想定外の給与体系。新しい体系が
             # 増えると勤怠列が丸ごと空で出てしまうので、止めずに記録して画面・ログで知らせる。
             unmapped_systems.add(system)
-        rows.append(built["row"])
+        values = built["values"]
+        name = values["emp_name"]
+        built_rows.append((emp, values))
         systems[system] += 1
         for u in built["unknown"]:
-            unknown.append(dict(u, 社員番号=emp, 氏名=built["row"][1]))
+            unknown.append(dict(u, 社員番号=emp, 氏名=name))
         for a in built["ledger_applied"]:
-            applied.append(dict(a, 社員番号=emp, 氏名=built["row"][1]))
-    rows.sort(key=lambda r: r[0])
+            applied.append(dict(a, 社員番号=emp, 氏名=name))
+        for h in hidden_with_amount(values, layout):
+            hidden.append(dict(h, 社員番号=emp, 氏名=name, 給与体系=system))
+        for d in detail_deductions(values, layout):
+            details.append(dict(d, 社員番号=emp, 氏名=name, 給与体系=system))
+    built_rows.sort(key=lambda pair: pair[0])
+    rows = [render_row(values, layout) for _emp, values in built_rows]
     return {"rows": rows, "unknown": unknown, "excluded": excluded,
             "ledger_applied": applied, "systems": dict(systems),
-            "multi_statement": multi, "unmapped_systems": sorted(unmapped_systems)}
+            "multi_statement": multi, "unmapped_systems": sorted(unmapped_systems),
+            "hidden": hidden, "details": details,
+            "all_zero": all_zero_columns(rows, layout)}
 
 
 def mapping_systems(mapping):
     """マッピングに体系別の行がある給与体系名の集合。"""
     out = set()
     for specs in mapping["by_col"].values():
-        for system, _key, _cond in specs:
+        for system, _emp, _key, _cond in specs:
             if system:
                 out.add(system)
     return out
@@ -649,18 +973,20 @@ def format_cell(value):
     return text or "0"
 
 
-def write_csv(rows, out_path):
+def write_csv(rows, out_path, layout):
     """cp932・CRLF で書く（社労士側の取り込みが cp932 のため）。
 
     cp932 に無い文字があると社労士側で化けるので、書く前に検出して例外にする。
     """
+    layout = resolve_layout(layout)
+    head = [layout.index_of(c) for c in ("emp_no", "emp_name", "salary_system")]
     bad = []
     for r in rows:
-        for value in (r[0], r[1], r[2]):
+        for i in head:
             try:
-                str(value).encode("cp932")
+                str(r[i]).encode("cp932")
             except UnicodeEncodeError:
-                bad.append("%s %s" % (r[0], r[1]))
+                bad.append("%s %s" % (r[head[0]], r[head[1]]))
                 break
     if bad:
         raise SharoushiExportError(
@@ -669,32 +995,40 @@ def write_csv(rows, out_path):
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="cp932", newline="") as f:
         w = csv.writer(f, lineterminator="\r\n")
-        w.writerow(CSV_COLUMNS)
+        w.writerow(layout.column_names)
         for r in rows:
             w.writerow([format_cell(v) for v in r])
     return out_path
 
 
-def default_filename(month, today=None):
+def default_filename(month, today=None, layout=None):
     """前田事務所YYYYMMDD.csv（日付は**作成日**。社労士へ渡す既存の命名に合わせる）。
 
     支給月ではなく作成日なのは見本ファイル（前田事務所20260813.csv＝2026-07 支給分）の
     命名がそうだったため。何月分かは中身と出力フォルダ（{YYYYMM}）で分かる。
+
+    ⚠ 旧60列は末尾に `_旧60列` を付ける。同じ日に新旧を両方作ったとき、同名だと後から
+      作った方が前のを黙って上書きし、開いたままのダウンロードリンクが別形式のファイルを
+      返してしまうため。
     """
     stamp = (today or datetime.date.today()).strftime("%Y%m%d")
-    return "前田事務所%s.csv" % stamp
+    suffix = "" if resolve_layout(layout).key == DEFAULT_LAYOUT_KEY else "_旧60列"
+    return "前田事務所%s%s.csv" % (stamp, suffix)
 
 
 def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
              client=None, refresh=False, allow_unknown=False, filename=None,
-             biko_csv=None):
+             biko_csv=None, layout=None):
     """指定支給月（'YYYY-MM'）の社労士CSVを作る。
 
     未知の支給・控除項目に金額が入っていたら **既定では例外で止める**
     （jinjer 側の項目移設に気づくための検知網。allow_unknown=True で続行できる）。
 
+    layout は 'V2'（新49列・既定）か 'V1'（旧60列・社労士の確認が済むまでの控え）。
+
     Returns: dict（path / filename / rows / unknown / excluded / ledger_applied / ...）
     """
+    layout = resolve_layout(layout)
     mapping = load_column_mapping(mapping_csv)
     ledger = load_extra_ledger(ledger_csv)
     out_base = out_base or Config.SHAROUSHI_OUTPUT_DIR
@@ -704,7 +1038,7 @@ def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
         raise SharoushiExportError(
             f"{month} の給与明細が取得できませんでした"
             "（給与計算がまだ実行されていない可能性があります）")
-    built = build_rows(data, month, mapping, ledger)
+    built = build_rows(data, month, mapping, ledger, layout=layout)
     if built["unknown"] and not allow_unknown:
         detail = "、".join(
             "%s %s（%s %s）%s円" % (u["社員番号"], u["氏名"], u["source_key"],
@@ -717,7 +1051,9 @@ def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
             + "。jinjer 側で項目が移設された可能性があります。"
             "列マッピングCSVに追記してから実行し直してください。")
     out_dir = os.path.join(out_base, ym_compact(month))
-    path = write_csv(built["rows"], os.path.join(out_dir, filename or default_filename(month)))
+    path = write_csv(built["rows"],
+                     os.path.join(out_dir, filename or default_filename(month, layout=layout)),
+                     layout)
     # 備考CSV（イレギュラー5項目の発生理由）。理由が空でも行は出し、pending で画面に知らせる。
     biko = build_biko_rows(data, month, load_biko_ledger(biko_csv))
     biko_path = write_biko_csv(biko["rows"], os.path.join(out_dir, default_biko_filename()))
@@ -726,6 +1062,10 @@ def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
         "path": path,
         "filename": os.path.basename(path),
         "out_dir": out_dir,
+        "layout": layout.key,
+        "layout_label": layout.label,
+        "columns": len(layout),
+        "column_names": list(layout.column_names),
         "biko_path": biko_path,
         "biko_filename": os.path.basename(biko_path),
         "biko_rows": biko["rows"],
@@ -739,6 +1079,9 @@ def generate(month, out_base=None, mapping_csv=None, ledger_csv=None,
         "ledger_applied": built["ledger_applied"],
         "multi_statement": built["multi_statement"],
         "unmapped_systems": built["unmapped_systems"],
+        "hidden": built["hidden"],
+        "details": built["details"],
+        "all_zero": built["all_zero"],
         "mapping_path": mapping["path"],
         "mapping_rows": mapping["rows_n"],
         "ledger_path": (ledger_csv if ledger_csv is not None

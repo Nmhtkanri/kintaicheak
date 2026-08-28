@@ -749,7 +749,7 @@
     </div>
 
     <!-- ============================================================ -->
-    <!-- ==== 社労士モード: 前田事務所へ渡す給与CSV（60列・cp932）==== -->
+    <!-- ==== 社労士モード: 前田事務所へ渡す給与CSV（49列・cp932）==== -->
     <div class="workflow-card mode-accent acc-keiri" id="sharoushi-card" style="display:none">
         <div class="card-head">
             <span class="card-icon icon-keiri">📄</span>
@@ -758,7 +758,7 @@
                     社労士へ渡す給与CSVを作る
                     <span class="tag tag-safe">読み取りのみ・jinjerには書きません</span>
                 </div>
-                <p class="card-lead">支給月を入れると、jinjer の給与明細から <b>前田事務所さん向けの60列CSV</b> を作ります。</p>
+                <p class="card-lead">支給月を入れると、jinjer の給与明細から <b>前田事務所さん向けの49列CSV</b> を作ります。</p>
             </div>
         </div>
 
@@ -768,6 +768,17 @@
                 <input type="text" id="sharoushi-month" placeholder="2026-08" style="width:150px">
                 <span class="field-sub">その月の給与明細だけを使います（前月分は不要）</span>
             </label>
+            <div class="field">
+                <span class="field-label">CSVの形式</span>
+                <div class="check-row">
+                    <label><input type="checkbox" id="sharoushi-legacy"> 旧60列のまま出す（社労士の確認が済むまでの控え）</label>
+                </div>
+                <span class="field-sub">
+                    通常は<b>新しい49列</b>で出します（常に空だった13列を削り、
+                    <b>課税対象額・社保調整・社宅家賃・貸付金返済</b>の列を足したもの）。
+                    チェックすると従来どおりの60列で、ファイル名の末尾に <b>_旧60列</b> が付きます。
+                </span>
+            </div>
             <div class="field">
                 <span class="field-label">あわせて行うこと</span>
                 <div class="check-row">
@@ -783,7 +794,7 @@
                 <div style="margin-top:8px">
                     <label class="field">
                         <span class="field-label">列マッピングCSV</span>
-                        <input type="text" id="sharoushi-mapping-csv" placeholder="Z:\API連携\docs\社労士モード_列マッピング.csv">
+                        <input type="text" id="sharoushi-mapping-csv" placeholder="Z:\API連携\docs\社労士モード_列マッピング_v2.csv">
                     </label>
                     <label class="field">
                         <span class="field-label">追加支給台帳CSV</span>
@@ -826,7 +837,7 @@
             </div>
             <div id="sharoushi-detail" style="margin-bottom:10px"></div>
             <div style="margin-top:10px">
-                <div class="section-title" style="font-size:13px; margin-bottom:4px">先頭10人ぶんのプレビュー</div>
+                <div class="section-title" style="font-size:13px; margin-bottom:4px">先頭10人ぶんのプレビュー<span id="sharoushi-preview-layout" style="font-weight:normal; opacity:.75"></span></div>
                 <pre id="sharoushi-preview" class="md-view" style="overflow-x:auto; font-size:12px; line-height:1.5"></pre>
             </div>
         </div>

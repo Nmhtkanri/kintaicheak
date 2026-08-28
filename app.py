@@ -3144,7 +3144,7 @@ def invoice_download(ym, filename):
 
 
 # =============================================================================
-# 社労士モード — jinjer給与明細 → 前田事務所へ渡す給与CSV（60列・cp932）
+# 社労士モード — jinjer給与明細 → 前田事務所へ渡す給与CSV（49列・cp932）
 # =============================================================================
 
 SHAROUSHI_PREVIEW_ROWS = 10
@@ -3163,21 +3163,30 @@ def route_sharoushi_run():
       - ledger_csv    : 追加支給台帳CSVのパス（空欄なら既定）
       - refresh       : "1" なら給与明細を API から取り直す
       - allow_unknown : "1" なら未知項目があっても止めずに出力する
+      - layout        : "V2"=新49列（既定） / "V1"=旧60列（社労士の確認が済むまでの控え）
     """
     from services.jinjer_api_client import JinjerAPIError
-    from services.sharoushi_export import (BIKO_ITEMS, CSV_COLUMNS, SharoushiExportError,
-                                           format_cell, generate)
+    from services.sharoushi_export import (BIKO_ITEMS, DEFAULT_LAYOUT_KEY, LAYOUTS,
+                                           SharoushiExportError, format_cell, generate)
 
     month = (request.form.get("month") or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}", month):
         return jsonify({"success": False,
                         "errors": ["支給月は YYYY-MM 形式で入力してください（例: 2026-08）"]}), 400
 
+    # 形式は真偽値ではなく文字列キーで受ける。どちらで社労士へ渡したかがログと
+    # レスポンスに残り、将来 V3 が来ても壊れないため。
+    layout_key = (request.form.get("layout") or DEFAULT_LAYOUT_KEY).strip().upper()
+    if layout_key not in LAYOUTS:
+        return jsonify({"success": False,
+                        "errors": [f"CSVの形式が不正です: {layout_key}"]}), 400
+
     kwargs = {
         "mapping_csv": _clean_path_input(request.form.get("mapping_csv")) or None,
         "ledger_csv": _clean_path_input(request.form.get("ledger_csv")) or None,
         "refresh": (request.form.get("refresh") or "") == "1",
         "allow_unknown": (request.form.get("allow_unknown") or "") == "1",
+        "layout": layout_key,
     }
     for key in ("mapping_csv", "ledger_csv"):
         path = kwargs[key]
@@ -3201,9 +3210,11 @@ def route_sharoushi_run():
 
     with open(result["path"], "r", encoding="cp932", newline="") as f:
         preview = [next(f, "").rstrip("\r\n") for _ in range(SHAROUSHI_PREVIEW_ROWS + 1)]
-    logger.info("sharoushi_run: month=%s rows=%d unknown=%d ledger=%d -> %s",
-                month, result["rows"], len(result["unknown"]),
-                len(result["ledger_applied"]), result["filename"])
+    logger.info("sharoushi_run: month=%s layout=%s rows=%d unknown=%d ledger=%d "
+                "hidden=%d all_zero=%d -> %s",
+                month, result["layout"], result["rows"], len(result["unknown"]),
+                len(result["ledger_applied"]), len(result["hidden"]),
+                len(result["all_zero"]), result["filename"])
     return jsonify({
         "success": True,
         "month": month,
@@ -3211,7 +3222,9 @@ def route_sharoushi_run():
         "filename": result["filename"],
         "out_dir": os.path.abspath(result["out_dir"]),
         "rows": result["rows"],
-        "columns": len(CSV_COLUMNS),
+        "columns": result["columns"],
+        "layout": result["layout"],
+        "layout_label": result["layout_label"],
         "systems": result["systems"],
         "excluded": result["excluded"],
         "unknown": [dict(u, 金額=format_cell(u["金額"])) for u in result["unknown"]],
@@ -3219,6 +3232,11 @@ def route_sharoushi_run():
                            for a in result["ledger_applied"]],
         "multi_statement": result["multi_statement"],
         "unmapped_systems": result["unmapped_systems"],
+        # この形式に列が無いのに金額がある控除（V2 の欠勤控除）／全員ゼロの列／
+        # 入力先が揺れる控除の発生者一覧
+        "hidden": [dict(h, 金額=format_cell(h["金額"])) for h in result["hidden"]],
+        "all_zero": result["all_zero"],
+        "details": [dict(d, 金額=format_cell(d["金額"])) for d in result["details"]],
         "mapping_path": result["mapping_path"] or "（コード内の既定表）",
         "mapping_rows": result["mapping_rows"],
         "ledger_path": result["ledger_path"],

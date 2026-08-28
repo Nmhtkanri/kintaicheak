@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config                                              # noqa: E402
 from services.sharoushi_export import (                                # noqa: E402
     LEDGER_COLS,
-    LEDGER_ITEM_COLUMNS,
+    LEDGER_ITEM_COL_IDS,
     SharoushiExportError,
     export_default_mapping,
     load_column_mapping,
@@ -51,7 +51,7 @@ def build_ledger(path: str) -> str:
         w.writerow({
             "支給月": "", "社員番号": "", "氏名": "", "項目": "", "金額": "",
             "メモ": "給与計算のあとに発生した支給をここに書く。項目に使えるのは "
-                    + " / ".join(LEDGER_ITEM_COLUMNS)
+                    + " / ".join(LEDGER_ITEM_COL_IDS)
                     + "。書いた額は差引支給額と立替金列に足され、口座1振込額と総支給額は変わらない。"
                     "この行（支給月と社員番号が空の行）は読み飛ばされる。",
         })
