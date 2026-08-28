@@ -145,10 +145,11 @@ def _log(line: str) -> None:
 
 def _say(msg: str) -> None:
     """printの安全版。リダイレクト先（NAS等）のハンドルが死んでもバッチを止めない。
-    2026-08-28 実障害: 60件目の進捗printが [Errno 22] → 例外処理内のprintも失敗 → プロセス死。"""
+    2026-08-28 実障害: 60件目の進捗printが [Errno 22] → 例外処理内のprintも失敗 → プロセス死。
+    exe（コンソールがcp932）では ⚠ 等が UnicodeEncodeError（ValueError系）になるのも同日実測。"""
     try:
         print(msg, flush=True)
-    except OSError:
+    except (OSError, ValueError):
         pass
 
 

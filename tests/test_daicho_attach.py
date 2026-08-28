@@ -102,6 +102,15 @@ def test_adapter_get_returns_data_and_reauths_on_403(monkeypatch):
 # _write_with_retry（429を粘る・403token→再認証）
 # ---------------------------------------------------------------------------
 
+def test_say_swallows_unicode_encode_error(monkeypatch):
+    """exe（cp932コンソール）で ⚠ の print が UnicodeEncodeError になってもジョブを殺さない。"""
+    def bad_print(*args, **kwargs):
+        raise UnicodeEncodeError("cp932", "⚠", 0, 1, "illegal multibyte sequence")
+
+    monkeypatch.setattr("builtins.print", bad_print)
+    jinjer_attach._say("  ⚠ テスト")   # 例外が漏れなければ合格
+
+
 def test_write_with_retry_survives_429_then_succeeds(monkeypatch):
     slept = []
     monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))

@@ -39,6 +39,13 @@ if __name__ == "__main__":
     if "--daicho-attach" in sys.argv:
         # 派遣台帳のjinjer添付ジョブ（デタッチ子プロセス用のCLIモード）。
         # ハブの画面から起動され、この分岐では Flask を立てない。
+        # exe のコンソールは cp932 のため、進捗表示の ⚠ 等が UnicodeEncodeError で
+        # ジョブを殺さないよう UTF-8 に寄せる（2026-08-28 実機で検出）
+        for _stream in (sys.stdout, sys.stderr):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError):
+                pass
         from services.daicho.attach_job import main_cli
 
         sys.exit(main_cli(sys.argv))
