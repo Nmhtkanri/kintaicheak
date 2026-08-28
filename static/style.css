@@ -1177,6 +1177,7 @@ body {
 .acc-mail     { border-left-color: #0070c0; }
 .acc-keihi    { border-left-color: #2f5597; }
 .acc-health   { border-left-color: #0e7c66; }
+.acc-haken    { border-left-color: #b45309; }
 .icon-match    { background: #2E75B6; }
 .icon-schedule { background: #2E75B6; }
 .icon-keiri    { background: #7030a0; }
@@ -1184,6 +1185,7 @@ body {
 .icon-mail     { background: #0070c0; }
 .icon-keihi    { background: #2f5597; }
 .icon-health   { background: #0e7c66; }
+.icon-haken    { background: #b45309; }
 
 /* --- 健康診断HPMモード: 1人1ブロックの一覧 --- */
 .hh-person {

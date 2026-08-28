@@ -4523,6 +4523,58 @@ def api_status():
     return jsonify({"status": "ok", "api_key_set": bool(os.environ.get("ANTHROPIC_API_KEY"))})
 
 
+# =============================================================================
+# 派遣元管理台帳モード — 四半期台帳の作成・PDF出力・jinjer添付
+# =============================================================================
+
+def _haken_quarter_or_error(raw):
+    """四半期入力を検証して (正規化済み, エラーレスポンス) を返す。"""
+    from services.daicho import config as daicho_config
+
+    q = (raw or "").strip().upper()
+    try:
+        daicho_config.quarter_range(q)
+    except ValueError:
+        return None, (jsonify({"success": False,
+                               "errors": ["四半期は 2026Q2 のような形式で指定してください（Q1=1-3月）"]}), 400)
+    return q, None
+
+
+@app.route("/haken_freshness", methods=["GET"])
+def route_haken_freshness():
+    """①入力ファイルの鮮度チェック。input/ を読むだけで何も書かない。"""
+    from services.daicho.inputs import check_freshness
+
+    q, err = _haken_quarter_or_error(request.args.get("quarter"))
+    if err:
+        return err
+    try:
+        result = check_freshness(q)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("haken_freshness failed")
+        return jsonify({"success": False, "errors": [f"入力ファイルの確認に失敗しました: {e}"]}), 500
+    return jsonify({"success": True, **result})
+
+
+@app.route("/haken_quarter_status", methods=["GET"])
+def route_haken_quarter_status():
+    """四半期ステッパー用のステータス。成果物と進捗ファイルを見るだけで何も書かない。"""
+    from services.daicho.inputs import quarter_status
+
+    raw = (request.args.get("quarter") or "").strip()
+    q = None  # 省略時は直前の四半期
+    if raw:
+        q, err = _haken_quarter_or_error(raw)
+        if err:
+            return err
+    try:
+        result = quarter_status(q)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("haken_quarter_status failed")
+        return jsonify({"success": False, "errors": [f"状態の取得に失敗しました: {e}"]}), 500
+    return jsonify({"success": True, **result})
+
+
 def _sse_event(event_type, data):
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 

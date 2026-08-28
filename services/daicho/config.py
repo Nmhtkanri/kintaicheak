@@ -12,6 +12,11 @@ INPUT_DIR = DATA_ROOT / "input"
 OUTPUT_DIR = DATA_ROOT / "output"
 TEMPLATE_DIR = DATA_ROOT / "テンプレート"
 LOG_DIR = DATA_ROOT / "ログ"
+PDF_ROOT = DATA_ROOT / "PDF"
+
+# jinjer添付ジョブの進捗（デタッチ子プロセスが書き、ハブ画面が読む。NAS置き＝別PCからも見える）
+ATTACH_PROGRESS_JSON = LOG_DIR / "添付進捗.json"
+ATTACH_CANCEL_FLAG = LOG_DIR / "添付キャンセル.flag"
 
 # 旧 .xlsm の台帳フォーム（レイアウトの元）。元ファイルは読み取りのみ。
 SOURCE_FORM_XLSM = TEMPLATE_DIR / "元_派遣元管理台帳202504.xlsm"

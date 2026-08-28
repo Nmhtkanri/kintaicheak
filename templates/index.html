@@ -42,6 +42,10 @@
             <input type="radio" name="mode" value="health_hpm">
             <span class="mode-tab-face">健康診断HPM</span>
         </label>
+        <label class="mode-tab" title="四半期の派遣元管理台帳を作り jinjer へ添付する">
+            <input type="radio" name="mode" value="haken">
+            <span class="mode-tab-face">派遣台帳</span>
+        </label>
         <span class="mode-tabs-hint" id="mode-bar-hint"></span>
     </div>
 
@@ -488,6 +492,37 @@
     <!-- ============================================================ -->
     <!-- 経費チェックモード — テレワーク日数・出社日数                  -->
     <!-- ============================================================ -->
+    <!-- ==== 派遣元管理台帳モード: 四半期台帳の作成・PDF・jinjer添付 ==== -->
+    <div class="workflow-card mode-accent acc-haken" id="haken-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-haken">📑</span>
+            <div>
+                <div class="card-title">派遣元管理台帳（四半期）</div>
+                <p class="card-lead">e-staffing・Fieldglass・直接契約と jinjer から四半期分の台帳を作り、PDF を jinjer へ添付します。</p>
+            </div>
+        </div>
+
+        <div class="fields">
+            <label class="field field-inline">
+                <span class="field-label">対象四半期 <span class="tag tag-req">必須</span></span>
+                <input type="text" id="haken-quarter" placeholder="2026Q2" style="width:120px">
+                <span class="field-sub">Q1=1-3月・Q2=4-6月・Q3=7-9月・Q4=10-12月。空欄のまま開くと直前の四半期が入ります</span>
+            </label>
+        </div>
+        <div id="haken-due-banner" class="alert alert-warning" style="display:none"></div>
+        <div id="haken-stepper" class="hint" style="margin:6px 0 2px"></div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary" id="haken-freshness-btn">① 入力ファイルを確認</button>
+            <span id="haken-freshness-status" class="status-text"></span>
+        </div>
+        <div id="haken-freshness-area" style="display:none; padding:10px 0 0">
+            <div id="haken-freshness-overall" style="font-weight:bold; margin-bottom:6px"></div>
+            <div class="table-wrap"><table class="keiri-md-table" id="haken-freshness-table"></table></div>
+        </div>
+        <div id="haken-error-area" class="alert alert-error" style="display:none; margin:8px 0 0"></div>
+    </div>
+
     <!-- ==== 経理モード: freee 取引インポート4CSVの生成 ==== -->
     <div class="workflow-card mode-accent acc-keiri" id="keiri-card" style="display:none">
         <div class="card-head">

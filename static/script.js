@@ -114,6 +114,7 @@ const MODE_HINTS = {
     expense:    'テレワーク・出社日数と経費を集計する',
     mail:       '下書きのみ作成・送信はしません',
     health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
+    haken:      '四半期の派遣元管理台帳を作成し jinjer へ添付する',
 };
 
 // 進捗バー／エラー表示がどのモードのものかを覚えておく。
@@ -150,6 +151,7 @@ function applyModeUI(mode) {
     const shahoCard = document.getElementById('shaho-card');
     const mailCard = document.getElementById('mail-card');
     const healthCard = document.getElementById('health-card');
+    const hakenCard = document.getElementById('haken-card');
     const sseCard = document.getElementById('sse-card');
 
     const isSchedule = mode === 'csv_export';
@@ -160,8 +162,9 @@ function applyModeUI(mode) {
     const isShaho = mode === 'shaho';
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
+    const isHaken = mode === 'haken';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isInvoice && !isShaho && !isMail && !isHealthHpm;
+        && !isInvoice && !isShaho && !isMail && !isHealthHpm && !isHaken;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -216,6 +219,11 @@ function applyModeUI(mode) {
     }
     // 健康診断HPMモード: 健診カードのみ表示
     if (healthCard) healthCard.style.display = isHealthHpm ? '' : 'none';
+    // 派遣台帳モード: 台帳カードのみ表示（初回表示時に四半期ステッパーを読み込む）
+    if (hakenCard) {
+        hakenCard.style.display = isHaken ? '' : 'none';
+        if (isHaken) hakenLoadStatus();
+    }
 
     // アップロードフォーム（＝スケジュールモードの入力カード）はスケジュールモードのみ表示
     if (form) form.style.display = isSchedule ? '' : 'none';
@@ -4194,3 +4202,140 @@ if (invoiceFoldersCheckBtn) invoiceFoldersCheckBtn.addEventListener('click', inv
 
 const invoiceFoldersSaveBtn = document.getElementById('invoice-folders-save');
 if (invoiceFoldersSaveBtn) invoiceFoldersSaveBtn.addEventListener('click', invoiceFoldersSave);
+
+// =============================================================================
+// 派遣元管理台帳モード — 四半期台帳の作成・PDF・jinjer添付
+// =============================================================================
+function hakenDefaultQuarter() {
+    // 直前の（＝直近で締まった）四半期。1〜3月なら前年Q4
+    const now = new Date();
+    const qn = Math.floor(now.getMonth() / 3) + 1;
+    return qn === 1 ? `${now.getFullYear() - 1}Q4` : `${now.getFullYear()}Q${qn - 1}`;
+}
+
+function hakenQuarter() {
+    const input = document.getElementById('haken-quarter');
+    if (!input) return '';
+    let v = (input.value || '').trim().toUpperCase();
+    if (!v) { v = hakenDefaultQuarter(); input.value = v; }
+    return v;
+}
+
+function hakenShowError(msg) {
+    const area = document.getElementById('haken-error-area');
+    if (!area) return;
+    area.textContent = msg || '';
+    area.style.display = msg ? '' : 'none';
+}
+
+const hakenEsc = (s) => String(s === undefined || s === null ? '' : s)
+    .replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hakenVal = (x, alt) => (x === undefined || x === null) ? alt : x;
+
+function hakenRenderStepper(data) {
+    const el = document.getElementById('haken-stepper');
+    if (!el) return;
+    const chip = (state, label, detail) => {
+        const mark = state === 'done' ? '✓' : (state === 'part' ? '●' : '○');
+        const color = state === 'done' ? '#2e7d32' : (state === 'part' ? '#b45309' : '#8a939c');
+        const sub = detail ? `<span style="opacity:.75">（${hakenEsc(detail)}）</span>` : '';
+        return `<span style="color:${color}; margin-right:14px">${mark} ${hakenEsc(label)}${sub}</span>`;
+    };
+    const s = data.steps || {};
+    const f = s.freshness || {}, b = s.build || {}, p = s.pdf || {}, a = s.attach || {};
+    const fState = f.overall === 'ok' ? 'done' : (f.overall === 'warn' ? 'part' : 'todo');
+    const bState = b.exists ? 'done' : 'todo';
+    const pState = (p.count || 0) > 0 ? 'done' : 'todo';
+    const aState = a.state === 'done' ? 'done'
+        : (a.state && a.state !== 'none' && a.state !== 'unknown' ? 'part' : 'todo');
+    el.innerHTML = `<b>${hakenEsc(data.quarter)}（${hakenEsc(data.label)}）</b>　`
+        + chip(fState, '①入力', f.overall === 'ok' ? '揃っています' : (f.overall === 'warn' ? '要確認あり' : '未確認'))
+        + chip(bState, '②台帳', b.exists ? `${b.mtime || ''}・警告${hakenVal(b.n_warn, '?')}行` : '未作成')
+        + chip(pState, '③PDF', `${hakenVal(p.count, '?')}枚`)
+        + chip(aState, '④添付', a.state === 'none' ? '未実行' : (a.state || '不明'));
+}
+
+async function hakenLoadStatus() {
+    const q = hakenQuarter();
+    if (!q) return;
+    try {
+        const res = await fetch(`/haken_quarter_status?quarter=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        if (!data.success) return;
+        hakenRenderStepper(data);
+        const banner = document.getElementById('haken-due-banner');
+        if (banner) {
+            if (data.due) {
+                banner.textContent = `📌 ${data.due_quarter} の台帳を作る時期です`
+                    + '（四半期レポートのメールは 1/15・4/15・7/15・10/15 に届きます）';
+                banner.style.display = '';
+            } else {
+                banner.style.display = 'none';
+            }
+        }
+    } catch (e) {
+        // ステッパーは補助表示。読めなくても黙って次の機会に
+    }
+}
+
+function hakenVerdictBadge(v) {
+    const map = { ok: ['✓', '#2e7d32'], warn: ['⚠', '#b45309'],
+                  missing: ['✗', '#c0392b'], info: ['ℹ', '#6b7783'] };
+    const pair = map[v] || ['?', '#6b7783'];
+    return `<span style="color:${pair[1]}; font-weight:bold">${pair[0]}</span>`;
+}
+
+function hakenRenderFreshness(data) {
+    const area = document.getElementById('haken-freshness-area');
+    const overall = document.getElementById('haken-freshness-overall');
+    const table = document.getElementById('haken-freshness-table');
+    if (!area || !table) return;
+    const overallText = {
+        ok: '✓ 入力は揃っています。②台帳を作成できます',
+        warn: '⚠ 古い・欠けている入力があります（それでも②は実行できます）',
+        missing: '✗ 必須の入力が見つかりません（input フォルダを確認してください）',
+    };
+    if (overall) {
+        overall.textContent = `${data.quarter}（${data.label}）: ${overallText[data.overall] || data.overall}`;
+    }
+    let html = '<tr><th>判定</th><th>入力</th><th>ファイル</th><th>データ日付</th><th>期内件数</th><th>備考</th></tr>';
+    (data.inputs || []).forEach(r => {
+        const src = r.date_source ? `<span style="opacity:.65">（${hakenEsc(r.date_source)}）</span>` : '';
+        html += `<tr><td>${hakenVerdictBadge(r.verdict)}</td><td>${hakenEsc(r.label)}</td>`
+            + `<td>${hakenEsc(r.filename) || '—'}</td>`
+            + `<td>${hakenEsc(r.date)}${src}</td>`
+            + `<td style="text-align:right">${hakenVal(r.in_quarter, '')}</td>`
+            + `<td>${hakenEsc(r.note)}</td></tr>`;
+    });
+    table.innerHTML = html;
+    area.style.display = '';
+}
+
+const hakenFreshnessBtn = document.getElementById('haken-freshness-btn');
+if (hakenFreshnessBtn) {
+    hakenFreshnessBtn.addEventListener('click', async () => {
+        const q = hakenQuarter();
+        const status = document.getElementById('haken-freshness-status');
+        hakenShowError('');
+        hakenFreshnessBtn.disabled = true;
+        if (status) status.textContent = '入力ファイルを確認しています…';
+        try {
+            const res = await fetch(`/haken_freshness?quarter=${encodeURIComponent(q)}`);
+            const data = await res.json();
+            if (!data.success) {
+                hakenShowError((data.errors || ['入力ファイルの確認に失敗しました']).join(' / '));
+                return;
+            }
+            hakenRenderFreshness(data);
+            hakenLoadStatus();
+        } catch (e) {
+            hakenShowError(`入力ファイルの確認に失敗しました: ${e}`);
+        } finally {
+            hakenFreshnessBtn.disabled = false;
+            if (status) status.textContent = '';
+        }
+    });
+}
+
+const hakenQuarterInput = document.getElementById('haken-quarter');
+if (hakenQuarterInput) hakenQuarterInput.addEventListener('change', () => hakenLoadStatus());
