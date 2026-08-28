@@ -4448,6 +4448,298 @@ function hakenRenderBuild(data) {
     area.style.display = '';
 }
 
+// --- ③ PDF出力（軽量ジョブ＋4秒ポーリング） ---
+let hakenPdfTimer = null;
+
+function hakenPdfPoll(jobId) {
+    const status = document.getElementById('haken-pdf-status');
+    const area = document.getElementById('haken-pdf-area');
+    const result = document.getElementById('haken-pdf-result');
+    const warnEl = document.getElementById('haken-pdf-warnings');
+    const btn = document.getElementById('haken-pdf-btn');
+    hakenPdfTimer = setInterval(async () => {
+        let data = null;
+        try {
+            const res = await fetch(`/haken_pdf_status/${encodeURIComponent(jobId)}`);
+            data = await res.json();
+        } catch (e) {
+            return;   // 通信失敗はこの周期を諦めて次へ
+        }
+        if (!data) return;
+        if (!data.success) {
+            clearInterval(hakenPdfTimer);
+            hakenPdfTimer = null;
+            if (btn) btn.disabled = false;
+            if (status) status.textContent = '';
+            hakenShowError((data.errors || ['PDF出力の状態が取れません']).join(' / '));
+            return;
+        }
+        if (!data.done) {
+            if (status) {
+                const total = hakenVal(data.total, '?');
+                status.textContent = `PDFを出力しています… ${data.n}/${total}枚 ${data.current || ''}`;
+            }
+            return;
+        }
+        clearInterval(hakenPdfTimer);
+        hakenPdfTimer = null;
+        if (btn) btn.disabled = false;
+        if (status) status.textContent = '';
+        if (data.ok) {
+            if (result) result.innerHTML = `<b>✓ ${hakenEsc(data.quarter)}: PDF ${data.n}枚を出力しました</b>`;
+            if (warnEl) {
+                warnEl.innerHTML = (data.warnings || []).length
+                    ? '⚠ ' + (data.warnings || []).map(hakenEsc).join('<br>⚠ ')
+                    : '';
+            }
+            if (area) area.style.display = '';
+            hakenLoadStatus();
+        } else {
+            hakenShowError(data.error || 'PDF出力に失敗しました');
+        }
+    }, 4000);
+}
+
+const hakenPdfBtn = document.getElementById('haken-pdf-btn');
+if (hakenPdfBtn) {
+    hakenPdfBtn.addEventListener('click', async () => {
+        const q = hakenQuarter();
+        const status = document.getElementById('haken-pdf-status');
+        hakenShowError('');
+        hakenPdfBtn.disabled = true;
+        if (status) status.textContent = 'PDF出力を開始しています…';
+        try {
+            const fd = new FormData();
+            fd.append('quarter', q);
+            const res = await fetch('/haken_export_pdf', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) {
+                hakenPdfBtn.disabled = false;
+                if (status) status.textContent = '';
+                hakenShowError((data.errors || ['PDF出力を開始できませんでした']).join(' / '));
+                return;
+            }
+            hakenPdfPoll(data.job_id);
+        } catch (e) {
+            hakenPdfBtn.disabled = false;
+            if (status) status.textContent = '';
+            hakenShowError(`PDF出力を開始できませんでした: ${e}`);
+        }
+    });
+}
+
+// --- ④ jinjer添付（デタッチ子プロセス＋進捗JSONを10秒ポーリング） ---
+let hakenAttachCanWrite = false;
+let hakenAttachTimer = null;
+
+function hakenAttachButtonsRefresh() {
+    const confirmInput = document.getElementById('haken-attach-confirm');
+    const nowBtn = document.getElementById('haken-attach-now-btn');
+    const tonightBtn = document.getElementById('haken-attach-tonight-btn');
+    const ok = hakenAttachCanWrite
+        && confirmInput && confirmInput.value.trim() === '添付';
+    if (nowBtn) nowBtn.disabled = !ok;
+    if (tonightBtn) tonightBtn.disabled = !ok;
+}
+
+function hakenRenderAttachPreview(data) {
+    const area = document.getElementById('haken-attach-area');
+    const summary = document.getElementById('haken-attach-summary');
+    const skipped = document.getElementById('haken-attach-skipped');
+    const gate = document.getElementById('haken-attach-writegate');
+    const tonightBtn = document.getElementById('haken-attach-tonight-btn');
+    if (summary) {
+        const eta = data.to_attach ? `。見込み 約${data.eta_minutes}分（実測 約60秒/枚）` : '';
+        summary.innerHTML = `<b>対象PDF ${data.total}枚 / ${data.people}人</b> — `
+            + `添付済み ${data.already}枚・<b>これから添付 ${data.to_attach}枚</b>${hakenEsc(eta)}`;
+    }
+    if (skipped) {
+        skipped.innerHTML = (data.skipped || []).length
+            ? '⚠ 対象外: ' + (data.skipped || []).map(hakenEsc).join('<br>⚠ 対象外: ')
+            : '';
+    }
+    hakenAttachCanWrite = !!data.can_write;
+    if (gate) {
+        let extra = '';
+        if (data.shaho_lock) extra += `<br>⏳ ${hakenEsc(data.shaho_lock)}`;
+        if (data.lock) extra += `<br>🔒 別PCで実行中: ${hakenEsc(data.lock.user || '')}（${hakenEsc(data.lock.started_at || '')}〜）`;
+        gate.innerHTML = (data.can_write ? '🔓 ' : '🔒 ') + hakenEsc(data.write_reason || '') + extra;
+    }
+    if (tonightBtn && data.tonight_at) tonightBtn.textContent = `🌙 今夜 ${data.tonight_at} に回す`;
+    if (area) area.style.display = '';
+    hakenAttachButtonsRefresh();
+    if (['spawning', 'scheduled', 'running'].indexOf(data.state) >= 0) hakenAttachStartPolling();
+}
+
+function hakenAttachStopPolling() {
+    if (hakenAttachTimer) { clearInterval(hakenAttachTimer); hakenAttachTimer = null; }
+}
+
+function hakenAttachStartPolling() {
+    if (hakenAttachTimer) return;
+    const poll = async () => {
+        let data = null;
+        try {
+            const res = await fetch('/haken_attach_status');
+            data = await res.json();
+        } catch (e) { return; }
+        if (!data || !data.success) return;
+        hakenRenderAttachProgress(data);
+        const state = (data.progress || {}).state || 'none';
+        if (['spawning', 'scheduled', 'running'].indexOf(state) < 0) {
+            hakenAttachStopPolling();
+            hakenLoadStatus();
+        }
+    };
+    poll();
+    hakenAttachTimer = setInterval(poll, 10000);
+}
+
+function hakenRenderAttachProgress(data) {
+    const box = document.getElementById('haken-attach-progress');
+    const line = document.getElementById('haken-attach-progress-line');
+    const log = document.getElementById('haken-attach-log');
+    const cancelBtn = document.getElementById('haken-attach-cancel-btn');
+    if (!box) return;
+    const p = data.progress || {};
+    const state = p.state || 'none';
+    if (state === 'none') { box.style.display = 'none'; return; }
+    const stateLabel = {
+        spawning: '起動中…', scheduled: '⏰ 予約中', running: '▶ 実行中',
+        done: '✓ 完了', cancelled: '✋ キャンセル済み', error: '✗ エラー', unknown: '（進捗を読み直しています）',
+    }[state] || state;
+    let detail = '';
+    if (state === 'running') {
+        detail = ` ${p.done || 0}/${hakenVal(p.total, '?')}枚（スキップ ${p.skip || 0}） ${p.current || ''}`;
+    } else if (p.message) {
+        detail = ` ${p.message}`;
+    }
+    if (line) {
+        line.textContent = `${stateLabel}${detail}`
+            + (p.user ? `　実行者: ${p.user}` : '') + (p.updated_at ? `　(${p.updated_at})` : '');
+    }
+    if (log) {
+        log.textContent = (data.log_tail || []).join('\n');
+        log.scrollTop = log.scrollHeight;
+    }
+    if (cancelBtn) {
+        cancelBtn.style.display =
+            (hakenAttachCanWrite && ['spawning', 'scheduled', 'running'].indexOf(state) >= 0) ? '' : 'none';
+    }
+    box.style.display = '';
+}
+
+async function hakenAttachExecute(mode) {
+    const confirmInput = document.getElementById('haken-attach-confirm');
+    const statusText = document.getElementById('haken-attach-status-text');
+    hakenShowError('');
+    try {
+        const res = await fetch('/haken_attach_execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: mode, confirm: confirmInput ? confirmInput.value.trim() : '' }),
+        });
+        const data = await res.json();
+        if (!data.success) {
+            hakenShowError((data.errors || ['添付ジョブを開始できませんでした']).join(' / '));
+            return;
+        }
+        if (statusText) {
+            statusText.textContent = mode === 'tonight'
+                ? `今夜 ${data.start_at} に開始する予約をしました（PCの電源は入れたまま）`
+                : '添付ジョブを開始しました（ハブの窓を閉じても走り続けます）';
+        }
+        if (confirmInput) confirmInput.value = '';
+        hakenAttachButtonsRefresh();
+        hakenAttachStartPolling();
+    } catch (e) {
+        hakenShowError(`添付ジョブを開始できませんでした: ${e}`);
+    }
+}
+
+const hakenAttachPreviewBtn = document.getElementById('haken-attach-preview-btn');
+if (hakenAttachPreviewBtn) {
+    hakenAttachPreviewBtn.addEventListener('click', async () => {
+        const statusText = document.getElementById('haken-attach-status-text');
+        hakenShowError('');
+        hakenAttachPreviewBtn.disabled = true;
+        if (statusText) statusText.textContent = 'PDFフォルダと jinjer 側を突き合わせています…';
+        try {
+            const res = await fetch('/haken_attach_preview', { method: 'POST', body: new FormData() });
+            const data = await res.json();
+            if (!data.success) {
+                hakenShowError((data.errors || ['事前確認に失敗しました']).join(' / '));
+                return;
+            }
+            hakenRenderAttachPreview(data);
+        } catch (e) {
+            hakenShowError(`事前確認に失敗しました: ${e}`);
+        } finally {
+            hakenAttachPreviewBtn.disabled = false;
+            if (statusText) statusText.textContent = '';
+        }
+    });
+}
+
+const hakenAttachConfirmInput = document.getElementById('haken-attach-confirm');
+if (hakenAttachConfirmInput) hakenAttachConfirmInput.addEventListener('input', hakenAttachButtonsRefresh);
+
+const hakenAttachNowBtn = document.getElementById('haken-attach-now-btn');
+if (hakenAttachNowBtn) hakenAttachNowBtn.addEventListener('click', () => hakenAttachExecute('now'));
+
+const hakenAttachTonightBtn = document.getElementById('haken-attach-tonight-btn');
+if (hakenAttachTonightBtn) hakenAttachTonightBtn.addEventListener('click', () => hakenAttachExecute('tonight'));
+
+const hakenAttachCancelBtn = document.getElementById('haken-attach-cancel-btn');
+if (hakenAttachCancelBtn) {
+    hakenAttachCancelBtn.addEventListener('click', async () => {
+        try {
+            const res = await fetch('/haken_attach_cancel', { method: 'POST' });
+            const data = await res.json();
+            if (!data.success) hakenShowError((data.errors || ['キャンセルできませんでした']).join(' / '));
+        } catch (e) {
+            hakenShowError(`キャンセルできませんでした: ${e}`);
+        }
+    });
+}
+
+const hakenVerifyBtn = document.getElementById('haken-verify-btn');
+if (hakenVerifyBtn) {
+    hakenVerifyBtn.addEventListener('click', async () => {
+        const statusEl = document.getElementById('haken-verify-status');
+        const area = document.getElementById('haken-verify-area');
+        hakenShowError('');
+        hakenVerifyBtn.disabled = true;
+        if (statusEl) statusEl.textContent = 'jinjer 側の反映状況を確認しています（1〜2分）…';
+        try {
+            const res = await fetch('/haken_verify', { method: 'POST', body: new FormData() });
+            const data = await res.json();
+            if (!data.success) {
+                hakenShowError((data.errors || ['反映確認に失敗しました']).join(' / '));
+                return;
+            }
+            if (area) {
+                let html = `<b>${(data.missing || []).length === 0 ? '✓' : '⚠'} 反映済み ${data.ok} / 未反映 ${(data.missing || []).length} / 対象 ${data.total}</b>`;
+                if ((data.missing || []).length) {
+                    html += '<div class="hint" style="margin-top:4px">添付は非同期（最大35分遅れ）。実行直後の未反映は時間を置いて再確認してください。</div>'
+                        + '<div class="table-wrap" style="max-height:300px; overflow:auto; margin-top:4px"><table class="keiri-md-table">'
+                        + '<tr><th>社員番号</th><th>PDF</th><th>添付日付</th></tr>'
+                        + (data.missing || []).slice(0, 100).map(m =>
+                            `<tr><td>${hakenEsc(m.emp)}</td><td>${hakenEsc(m.pdf)}</td><td>${hakenEsc(m.date)}</td></tr>`).join('')
+                        + '</table></div>';
+                }
+                area.innerHTML = html;
+                area.style.display = '';
+            }
+        } catch (e) {
+            hakenShowError(`反映確認に失敗しました: ${e}`);
+        } finally {
+            hakenVerifyBtn.disabled = false;
+            if (statusEl) statusEl.textContent = '';
+        }
+    });
+}
+
 const hakenBuildBtn = document.getElementById('haken-build-btn');
 if (hakenBuildBtn) {
     hakenBuildBtn.addEventListener('click', async () => {

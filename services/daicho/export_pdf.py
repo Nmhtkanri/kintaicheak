@@ -41,8 +41,13 @@ def period_label(period_text: str) -> str | None:
 
 
 def export_quarter(quarter: str, xlsx_path: Path | str | None = None,
-                   pdf_root: Path | str = PDF_ROOT) -> tuple[int, list[str]]:
-    """1四半期分のブックをPDF化する。戻り値: (出力枚数, 警告)。"""
+                   pdf_root: Path | str = PDF_ROOT,
+                   on_progress=None) -> tuple[int, list[str]]:
+    """1四半期分のブックをPDF化する。戻り値: (出力枚数, 警告)。
+
+    on_progress(done, total, filename) を渡すと1枚ごとに呼ぶ（ハブ画面の進捗用。
+    省略時は従来どおり）。コールバック内の例外で出力は止めない。
+    """
     import pythoncom
     import win32com.client.dynamic
 
@@ -66,6 +71,7 @@ def export_quarter(quarter: str, xlsx_path: Path | str | None = None,
     try:
         wb = xl.Workbooks.Open(str(xlsx), ReadOnly=True, UpdateLinks=0)
         try:
+            total = max(int(wb.Worksheets.Count) - 2, 0)   # 目次・警告を除く
             for ws in wb.Worksheets:
                 if ws.Name in ("目次", "警告"):
                     continue
@@ -85,6 +91,11 @@ def export_quarter(quarter: str, xlsx_path: Path | str | None = None,
                 out = folder / f"{emp}_{name}_{label}分.pdf"
                 ws.ExportAsFixedFormat(0, str(out))
                 n += 1
+                if on_progress is not None:
+                    try:
+                        on_progress(n, total, out.name)
+                    except Exception:  # noqa: BLE001 — 進捗表示の失敗で出力を止めない
+                        pass
         finally:
             wb.Close(False)
     finally:

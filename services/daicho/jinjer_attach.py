@@ -180,7 +180,13 @@ def _write_with_retry(client, fn, what: str, max_tries: int = 10, cooldown: floa
 
 
 def run(employees: list[str] | None = None, dry_run: bool = True,
-        write_interval: float = 12.0, limit: int | None = None) -> None:
+        write_interval: float = 12.0, limit: int | None = None,
+        on_progress=None, should_stop=None) -> tuple[int, int, int]:
+    """PDFを添付する。戻り値 (添付数, 添付済みスキップ数, 対象数)。
+
+    on_progress(done, skip, total, current) と should_stop() はハブのジョブ用
+    （省略時は従来のCLI動作のまま）。should_stop が True を返すと次の1件から止まる。
+    """
     emp_filter = set(employees) if employees else None
     jobs, skipped = scan_pdfs(employees=emp_filter)
     for s in skipped:
@@ -190,7 +196,7 @@ def run(employees: list[str] | None = None, dry_run: bool = True,
     emp_ids = sorted({emp for emp, *_ in jobs})
     _say(f"対象: {len(jobs)}ファイル / {len(emp_ids)}人（menu {MENU_ID}・添付日付=期間開始日）")
     if not jobs:
-        return
+        return 0, 0, 0
 
     client = _client(write_interval)
     records = fetch_records(client, emp_ids)
@@ -204,15 +210,31 @@ def run(employees: list[str] | None = None, dry_run: bool = True,
         groups[(emp, _norm_date(date))].append((emp, folder, pdf, date))
 
     done = skip = 0
+    stopped = False
+
+    def _notify(current: str = "") -> None:
+        if on_progress is not None:
+            try:
+                on_progress(done, skip, len(jobs), current)
+            except Exception:  # noqa: BLE001 — 進捗表示の失敗で添付を止めない
+                pass
+
     for (emp, date_n), job_list in groups.items():
+        if stopped:
+            break
         rows = records.get(emp, [])
         same_date = [r for r in rows if r["date"] == date_n]
         attached_n = sum(1 for r in same_date if r["attached"])
         empty = [r for r in same_date if not r["attached"]]
         # 添付済みレコードの数だけ「済み」として消し込む（ファイル名はAPIから見えないため数で対応）
         skip += min(attached_n, len(job_list))
+        _notify()
         remaining = job_list[min(attached_n, len(job_list)):]
         for emp_, folder, pdf, date in remaining:
+            if should_stop is not None and should_stop():
+                stopped = True
+                _say("  キャンセル指示を受けて停止（再実行すれば添付済みスキップで続きから）")
+                break
             plan = f"既存レコード{empty[0]['id']}に添付" if empty else "レコード作成→添付"
             if dry_run:
                 _say(f"  [DRY] {emp_} {pdf.name} 添付日付={date} → {plan}")
@@ -236,15 +258,18 @@ def run(employees: list[str] | None = None, dry_run: bool = True,
                                   f"{emp_} {pdf.name} 添付")
                 done += 1
                 _log(f"OK {emp_} {pdf.name} 日付={date} record={rec_id}")
+                _notify(pdf.name)
                 if done % 10 == 0:
                     _say(f"  … {done}件添付済み（残り約{len(jobs) - done - skip}件）")
             except Exception as exc:                  # 1件の失敗で全体を止めない
                 _log(f"NG {emp_} {pdf.name} {exc}")
                 _say(f"  ✗ {emp_} {pdf.name}: {exc}")
+    _notify()
     mode = "DRY-RUN" if dry_run else "実行"
     _say(f"[{mode}] 添付 {done} / スキップ（添付済み） {skip} / 対象 {len(jobs)}")
     if not dry_run:
         _say("※ async/files は非同期のため、15分後に --verify で反映を確認すること")
+    return done, skip, len(jobs)
 
 
 def verify(employees: list[str] | None = None) -> None:

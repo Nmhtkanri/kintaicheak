@@ -28,6 +28,14 @@ def test_index_has_haken_tab_and_card():
     assert 'id="haken-quarter"' in html
     assert 'id="haken-freshness-btn"' in html
     assert 'id="haken-stepper"' in html
+    assert 'id="haken-build-btn"' in html
+    assert 'id="haken-warn-table"' in html
+    assert 'id="haken-pdf-btn"' in html
+    assert 'id="haken-attach-preview-btn"' in html
+    assert 'id="haken-attach-confirm"' in html
+    assert 'id="haken-attach-now-btn"' in html
+    assert 'id="haken-attach-tonight-btn"' in html
+    assert 'id="haken-verify-btn"' in html
 
 
 def test_script_wires_haken_mode():
@@ -37,6 +45,15 @@ def test_script_wires_haken_mode():
     assert "hakenCard" in js
     assert "/haken_freshness" in js
     assert "/haken_quarter_status" in js
+    assert "/haken_build" in js
+    assert "/haken_download" in js
+    assert "/haken_export_pdf" in js
+    assert "/haken_pdf_status" in js
+    assert "/haken_attach_preview" in js
+    assert "/haken_attach_execute" in js
+    assert "/haken_attach_status" in js
+    assert "/haken_attach_cancel" in js
+    assert "/haken_verify" in js
 
 
 def test_haken_is_not_in_inline_script():

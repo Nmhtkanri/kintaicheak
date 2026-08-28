@@ -545,6 +545,51 @@
                 <table class="keiri-md-table" id="haken-warn-table"></table>
             </div>
         </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary" id="haken-pdf-btn">③ PDFを出力（1期 約5分・Excel使用）</button>
+            <span id="haken-pdf-status" class="status-text"></span>
+        </div>
+        <div id="haken-pdf-area" style="display:none; padding:6px 0 0">
+            <div id="haken-pdf-result" style="margin-bottom:4px"></div>
+            <div id="haken-pdf-warnings" class="hint" style="margin-bottom:4px"></div>
+            <div class="hint">出力中は Excel の操作を控えてください（裏で別インスタンスの Excel が動きます）。出力先は PDF フォルダの「社員番号_氏名」ごと。期またぎ契約は同名PDFに上書きされ自然に1本化されます。</div>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary" id="haken-attach-preview-btn">④ 添付内容を確認（dry-run・1分弱）</button>
+            <span id="haken-attach-status-text" class="status-text"></span>
+        </div>
+        <div id="haken-attach-area" style="display:none; padding:6px 0 0">
+            <div id="haken-attach-summary" style="margin-bottom:6px"></div>
+            <div id="haken-attach-skipped" class="hint" style="margin-bottom:6px"></div>
+            <div id="haken-attach-writegate" class="hint" style="margin-bottom:6px"></div>
+            <div class="fields">
+                <label class="field field-inline">
+                    <span class="field-label">確認</span>
+                    <input type="text" id="haken-attach-confirm" placeholder="「添付」と入力" style="width:140px">
+                    <span class="field-sub">jinjer に書き込むため、確認の一手間を挟みます</span>
+                </label>
+            </div>
+            <div class="actions" style="border-top:none; margin-top:2px; padding-top:0">
+                <button type="button" class="btn btn-danger" id="haken-attach-now-btn" disabled>▶ 今すぐ回す</button>
+                <button type="button" class="btn btn-danger" id="haken-attach-tonight-btn" disabled>🌙 今夜回す</button>
+            </div>
+            <div class="hint" style="margin-top:4px">「今夜回す」はこのPCで待機して実行します（<b>電源は入れたまま</b>・スリープは自動で抑止）。実行が始まればハブの黒い窓を閉じても止まりません。再実行は常に安全（添付済みはスキップ）。</div>
+        </div>
+        <div id="haken-attach-progress" style="display:none; margin-top:8px">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px">
+                <div id="haken-attach-progress-line" style="font-weight:bold"></div>
+                <button type="button" class="btn" id="haken-attach-cancel-btn" style="display:none">✋ キャンセル</button>
+            </div>
+            <pre id="haken-attach-log" style="max-height:220px; overflow:auto; background:#f7f9fa; padding:8px; font-size:12px; margin:0"></pre>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn" id="haken-verify-btn">④' 反映を確認（verify・実行15〜35分後/翌朝）</button>
+            <span id="haken-verify-status" class="status-text"></span>
+        </div>
+        <div id="haken-verify-area" style="display:none; padding:6px 0 0"></div>
         <div id="haken-error-area" class="alert alert-error" style="display:none; margin:8px 0 0"></div>
     </div>
 

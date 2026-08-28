@@ -283,6 +283,28 @@ class Config:
     # 他社のPDFを間違って投入しないためのガード（保険料一覧表の事業所コード）
     SHAHO_IMPORT_EXPECTED_OFFICE = os.environ.get("SHAHO_IMPORT_EXPECTED_OFFICE", "263")
 
+    # ------------------------------------------------------------------
+    # 派遣元管理台帳（jinjer添付は**書き込みあり**・デタッチ子プロセスで実行）
+    # ------------------------------------------------------------------
+    # データ一式は Z:\派遣元管理台帳（DAICHO_DATA_ROOT）にあり services/daicho/config.py が持つ。
+    # ここに置くのは「書く」操作のガードと実行方式の設定だけ。
+    # 添付を実行できる人（列: ユーザー名, 表示名, 備考。読めなければ誰も書けない）
+    HAKEN_ATTACH_ALLOWED_USERS_CSV = os.environ.get(
+        "HAKEN_ATTACH_ALLOWED_USERS_CSV",
+        r"Z:\API連携\docs\派遣台帳_書き込み許可ユーザー.csv")
+    # 同時実行ロック。jinjerのレート制限はテナント単位なので標報投入と同じ場所に置き、
+    # 添付側は標報投入ロックを見て待つ（逆方向はPhase 3で追加予定・2026-08-28決定）
+    HAKEN_ATTACH_LOCK_FILE = os.environ.get(
+        "HAKEN_ATTACH_LOCK_FILE", r"Z:\API連携\docs\派遣台帳添付_実行中.lock")
+    # 「今夜回す」の開始時刻（1期≈165枚×実測約60秒/枚≈3時間: 22:00開始→1時前後に完了）
+    HAKEN_ATTACH_TONIGHT_AT = os.environ.get("HAKEN_ATTACH_TONIGHT_AT", "22:00")
+    # 書き込み間隔（秒）。社内の書き込み系スクリプトと同じ25秒
+    HAKEN_ATTACH_WRITE_INTERVAL_SEC = float(
+        os.environ.get("HAKEN_ATTACH_WRITE_INTERVAL_SEC", "25"))
+    # デタッチ起動が環境（セキュリティソフト等）に阻まれたときの代替: "1" で標報投入型の
+    # スレッド実行に切替（その場合ハブの黒い窓を閉じると添付も止まる）
+    HAKEN_ATTACH_FALLBACK_THREAD = os.environ.get("HAKEN_ATTACH_FALLBACK_THREAD", "0")
+
     # 手順③ API直接投入（kintai-imports）
     # executor = jinjer標準の完了通知メール宛先。
     # ⚠️ 明示指定できるのは「勤怠管理者権限ロール」を持つ社員番号のみ。

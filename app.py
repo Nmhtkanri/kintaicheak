@@ -4668,6 +4668,268 @@ def route_haken_download():
     return send_from_directory(str(daicho_config.OUTPUT_DIR), names[kind], as_attachment=True)
 
 
+_haken_jobs = {}
+_haken_jobs_guard = threading.Lock()
+
+
+@app.route("/haken_export_pdf", methods=["POST"])
+def route_haken_export_pdf():
+    """③台帳ブック→人別フォルダへ契約ごとのPDF（Excel COM・1期約5分）。
+
+    進捗はメモリ上のジョブ辞書＋ポーリング（/api_import と同じ軽量型。約5分なので
+    プロセス再起動で消えても再実行すればよい）。build 実行中と jinjer 添付ジョブの
+    実行/予約中は 409（ブックの書き換え・PDFの読み取りと衝突するため）。
+    """
+    import uuid
+
+    from services.daicho import config as daicho_config
+
+    q, err = _haken_quarter_or_error(request.form.get("quarter"))
+    if err:
+        return err
+    if _haken_build_lock.locked():
+        return jsonify({"success": False,
+                        "errors": ["台帳の作成が実行中です。終わってからPDFを出力してください"]}), 409
+    try:
+        if daicho_config.ATTACH_PROGRESS_JSON.exists():
+            state = json.loads(
+                daicho_config.ATTACH_PROGRESS_JSON.read_text(encoding="utf-8")).get("state")
+            if state in ("running", "scheduled"):
+                return jsonify({"success": False,
+                                "errors": ["jinjer添付ジョブが実行中/予約中です。終わってからPDFを出力してください"]}), 409
+    except Exception:  # noqa: BLE001 — 進捗ファイルが読めないだけなら止めない
+        pass
+    with _haken_jobs_guard:
+        if any(not j["done"] for j in _haken_jobs.values()):
+            return jsonify({"success": False, "errors": ["PDF出力がすでに実行中です"]}), 409
+        job_id = uuid.uuid4().hex
+        job = {"done": False, "ok": False, "n": 0, "total": None, "current": "",
+               "warnings": [], "error": "", "quarter": q}
+        _haken_jobs[job_id] = job
+
+    def _worker():
+        from services.daicho.export_pdf import export_quarter
+
+        def _prog(done, total, name):
+            job["n"], job["total"], job["current"] = done, total, name
+
+        try:
+            n, warns = export_quarter(q, on_progress=_prog)
+            job.update(ok=True, n=n, warnings=warns)
+        except FileNotFoundError as e:
+            job["error"] = str(e)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("haken_export_pdf failed")
+            job["error"] = f"PDF出力に失敗しました: {e}"
+        finally:
+            job["done"] = True
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"success": True, "job_id": job_id, "eta_minutes": 5})
+
+
+@app.route("/haken_pdf_status/<job_id>")
+def route_haken_pdf_status(job_id):
+    """③の進捗ポーリング（4秒間隔で呼ばれる）。"""
+    job = _haken_jobs.get(job_id)
+    if job is None:
+        return jsonify({"success": False,
+                        "errors": ["ジョブが見つかりません（サーバが再起動した可能性。もう一度実行してください）"]}), 404
+    return jsonify({"success": True,
+                    **{k: job[k] for k in ("done", "ok", "n", "total", "current",
+                                           "warnings", "error", "quarter")}})
+
+
+def _haken_attach_can_write():
+    """(可否, 理由)。許可CSVはフェイルクローズ（sap_import_ledger.can_write を流用）。"""
+    from services.sap_import_ledger import can_write
+
+    return can_write(Config.HAKEN_ATTACH_ALLOWED_USERS_CSV, label="jinjer添付")
+
+
+def _haken_parse_employees(raw):
+    vals = [v for v in re.split(r"[\s,、]+", str(raw or "").strip()) if v]
+    return vals or None
+
+
+def _haken_attach_spawn(cmd_args):
+    """デタッチ子プロセスを起動して pid を返す（テストは monkeypatch で差し替える）。
+
+    DETACHED_PROCESS ＝ ハブの黒い窓（コンソール）を閉じても子は走り続ける。
+    exe では launcher.py の --daicho-attach 分岐、python では daicho_attach_run.py が入口。
+    """
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--daicho-attach"] + cmd_args
+    else:
+        cmd = [sys.executable, "-X", "utf8",
+               os.path.join(root, "daicho_attach_run.py")] + cmd_args
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    proc = subprocess.Popen(cmd, creationflags=flags, close_fds=True, cwd=root,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    return proc.pid
+
+
+@app.route("/haken_attach_preview", methods=["POST"])
+def route_haken_attach_preview():
+    """④の事前確認（dry-run）。PDFフォルダと jinjer 側レコードを GET で突き合わせるだけ。"""
+    from services.daicho.attach_job import own_lock_info, preview, read_progress, shaho_lock_message
+
+    employees = _haken_parse_employees(request.form.get("employees"))
+    limit = None
+    raw_limit = (request.form.get("limit") or "").strip()
+    if raw_limit:
+        if not raw_limit.isdigit() or int(raw_limit) < 1:
+            return jsonify({"success": False, "errors": ["件数制限は1以上の整数で指定してください"]}), 400
+        limit = int(raw_limit)
+    try:
+        result = preview(employees=employees, limit=limit)
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except Exception as e:  # noqa: BLE001
+        logger.exception("haken_attach_preview failed")
+        return jsonify({"success": False, "errors": [f"事前確認に失敗しました: {e}"]}), 500
+    writable, reason = _haken_attach_can_write()
+    return jsonify({"success": True, **result,
+                    "can_write": writable, "write_reason": reason,
+                    "state": read_progress().get("state", "none"),
+                    "lock": own_lock_info(), "shaho_lock": shaho_lock_message(),
+                    "tonight_at": Config.HAKEN_ATTACH_TONIGHT_AT})
+
+
+@app.route("/haken_attach_execute", methods=["POST"])
+def route_haken_attach_execute():
+    """④jinjer添付をデタッチ子プロセスで開始する（今すぐ／今夜。2026-08-28決定）。
+
+    jinjer への書き込みがあるので三重ガード:
+    許可CSV（フェイルクローズ）＋確認欄「添付」照合＋実行中・ロック中は409。
+    JSON: {"mode": "now"|"tonight", "confirm": "添付", "employees"?: str, "limit"?: int}
+    """
+    from services.daicho import attach_job
+
+    data = request.get_json(silent=True) or {}
+    writable, reason = _haken_attach_can_write()
+    if not writable:
+        return jsonify({"success": False, "errors": [reason]}), 403
+    if str(data.get("confirm") or "").strip() != "添付":
+        return jsonify({"success": False, "errors": ["確認欄に「添付」と入力してください"]}), 400
+    mode = str(data.get("mode") or "now")
+    if mode not in ("now", "tonight"):
+        return jsonify({"success": False, "errors": ["mode は now / tonight のいずれかです"]}), 400
+    employees = _haken_parse_employees(data.get("employees"))
+    limit = data.get("limit")
+    if limit is not None and limit != "":
+        try:
+            limit = int(limit)
+            if limit < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "errors": ["件数制限は1以上の整数で指定してください"]}), 400
+    else:
+        limit = None
+
+    state = attach_job.read_progress().get("state")
+    if state in ("spawning", "scheduled", "running"):
+        label = "予約中" if state == "scheduled" else "実行中"
+        return jsonify({"success": False,
+                        "errors": [f"添付ジョブがすでに{label}です（必要ならキャンセルしてから実行し直してください）"]}), 409
+    if attach_job.own_lock_info():
+        return jsonify({"success": False,
+                        "errors": ["別のPCで添付ジョブが実行中です（ロックあり）"]}), 409
+
+    start_at = Config.HAKEN_ATTACH_TONIGHT_AT if mode == "tonight" else None
+    args = ["--execute", "--interval", str(Config.HAKEN_ATTACH_WRITE_INTERVAL_SEC)]
+    for emp in employees or []:
+        args += ["--employee", emp]
+    if limit:
+        args += ["--limit", str(limit)]
+    if start_at:
+        args += ["--start-at", start_at]
+
+    from services.sap_import_ledger import current_user
+
+    # 二重クリック対策: 子プロセスが進捗を書くまでの隙間を "spawning" で塞ぐ
+    attach_job.write_progress({"state": "spawning", "user": current_user(),
+                               "start_at": start_at or "",
+                               "message": "添付ジョブを起動しています"})
+    try:
+        if (Config.HAKEN_ATTACH_FALLBACK_THREAD or "0") == "1":
+            threading.Thread(target=attach_job.run_attach_job, daemon=True,
+                             kwargs=dict(execute=True, employees=employees, limit=limit,
+                                         interval=Config.HAKEN_ATTACH_WRITE_INTERVAL_SEC,
+                                         start_at=start_at)).start()
+            pid, run_mode = None, "thread"
+        else:
+            pid = _haken_attach_spawn(args)
+            run_mode = "detached"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("haken_attach_execute spawn failed")
+        attach_job.write_progress({"state": "error", "message": f"起動に失敗しました: {e}"})
+        return jsonify({"success": False,
+                        "errors": [f"ジョブの起動に失敗しました: {e}"
+                                   "（.env に HAKEN_ATTACH_FALLBACK_THREAD=1 でスレッド実行に切替できます）"]}), 500
+    logger.info("haken attach started mode=%s pid=%s start_at=%s employees=%s limit=%s",
+                run_mode, pid, start_at, employees, limit)
+    return jsonify({"success": True, "started": True, "mode": run_mode, "pid": pid,
+                    "start_at": start_at or ""})
+
+
+@app.route("/haken_attach_status", methods=["GET"])
+def route_haken_attach_status():
+    """④の進捗（10秒ポーリング）。進捗JSON＋既存の添付ログのtail30行。"""
+    from services.daicho import attach_job
+    from services.daicho import config as daicho_config
+
+    progress = attach_job.read_progress()
+    log_tail = []
+    log_path = daicho_config.LOG_DIR / "jinjer添付ログ.txt"
+    try:
+        if log_path.exists():
+            with log_path.open("r", encoding="utf-8") as fp:
+                log_tail = [ln.rstrip("\n") for ln in fp.readlines()[-30:]]
+    except OSError:
+        pass
+    return jsonify({"success": True, "progress": progress, "log_tail": log_tail,
+                    "lock": attach_job.own_lock_info()})
+
+
+@app.route("/haken_attach_cancel", methods=["POST"])
+def route_haken_attach_cancel():
+    """④のキャンセル（予約中は即・実行中は次の1件で停止。再実行は常に安全）。"""
+    from services.daicho import attach_job
+
+    writable, reason = _haken_attach_can_write()
+    if not writable:
+        return jsonify({"success": False, "errors": [reason]}), 403
+    state = attach_job.read_progress().get("state")
+    if state not in ("spawning", "scheduled", "running"):
+        return jsonify({"success": False, "errors": ["実行中・予約中の添付ジョブがありません"]}), 409
+    attach_job.request_cancel()
+    return jsonify({"success": True,
+                    "message": "キャンセルを指示しました（予約中は即・実行中は次の1件で止まります）"})
+
+
+@app.route("/haken_verify", methods=["POST"])
+def route_haken_verify():
+    """④'反映確認（GETのみ・1〜2分）。添付は非同期＝実行15〜35分後や翌朝に。"""
+    from services.daicho.attach_job import verify_data
+
+    employees = _haken_parse_employees(request.form.get("employees"))
+    try:
+        result = verify_data(employees=employees)
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except Exception as e:  # noqa: BLE001
+        logger.exception("haken_verify failed")
+        return jsonify({"success": False, "errors": [f"反映確認に失敗しました: {e}"]}), 500
+    return jsonify({"success": True, **result})
+
+
 def _sse_event(event_type, data):
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 

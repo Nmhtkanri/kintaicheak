@@ -36,6 +36,13 @@ def _open_browser():
 
 
 if __name__ == "__main__":
+    if "--daicho-attach" in sys.argv:
+        # 派遣台帳のjinjer添付ジョブ（デタッチ子プロセス用のCLIモード）。
+        # ハブの画面から起動され、この分岐では Flask を立てない。
+        from services.daicho.attach_job import main_cli
+
+        sys.exit(main_cli(sys.argv))
+
     from app import app, cleanup_uploads_on_start
 
     # 前回までの実行で uploads に残った入力ファイルの写しを掃除する。
