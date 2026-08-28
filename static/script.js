@@ -4339,3 +4339,147 @@ if (hakenFreshnessBtn) {
 
 const hakenQuarterInput = document.getElementById('haken-quarter');
 if (hakenQuarterInput) hakenQuarterInput.addEventListener('change', () => hakenLoadStatus());
+
+// --- ② 台帳の作成と警告トリアージ ---
+let hakenWarnRows = [];
+let hakenWarnFilter = 'all';
+
+function hakenWarnCategory(r) {
+    const body = r['内容'] || '';
+    if ((r['区分'] || '') === '全体') return '全体';
+    if (body.indexOf('FG:') === 0) return 'FG';
+    if (body.indexOf('直接契約:') === 0) return '直接契約';
+    return 'e-staffing';
+}
+
+function hakenTriageBadge(t) {
+    if (t === 'new') return '<span style="color:#c0392b; font-weight:bold">● 新規</span>';
+    return '<span style="color:#6b7783">継続</span>';
+}
+
+function hakenPaintWarnFilter() {
+    const bar = document.getElementById('haken-warn-filter');
+    if (!bar) return;
+    const counts = { all: hakenWarnRows.length, new: 0, continued: 0 };
+    const cats = [];
+    hakenWarnRows.forEach(r => {
+        counts[r.triage === 'new' ? 'new' : 'continued'] += 1;
+        const c = hakenWarnCategory(r);
+        counts[c] = (counts[c] || 0) + 1;
+        if (cats.indexOf(c) < 0) cats.push(c);
+    });
+    const defs = [['all', 'すべて'], ['new', '● 新規'], ['continued', '継続']]
+        .concat(cats.map(c => [c, c]));
+    bar.innerHTML = defs.map(([key, label]) =>
+        `<button type="button" class="btn haken-warn-chip${hakenWarnFilter === key ? ' active' : ''}" data-key="${hakenEsc(key)}">`
+        + `${hakenEsc(label)} <span style="opacity:.7">${counts[key] || 0}</span></button>`).join('');
+    bar.querySelectorAll('.haken-warn-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+            hakenWarnFilter = btn.dataset.key;
+            hakenPaintWarnFilter();
+            hakenPaintWarnTable();
+        });
+    });
+}
+
+function hakenWarnMatches(r) {
+    if (hakenWarnFilter === 'all') return true;
+    if (hakenWarnFilter === 'new') return r.triage === 'new';
+    if (hakenWarnFilter === 'continued') return r.triage !== 'new';
+    return hakenWarnCategory(r) === hakenWarnFilter;
+}
+
+function hakenPaintWarnTable() {
+    const table = document.getElementById('haken-warn-table');
+    if (!table) return;
+    let html = '<tr><th>前回比</th><th>区分</th><th>契約No</th><th>氏名</th><th>内容</th></tr>';
+    hakenWarnRows.filter(hakenWarnMatches).forEach(r => {
+        html += `<tr${r.triage === 'new' ? ' style="background:#fffafa"' : ''}>`
+            + `<td>${hakenTriageBadge(r.triage)}</td>`
+            + `<td>${hakenEsc(hakenWarnCategory(r))}</td>`
+            + `<td>${hakenEsc(r['契約No'])}</td><td>${hakenEsc(r['氏名'])}</td>`
+            + `<td>${hakenEsc(r['内容'])}</td></tr>`;
+    });
+    table.innerHTML = html;
+}
+
+function hakenRenderBuild(data) {
+    const area = document.getElementById('haken-build-area');
+    const summary = document.getElementById('haken-build-summary');
+    const files = document.getElementById('haken-build-files');
+    const resolved = document.getElementById('haken-warn-resolved');
+    const head = document.getElementById('haken-warn-head');
+    if (!area) return;
+    const c = data.counts || {};
+    if (summary) {
+        summary.textContent = `${data.quarter}（${data.label}）: 台帳 ${c.total}枚`
+            + `（e-staffing ${c.estaffing} / Fieldglass ${c.fieldglass} / 直接 ${c.direct}）・${c.people}人・警告 ${data.n_warn}件`;
+    }
+    if (files) {
+        const q = encodeURIComponent(data.quarter);
+        const link = (kind, label) =>
+            `<a class="btn" href="/haken_download?quarter=${q}&kind=${kind}">⬇ ${label}</a>`;
+        files.innerHTML = link('xlsx', '台帳ブック (.xlsx)') + ' ' + link('csv', '一覧CSV') + ' '
+            + link('warnings', '警告CSV')
+            + `<div class="hint" style="margin-top:4px">保存先: ${hakenEsc((data.paths || {}).xlsx || '')}</div>`;
+    }
+    if (resolved) {
+        const rows = data.resolved || [];
+        if (data.had_prev && rows.length) {
+            resolved.innerHTML = `<b>✓ 前回から解消した警告 ${rows.length}件</b>`
+                + `<div class="hint" style="margin-top:2px">`
+                + rows.slice(0, 30).map(r => hakenEsc(`${r['氏名'] || ''} ${r['内容'] || ''}`)).join('<br>')
+                + (rows.length > 30 ? `<br>…ほか ${rows.length - 30} 件` : '') + '</div>';
+            resolved.style.display = '';
+        } else {
+            resolved.style.display = 'none';
+        }
+    }
+    hakenWarnRows = data.warnings || [];
+    hakenWarnFilter = 'all';
+    if (head) {
+        const nNew = hakenWarnRows.filter(r => r.triage === 'new').length;
+        head.textContent = data.had_prev
+            ? `警告一覧（新規 ${nNew} / 継続 ${hakenWarnRows.length - nNew}。直すときは元データを修正して再build）`
+            : '警告一覧（初回buildのため全件「新規」。直すときは元データを修正して再build）';
+    }
+    hakenPaintWarnFilter();
+    hakenPaintWarnTable();
+    area.style.display = '';
+}
+
+const hakenBuildBtn = document.getElementById('haken-build-btn');
+if (hakenBuildBtn) {
+    hakenBuildBtn.addEventListener('click', async () => {
+        const q = hakenQuarter();
+        const status = document.getElementById('haken-build-status');
+        const apiCheck = document.getElementById('haken-build-jinjer-api');
+        const noFgCheck = document.getElementById('haken-build-no-fg');
+        hakenShowError('');
+        hakenBuildBtn.disabled = true;
+        if (status) {
+            status.textContent = (apiCheck && apiCheck.checked)
+                ? '台帳を作成しています（人マスタ取得を含めて1〜2分）…'
+                : '台帳を作成しています（30秒ほど）…';
+        }
+        try {
+            const fd = new FormData();
+            fd.append('quarter', q);
+            if (apiCheck && apiCheck.checked) fd.append('jinjer_api', '1');
+            if (noFgCheck && noFgCheck.checked) fd.append('no_fg', '1');
+            const res = await fetch('/haken_build', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) {
+                hakenShowError((data.errors || ['台帳の作成に失敗しました']).join(' / '));
+                return;
+            }
+            hakenRenderBuild(data);
+            hakenLoadStatus();
+        } catch (e) {
+            hakenShowError(`台帳の作成に失敗しました: ${e}`);
+        } finally {
+            hakenBuildBtn.disabled = false;
+            if (status) status.textContent = '';
+        }
+    });
+}

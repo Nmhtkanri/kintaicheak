@@ -4575,6 +4575,99 @@ def route_haken_quarter_status():
     return jsonify({"success": True, **result})
 
 
+_haken_build_lock = threading.Lock()
+
+
+def _haken_read_warnings(q):
+    """出力フォルダの警告CSVを読む。[{区分,契約No,氏名,内容}]。無ければ []。"""
+    import csv as _csv
+
+    from services.daicho import config as daicho_config
+
+    path = daicho_config.OUTPUT_DIR / f"派遣元管理台帳_{q}_警告.csv"
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as fp:
+            return [dict(r) for r in _csv.DictReader(fp)]
+    except OSError:
+        return []
+
+
+@app.route("/haken_build", methods=["POST"])
+def route_haken_build():
+    """②台帳の作成。出力3ファイルを上書き生成し、警告に前回比を付けて返す。
+
+    警告の解消手段は原則「元データを直す→再build」。前回比（新規/継続/解消）は
+    build 前の警告CSVを読んでおき、(区分,契約No,氏名,内容) の完全一致で突き合わせる
+    （交通費精査の「前回比」と同じ型。確認済みの保存はしない＝2026-08-28決定）。
+    """
+    from services.daicho.build import build_quarter
+    from services.jinjer_api_client import JinjerAPIError
+
+    q, err = _haken_quarter_or_error(request.form.get("quarter"))
+    if err:
+        return err
+    use_api = (request.form.get("jinjer_api") or "") == "1"
+    no_fg = (request.form.get("no_fg") or "") == "1"
+
+    if not _haken_build_lock.acquire(blocking=False):
+        return jsonify({"success": False,
+                        "errors": ["台帳の作成がすでに実行中です。終わってからやり直してください"]}), 409
+    try:
+        prev = {(w.get("区分", ""), w.get("契約No", ""), w.get("氏名", ""), w.get("内容", ""))
+                for w in _haken_read_warnings(q)}
+        try:
+            result = build_quarter(q, jinjer_api=use_api, no_fg=no_fg)
+        except JinjerAPIError as e:
+            return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+        except FileNotFoundError as e:
+            return jsonify({"success": False, "errors": [str(e)]}), 400
+        except PermissionError as e:
+            return jsonify({"success": False,
+                            "errors": [f"出力に書き込めません（台帳ブックを Excel で開いていませんか）: {e}"]}), 400
+        except Exception as e:  # noqa: BLE001
+            logger.exception("haken_build failed")
+            return jsonify({"success": False, "errors": [f"台帳の作成に失敗しました: {e}"]}), 500
+    finally:
+        _haken_build_lock.release()
+
+    new_rows = _haken_read_warnings(q)
+    warnings = []
+    new_keys = set()
+    for w in new_rows:
+        key = (w.get("区分", ""), w.get("契約No", ""), w.get("氏名", ""), w.get("内容", ""))
+        new_keys.add(key)
+        warnings.append({**w, "triage": ("continued" if key in prev else "new")})
+    resolved = [{"区分": k[0], "契約No": k[1], "氏名": k[2], "内容": k[3]}
+                for k in sorted(prev - new_keys)]
+    return jsonify({"success": True, "quarter": result["quarter"], "label": result["label"],
+                    "counts": result["counts"], "match": result["match"],
+                    "n_warn": result["n_warn"], "paths": result["paths"],
+                    "inputs": result["inputs"], "notes": result["notes"],
+                    "summary": result["summary"],
+                    "warnings": warnings, "resolved": resolved, "had_prev": bool(prev)})
+
+
+@app.route("/haken_download", methods=["GET"])
+def route_haken_download():
+    """②の成果物ダウンロード（出力フォルダの3ファイル限定。パスはサーバ側で組み立てる）。"""
+    from services.daicho import config as daicho_config
+
+    q, err = _haken_quarter_or_error(request.args.get("quarter"))
+    if err:
+        return err
+    kind = (request.args.get("kind") or "").strip()
+    names = {"xlsx": f"派遣元管理台帳_{q}.xlsx",
+             "csv": f"派遣元管理台帳_{q}_一覧.csv",
+             "warnings": f"派遣元管理台帳_{q}_警告.csv"}
+    if kind not in names:
+        return jsonify({"success": False, "errors": ["kind は xlsx / csv / warnings のいずれかです"]}), 400
+    if not (daicho_config.OUTPUT_DIR / names[kind]).exists():
+        return jsonify({"success": False, "errors": [f"まだ作成されていません: {names[kind]}"]}), 404
+    return send_from_directory(str(daicho_config.OUTPUT_DIR), names[kind], as_attachment=True)
+
+
 def _sse_event(event_type, data):
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 

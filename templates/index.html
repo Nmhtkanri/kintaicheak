@@ -520,6 +520,31 @@
             <div id="haken-freshness-overall" style="font-weight:bold; margin-bottom:6px"></div>
             <div class="table-wrap"><table class="keiri-md-table" id="haken-freshness-table"></table></div>
         </div>
+
+        <div class="fields" style="margin-top:14px">
+            <div class="field">
+                <span class="field-label">②のオプション</span>
+                <div class="check-row">
+                    <label><input type="checkbox" id="haken-build-jinjer-api"> jinjer人マスタをAPIから取り直す（退職者込み・1分弱）</label>
+                    <label><input type="checkbox" id="haken-build-no-fg"> Fieldglass 分を含めない</label>
+                </div>
+            </div>
+        </div>
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="haken-build-btn">② 台帳を作成（約30秒）</button>
+            <span id="haken-build-status" class="status-text"></span>
+        </div>
+        <div id="haken-build-area" style="display:none; padding:10px 0 0">
+            <div id="haken-build-summary" style="font-weight:bold; margin-bottom:6px"></div>
+            <div id="haken-build-files" style="margin-bottom:8px"></div>
+            <div id="haken-warn-resolved" style="display:none; margin-bottom:8px; padding:8px 10px;
+                 border:1px solid #bcd8bc; border-radius:4px; background:#f4faf4"></div>
+            <div id="haken-warn-head" style="font-weight:bold; margin-bottom:4px"></div>
+            <div id="haken-warn-filter" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px"></div>
+            <div class="table-wrap" style="max-height:520px; overflow:auto">
+                <table class="keiri-md-table" id="haken-warn-table"></table>
+            </div>
+        </div>
         <div id="haken-error-area" class="alert alert-error" style="display:none; margin:8px 0 0"></div>
     </div>
 
