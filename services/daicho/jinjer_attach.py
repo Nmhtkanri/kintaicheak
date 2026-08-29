@@ -126,6 +126,26 @@ def post_date_record(client, emp: str, date: str):
     return client._request("POST", "/v1/employees/addible-custom-items", json_body=body)
 
 
+def post_date_record_with_shift(client, emp: str, date: str) -> str:
+    """日付レコードを作り、実際に使った日付(ISO)を返す。
+
+    jinjer は同一日付のレコードを2つ作れない（2026-08-28 実測: 同月開始の契約が2本ある
+    戸松さんで "Requested date already registered"）。衝突したら翌日以降へ最大27日ずらす。"""
+    base = dt.date.fromisoformat(_norm_date(date))
+    for shift in range(0, 28):
+        d = (base + dt.timedelta(days=shift)).isoformat()
+        try:
+            _write_with_retry(client, lambda: post_date_record(client, emp, d),
+                              f"{emp} 日付レコード作成({d})")
+            if shift:
+                _say(f"    … 添付日付が衝突 → {d} にずらして作成（{emp}）")
+            return d
+        except Exception as exc:
+            if "already registered" not in str(exc):
+                raise
+    raise RuntimeError(f"{emp}: 日付レコードを28日ずらしても作成できない")
+
+
 def attach_file(client, emp: str, record_id: str, pdf: Path):
     body = {
         "type": {"id": FILE_KIND_CUSTOM},
@@ -208,7 +228,7 @@ def run(employees: list[str] | None = None, dry_run: bool = True,
     from collections import defaultdict
     groups: dict[tuple[str, str], list] = defaultdict(list)
     for emp, folder, pdf, date in jobs:
-        groups[(emp, _norm_date(date))].append((emp, folder, pdf, date))
+        groups[(emp, _norm_date(date)[:7])].append((emp, folder, pdf, date))  # 月単位（日付ずらし対応）
 
     done = skip = 0
     stopped = False
@@ -224,7 +244,7 @@ def run(employees: list[str] | None = None, dry_run: bool = True,
         if stopped:
             break
         rows = records.get(emp, [])
-        same_date = [r for r in rows if r["date"] == date_n]
+        same_date = [r for r in rows if r["date"][:7] == date_n]
         attached_n = sum(1 for r in same_date if r["attached"])
         empty = [r for r in same_date if not r["attached"]]
         # 添付済みレコードの数だけ「済み」として消し込む（ファイル名はAPIから見えないため数で対応）
@@ -244,11 +264,10 @@ def run(employees: list[str] | None = None, dry_run: bool = True,
                 if empty:
                     rec_id = empty.pop(0)["id"]
                 else:
-                    _write_with_retry(client, lambda: post_date_record(client, emp_, date),
-                                      f"{emp_} 日付レコード作成")
+                    used_n = _norm_date(post_date_record_with_shift(client, emp_, date))
                     fresh = fetch_records(client, [emp_]).get(emp_, [])
                     known = {r["id"] for r in rows}
-                    cands = [r for r in fresh if r["date"] == date_n and not r["attached"] and r["id"] not in known]
+                    cands = [r for r in fresh if r["date"] == used_n and not r["attached"] and r["id"] not in known]
                     if not cands:
                         _log(f"NG {emp_} {pdf.name} 作成したレコードが見つからない")
                         _say(f"  ✗ {emp_} {pdf.name}: 作成したレコードをGETで特定できず → スキップ")
@@ -283,11 +302,11 @@ def verify(employees: list[str] | None = None) -> None:
     from collections import defaultdict
     groups: dict[tuple[str, str], list] = defaultdict(list)
     for emp, folder, pdf, date in jobs:
-        groups[(emp, _norm_date(date))].append((emp, pdf, date))
+        groups[(emp, _norm_date(date)[:7])].append((emp, pdf, date))  # 月単位（日付ずらし対応）
     ok = missing = 0
     for (emp, date_n), job_list in groups.items():
         attached_n = sum(1 for r in records.get(emp, [])
-                         if r["date"] == date_n and r["attached"])
+                         if r["date"][:7] == date_n and r["attached"])
         ok += min(attached_n, len(job_list))
         for emp_, pdf, date in job_list[min(attached_n, len(job_list)):]:
             missing += 1
