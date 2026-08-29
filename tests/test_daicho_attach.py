@@ -269,6 +269,33 @@ def test_run_stops_on_should_stop(attach_env):
     assert attach_env == []
 
 
+def test_preview_and_verify_count_shifted_dates_by_month(monkeypatch, tmp_path):
+    """日付衝突で翌日以降へずらしたレコード（b29db47c）も、社員×月で添付済みと数える。
+
+    旧・日付一致の数え方だと、ずらしたレコード(4/2)が未添付扱いになり
+    preview が to_attach=1・verify が未反映1 と誤報していた。
+    """
+    folder = tmp_path / "1001_山田太郎"
+    folder.mkdir(parents=True)
+    pdf1 = folder / "1001_山田太郎_2026年4-6月分.pdf"
+    pdf1.write_bytes(b"%PDF a")
+    pdf2 = folder / "1001_山田太郎_2026年4月分.pdf"      # 同月開始の契約2本目（戸松さん型）
+    pdf2.write_bytes(b"%PDF b")
+    jobs = [("1001", folder.name, pdf1, "2026/4/1"),
+            ("1001", folder.name, pdf2, "2026/4/1")]
+    monkeypatch.setattr(jinjer_attach, "scan_pdfs",
+                        lambda pdf_root=None, employees=None: (list(jobs), []))
+    monkeypatch.setattr(jinjer_attach, "_client", lambda interval: object())
+    records = {"1001": [{"id": "r1", "date": "2026-04-01", "attached": True},
+                        {"id": "r2", "date": "2026-04-02", "attached": True}]}
+    monkeypatch.setattr(jinjer_attach, "fetch_records", lambda c, ids: records)
+
+    p = attach_job.preview()
+    assert (p["already"], p["to_attach"]) == (2, 0)
+    v = attach_job.verify_data()
+    assert (v["ok"], len(v["missing"])) == (2, 0)
+
+
 # ---------------------------------------------------------------------------
 # attach_job（進捗ファイル・開始時刻・キャンセル）
 # ---------------------------------------------------------------------------

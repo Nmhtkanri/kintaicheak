@@ -168,7 +168,11 @@ def shaho_lock_message() -> str | None:
 # ---------------------------------------------------------------------------
 
 def preview(employees: list[str] | None = None, limit: int | None = None) -> dict:
-    """scan_pdfs＋jinjer側レコードで「何件添付することになるか」を数える（GETのみ）。"""
+    """scan_pdfs＋jinjer側レコードで「何件添付することになるか」を数える（GETのみ）。
+
+    消し込みは run()/verify() と同じ**社員×月**単位（b29db47c で日付衝突を翌日以降へ
+    ずらす対応が入ったため。日付一致で数えると、ずらしたレコードを未添付と誤カウントする）。
+    """
     from collections import defaultdict
 
     from . import jinjer_attach as ja
@@ -184,9 +188,9 @@ def preview(employees: list[str] | None = None, limit: int | None = None) -> dic
         records = ja.fetch_records(client, emp_ids)
         groups: dict[tuple[str, str], list] = defaultdict(list)
         for emp, folder, pdf, date in jobs:
-            groups[(emp, ja._norm_date(date))].append((emp, folder, pdf, date))
-        for (emp, date_n), job_list in groups.items():
-            rows = [r for r in records.get(emp, []) if r["date"] == date_n]
+            groups[(emp, ja._norm_date(date)[:7])].append((emp, folder, pdf, date))
+        for (emp, month), job_list in groups.items():
+            rows = [r for r in records.get(emp, []) if r["date"][:7] == month]
             attached_n = sum(1 for r in rows if r["attached"])
             has_empty = any(not r["attached"] for r in rows)
             already += min(attached_n, len(job_list))
@@ -201,7 +205,10 @@ def preview(employees: list[str] | None = None, limit: int | None = None) -> dic
 
 
 def verify_data(employees: list[str] | None = None) -> dict:
-    """PDFフォルダと jinjer 側レコードを突き合わせ、未反映一覧を返す（GETのみ）。"""
+    """PDFフォルダと jinjer 側レコードを突き合わせ、未反映一覧を返す（GETのみ）。
+
+    突合は run()/verify() と同じ**社員×月**単位（日付ずらし対応。preview と同様）。
+    """
     from collections import defaultdict
 
     from . import jinjer_attach as ja
@@ -215,10 +222,10 @@ def verify_data(employees: list[str] | None = None) -> dict:
         records = ja.fetch_records(client, emp_ids)
         groups: dict[tuple[str, str], list] = defaultdict(list)
         for emp, folder, pdf, date in jobs:
-            groups[(emp, ja._norm_date(date))].append((emp, pdf, date))
-        for (emp, date_n), job_list in groups.items():
+            groups[(emp, ja._norm_date(date)[:7])].append((emp, pdf, date))
+        for (emp, month), job_list in groups.items():
             attached_n = sum(1 for r in records.get(emp, [])
-                             if r["date"] == date_n and r["attached"])
+                             if r["date"][:7] == month and r["attached"])
             ok += min(attached_n, len(job_list))
             for emp_, pdf, date in job_list[min(attached_n, len(job_list)):]:
                 missing.append({"emp": emp_, "pdf": pdf.name, "date": date})
