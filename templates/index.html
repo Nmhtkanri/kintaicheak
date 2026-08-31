@@ -6,9 +6,9 @@
     <!-- モード切替タブ（画面上部に固定。スクロール中もここでいつでも切り替えられる） -->
     <div class="mode-tabs">
         <span class="mode-tabs-caption">モード</span>
-        <label class="mode-tab" title="一覧表から Outlook 下書きを一括作成する（送信はしません）">
+        <label class="mode-tab" title="一覧表や有休ブックから Outlook 下書きを作り、作った下書きをまとめて送る">
             <input type="radio" name="mode" value="mail" checked>
-            <span class="mode-tab-face">メール下書き</span>
+            <span class="mode-tab-face">メール</span>
         </label>
         <label class="mode-tab" title="請求勤怠と jinjer の差異を洗い出す">
             <input type="radio" name="mode" value="match">
@@ -1096,18 +1096,38 @@
             <span class="card-icon icon-mail">✉️</span>
             <div>
                 <div class="card-title">
-                    一覧表から Outlook 下書きを一括作成する
-                    <span class="tag tag-safe">下書きのみ・送信しません</span>
+                    Outlook の下書きを一括作成し、確認してからまとめて送る
+                    <span class="tag tag-warn">送信します（確認文字の入力が必要）</span>
                 </div>
-                <p class="card-lead">社員番号入りの一覧表とテンプレートを突き合わせ、1人1通の下書きを作ります。</p>
+                <p class="card-lead">社員番号入りの一覧表とテンプレートを突き合わせ、1人1通の下書きを作ります。作った下書きは、Outlook で内容を直してからこの画面でまとめて送れます。</p>
             </div>
         </div>
 
         <div class="fields">
+            <div class="field">
+                <span class="field-label">用途</span>
+                <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center">
+                    <label style="display:flex; gap:6px; align-items:center; font-weight:normal">
+                        <input type="radio" name="mail-source" value="table" checked>
+                        一覧表から作る（汎用）
+                    </label>
+                    <label style="display:flex; gap:6px; align-items:center; font-weight:normal">
+                        <input type="radio" name="mail-source" value="paid_leave">
+                        有給未取得者へメール
+                    </label>
+                </div>
+                <span class="field-sub" id="mail-source-hint">社員番号入りの一覧表を、そのまま読み込みます。</span>
+            </div>
             <label class="field">
-                <span class="field-label">対象者の一覧表（Excel/CSV） <span class="tag tag-req">必須</span></span>
+                <span class="field-label" id="mail-table-label">対象者の一覧表（Excel/CSV） <span class="tag tag-req">必須</span></span>
                 <input type="text" id="mail-table-path" placeholder="例: Z:\API連携\outputs\jinjer_paid_leave\有休取得4日以下_20260401-20260727.xlsx">
-                <span class="field-sub">「社員番号」列が必要です。他の列は本文への差し込みに使えます。</span>
+                <span class="field-sub" id="mail-table-sub">「社員番号」列が必要です。他の列は本文への差し込みに使えます。</span>
+            </label>
+
+            <label class="field" id="mail-deadline-field" style="display:none">
+                <span class="field-label">取得期限 <span class="tag tag-opt">任意</span></span>
+                <input type="text" id="mail-deadline" placeholder="2027-03-31" style="width:170px">
+                <span class="field-sub">空欄なら、有休ブックの集計基準日の翌年3月31日。本文の <code>{{取得期限}}</code> に入ります。</span>
             </label>
 
             <div class="field">
@@ -1222,6 +1242,42 @@
             </div>
             <div id="mail-drafts-result" style="display:none; margin-top:8px; font-size:13px"></div>
         </div>
+        <div id="mail-send-card" style="margin:14px; padding:12px 14px; border:1px solid #d7dee5; border-radius:6px; background:#fffaf5">
+            <div class="sub-head">作った下書きを、まとめて送る</div>
+            <p class="card-lead" style="margin:0">
+                ここで送るのは<b>この画面で作った下書きそのもの</b>です。Outlook で本文や宛先を直してあれば、直した内容がそのまま送られます。
+            </p>
+            <details class="more">
+                <summary>送る前に知っておくこと</summary>
+                <div class="more-body">
+                    <ul style="margin:6px 0 0; padding-left:20px">
+                        <li>送れるのは<b>自分が作った下書きだけ</b>です（他の人が作った分は一覧に出ません）。</li>
+                        <li>送信には、画面に出た件数どおりの<b>確認文字</b>（例 <code>SEND 93</code>）の入力が必要です。</li>
+                        <li>Outlook で消した・別のフォルダへ移した下書きは、送らずにスキップします。</li>
+                        <li>1件送るごとに記録するので、途中で失敗しても同じ人へ二重に送りません。</li>
+                    </ul>
+                </div>
+            </details>
+            <div class="actions" style="margin-top:11px; flex-wrap:wrap">
+                <select id="mail-send-batch" style="padding:6px 10px; min-width:340px"></select>
+                <button type="button" class="btn btn-secondary" id="mail-send-refresh-btn">🔄 一覧を更新</button>
+                <button type="button" class="btn btn-secondary" id="mail-send-preview-btn">👀 送る内容を確認（まだ送りません）</button>
+                <span id="mail-send-status" class="status-text"></span>
+            </div>
+            <div id="mail-send-result" style="display:none; margin-top:10px">
+                <div id="mail-send-summary" style="margin-bottom:8px"></div>
+                <div id="mail-send-items" style="max-height:320px; overflow:auto"></div>
+                <div style="margin-top:11px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+                    <span>確認文字を入力してください：</span>
+                    <code id="mail-send-required"></code>
+                    <input type="text" id="mail-send-confirm" placeholder="SEND 93" style="width:150px">
+                    <button type="button" class="btn btn-danger" id="mail-send-execute-btn" disabled>📤 この内容で送信する</button>
+                    <span id="mail-send-exec-status" class="status-text"></span>
+                </div>
+                <div id="mail-send-done" style="display:none; margin-top:8px; font-size:13px"></div>
+            </div>
+        </div>
+
         <div id="mail-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
     {% endraw %}

@@ -37,6 +37,7 @@ python -m PyInstaller ^
   --hidden-import services.invoice_mode ^
   --hidden-import services.mail_draft ^
   --hidden-import services.mail_ledger_sync ^
+  --hidden-import services.paid_leave_mail ^
   --hidden-import services.higashi_shift_parser ^
   --hidden-import services.kdx_shift_parser ^
   --hidden-import services.ual_shift_parser ^

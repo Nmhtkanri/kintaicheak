@@ -112,7 +112,7 @@ const MODE_HINTS = {
     sharoushi:  '社労士へ渡す給与CSVを作る／保険料一覧表PDFの標準報酬をjinjerへ投入する',
     shaho:      '標準報酬月額の検算と保険料突合（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
-    mail:       '下書きのみ作成・送信はしません',
+    mail:       '下書きを作り、確認してからまとめて送る',
     health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
     haken:      '四半期の派遣元管理台帳を作成し jinjer へ添付する',
 };
@@ -2105,8 +2105,61 @@ function mailFormData() {
     fd.append('cc', document.getElementById('mail-cc').value);
     fd.append('bcc_mode', document.getElementById('mail-bcc-mode').value);
     fd.append('importance', document.getElementById('mail-importance').value);
+    fd.append('template_name', (document.getElementById('mail-template-name').value || '').trim());
+    // 一覧表の読み手の切り替え。有給未取得者のときだけ取得期限も送る。
+    fd.append('source', mailSource());
+    if (mailSource() === 'paid_leave') {
+        fd.append('deadline', (document.getElementById('mail-deadline').value || '').trim());
+    }
     return fd;
 }
+
+// --- 用途の切り替え（汎用の一覧表 / 有給未取得者） ---
+
+function mailSource() {
+    const checked = document.querySelector('input[name="mail-source"]:checked');
+    return checked ? checked.value : 'table';
+}
+
+function mailApplySourceUI() {
+    const isPaidLeave = mailSource() === 'paid_leave';
+    const label = document.getElementById('mail-table-label');
+    const sub = document.getElementById('mail-table-sub');
+    const hint = document.getElementById('mail-source-hint');
+    const pathInput = document.getElementById('mail-table-path');
+    const deadlineField = document.getElementById('mail-deadline-field');
+    if (deadlineField) deadlineField.style.display = isPaidLeave ? '' : 'none';
+    if (label) {
+        label.innerHTML = isPaidLeave
+            ? '有休ブック（対象外をグレー塗りしたもの） <span class="tag tag-req">必須</span>'
+            : '対象者の一覧表（Excel/CSV） <span class="tag tag-req">必須</span>';
+    }
+    if (sub) {
+        sub.textContent = isPaidLeave
+            ? '抽出exeが作ったブックです。行全体がグレーの人は自動で対象外にします。取得日数・不足日数・取得期限はこのブックから計算します。'
+            : '「社員番号」列が必要です。他の列は本文への差し込みに使えます。';
+    }
+    if (hint) {
+        hint.textContent = isPaidLeave
+            ? '有休ブックの3シートを読み、社員番号／氏名／取得日数／不足日数／取得期限を組み立てます。テンプレートは「有休取得のお願い」を選んでください。'
+            : '社員番号入りの一覧表を、そのまま読み込みます。';
+    }
+    if (pathInput && isPaidLeave && !pathInput.value) {
+        pathInput.placeholder = '例: Z:\\API連携\\outputs\\jinjer_paid_leave\\有休取得4日以下_20260401-20260831谷津編集.xlsx';
+    }
+    if (isPaidLeave) {
+        const select = document.getElementById('mail-template-select');
+        if (select && !select.value && mailTemplates.some(t => t.name === '有休取得のお願い')) {
+            select.value = '有休取得のお願い';
+            select.dispatchEvent(new Event('change'));
+        }
+    }
+}
+
+document.querySelectorAll('input[name="mail-source"]').forEach(radio => {
+    radio.addEventListener('change', mailApplySourceUI);
+});
+if (document.getElementById('mail-card')) mailApplySourceUI();
 
 function mailSelectedIds() {
     return Array.from(document.querySelectorAll('.mail-plan-check:checked')).map(cb => cb.dataset.id);
@@ -2209,10 +2262,13 @@ if (mailDraftsBtn) {
                 html += '<br><span style="color:#c00">' + failed.map(r =>
                     mailEsc(r.employee_id + ' ' + r.name + ': ' + r.result)).join('<br>') + '</span>';
             }
-            html += '<br><b>Outlook の「下書き」フォルダを開いて、内容を確認してから送信してください。</b>';
+            html += '<br><b>Outlook の「下書き」フォルダで内容を確認してください。</b>';
+            html += '<br>確認できたら、この下の<b>「作った下書きを、まとめて送る」</b>から送信できます。';
             const el = document.getElementById('mail-drafts-result');
             el.innerHTML = html;
             el.style.display = 'block';
+            // 作ったばかりのまとまりを、送信セクションで選んだ状態にしておく
+            mailLoadSendBatches(data.batch_id);
             status.textContent = '完了';
         } catch (e) {
             mailShowError('通信に失敗しました: ' + e);
@@ -2220,6 +2276,181 @@ if (mailDraftsBtn) {
         } finally {
             mailDraftsBtn.disabled = false;
             mailUpdateDraftsButton();
+        }
+    });
+}
+
+// --- 作った下書きの一斉送信（バッチ選択 → 内容確認 → 確認文字 → 送信） ---
+// 送るのは create_drafts が作った下書きそのもの。宛先・本文はサーバ側の控えだけを見る。
+
+function mailSendStatus(text) {
+    const el = document.getElementById('mail-send-status');
+    if (el) el.textContent = text || '';
+}
+
+async function mailLoadSendBatches(selectId) {
+    const select = document.getElementById('mail-send-batch');
+    if (!select) return;
+    try {
+        const res = await fetch('/mail_send_batches', { method: 'POST', body: new FormData() });
+        const data = await res.json();
+        if (!data.success) { mailShowError(data.errors || ['送信バッチの取得に失敗しました']); return; }
+        const batches = data.batches || [];
+        if (!batches.length) {
+            select.innerHTML = '<option value="">（自分が作った下書きはまだありません）</option>';
+            return;
+        }
+        select.innerHTML = batches.map(b => {
+            const label = b.created_at + '　' + (b.template_name || b.subject || '（件名なし）')
+                + '　未送信 ' + b.sendable + ' / 全 ' + b.total + '件'
+                + (b.sent ? '（送信済 ' + b.sent + '）' : '');
+            return '<option value="' + mailEsc(b.batch_id) + '">' + mailEsc(label) + '</option>';
+        }).join('');
+        if (selectId && batches.some(b => b.batch_id === selectId)) select.value = selectId;
+    } catch (e) {
+        mailShowError('送信バッチの取得に失敗しました: ' + e);
+    }
+}
+
+function mailSendSelectedIds() {
+    return Array.from(document.querySelectorAll('.mail-send-check:checked')).map(cb => cb.dataset.id);
+}
+
+function mailUpdateSendConfirm() {
+    // 送る件数が変わったら確認文字も変える。画面の数と実際に送る数を必ず一致させる。
+    const count = mailSendSelectedIds().length;
+    const required = 'SEND ' + count;
+    const requiredEl = document.getElementById('mail-send-required');
+    const input = document.getElementById('mail-send-confirm');
+    const btn = document.getElementById('mail-send-execute-btn');
+    if (requiredEl) requiredEl.textContent = required;
+    if (input) input.placeholder = required;
+    if (btn) btn.disabled = !(count > 0 && input && input.value.trim() === required);
+}
+
+function mailRenderSendPreview(data) {
+    const items = data.items || [];
+    const summary = document.getElementById('mail-send-summary');
+    if (summary) {
+        summary.innerHTML = '作成日時 <b>' + mailEsc(data.created_at) + '</b>　'
+            + '送れる <b>' + data.sendable + '</b>件 / 全 ' + items.length + '件'
+            + (data.template_name ? '　テンプレート: ' + mailEsc(data.template_name) : '');
+    }
+    let html = '<table class="data-table"><thead><tr>'
+        + '<th style="width:34px"><input type="checkbox" id="mail-send-all" checked></th>'
+        + '<th>社員番号</th><th>氏名</th><th>To</th><th>CC</th><th>件名</th><th>状態</th></tr></thead><tbody>';
+    items.forEach(item => {
+        const check = item.sendable
+            ? '<input type="checkbox" class="mail-send-check" data-id="' + mailEsc(item.employee_id) + '" checked>'
+            : '';
+        html += '<tr' + (item.sendable ? '' : ' style="color:#888; background:#f6f7f9"') + '>'
+            + '<td>' + check + '</td>'
+            + '<td>' + mailEsc(item.employee_id) + '</td>'
+            + '<td>' + mailEsc(item.name) + '</td>'
+            + '<td>' + mailEsc(item.to) + '</td>'
+            + '<td>' + mailEsc(item.cc) + '</td>'
+            + '<td>' + mailEsc(item.subject) + '</td>'
+            + '<td>' + mailEsc(item.sendable ? '送れます' : item.reason) + '</td>'
+            + '</tr>';
+    });
+    html += '</tbody></table>';
+    const box = document.getElementById('mail-send-items');
+    if (box) box.innerHTML = html;
+    const all = document.getElementById('mail-send-all');
+    if (all) {
+        all.addEventListener('change', () => {
+            document.querySelectorAll('.mail-send-check').forEach(cb => { cb.checked = all.checked; });
+            mailUpdateSendConfirm();
+        });
+    }
+    document.querySelectorAll('.mail-send-check').forEach(cb => {
+        cb.addEventListener('change', mailUpdateSendConfirm);
+    });
+    const confirmInput = document.getElementById('mail-send-confirm');
+    if (confirmInput) confirmInput.value = '';
+    const done = document.getElementById('mail-send-done');
+    if (done) done.style.display = 'none';
+    document.getElementById('mail-send-result').style.display = 'block';
+    mailUpdateSendConfirm();
+}
+
+const mailSendRefreshBtn = document.getElementById('mail-send-refresh-btn');
+if (mailSendRefreshBtn) {
+    mailSendRefreshBtn.addEventListener('click', () => mailLoadSendBatches());
+}
+
+const mailSendConfirmInput = document.getElementById('mail-send-confirm');
+if (mailSendConfirmInput) {
+    mailSendConfirmInput.addEventListener('input', mailUpdateSendConfirm);
+}
+
+const mailSendPreviewBtn = document.getElementById('mail-send-preview-btn');
+if (mailSendPreviewBtn) {
+    mailSendPreviewBtn.addEventListener('click', async () => {
+        const select = document.getElementById('mail-send-batch');
+        mailShowError([]);
+        if (!select || !select.value) {
+            mailShowError('送信する下書きのまとまりを選んでください');
+            return;
+        }
+        mailSendPreviewBtn.disabled = true;
+        mailSendStatus('送る内容を確認しています…（まだ送っていません）');
+        try {
+            const fd = new FormData();
+            fd.append('batch_id', select.value);
+            const res = await fetch('/mail_send_preview', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['確認に失敗しました']); mailSendStatus(''); return; }
+            mailRenderSendPreview(data);
+            mailSendStatus('宛先と件名を確認し、確認文字を入力してください（まだ送っていません）');
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+            mailSendStatus('');
+        } finally {
+            mailSendPreviewBtn.disabled = false;
+        }
+    });
+}
+
+const mailSendExecuteBtn = document.getElementById('mail-send-execute-btn');
+if (mailSendExecuteBtn) {
+    mailSendExecuteBtn.addEventListener('click', async () => {
+        const select = document.getElementById('mail-send-batch');
+        const input = document.getElementById('mail-send-confirm');
+        const ids = mailSendSelectedIds();
+        mailShowError([]);
+        if (!select || !select.value || !ids.length) return;
+        const status = document.getElementById('mail-send-exec-status');
+        mailSendExecuteBtn.disabled = true;
+        status.textContent = '送信中…（Outlookの下書きを1件ずつ送っています）';
+        try {
+            const fd = new FormData();
+            fd.append('batch_id', select.value);
+            fd.append('selected_ids', JSON.stringify(ids));
+            fd.append('confirm_text', input.value);
+            const res = await fetch('/mail_send_execute', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) { mailShowError(data.errors || ['送信に失敗しました']); status.textContent = ''; return; }
+            const failed = (data.results || []).filter(r => r.result !== '送信済');
+            let html = '📤 送信 ' + data.processed + '件 / 失敗 ' + data.failed + '件';
+            html += '<br>ログ: <code>' + mailEsc(data.log_path) + '</code>';
+            if (failed.length) {
+                html += '<br><span style="color:#c00">' + failed.map(r =>
+                    mailEsc(r.employee_id + ' ' + r.name + ': ' + r.result)).join('<br>') + '</span>';
+            }
+            html += '<br>Outlook の「送信済みアイテム」で確認できます。';
+            const done = document.getElementById('mail-send-done');
+            done.innerHTML = html;
+            done.style.display = 'block';
+            status.textContent = '完了';
+            input.value = '';
+            mailUpdateSendConfirm();
+            mailLoadSendBatches(select.value);
+        } catch (e) {
+            mailShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            mailUpdateSendConfirm();
         }
     });
 }

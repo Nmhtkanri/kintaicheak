@@ -2,7 +2,15 @@
 """メール下書きモード — 一覧表 × テンプレート × メール台帳から Outlook 下書きを一括作成する。
 
 2026-07-28 決定（Z:\\API連携\\docs\\システム全体マップと機能追加ルール.md 3-1）:
-- 作るのは「下書きまで」。直接送信の機能はこのモジュールに存在しない（送信は人が Outlook で行う）。
+- 作るのは「下書きまで」だった。2026-08-31 に、作った下書きをまとめて送る機能を足した（下記）。
+
+2026-08-31 更新（谷津さん決定・同 3-1 を改訂）:
+- **下書きを作ったあと、その下書きをまとめて送れる**ようにした（send_batch）。送るのは
+  create_drafts が作った下書きそのもの＝ Outlook で人が直した内容がそのまま送られる。
+  新しいメールを組み立て直すことはしない。
+- 歯止めは5つ。①送れるのは自分が作ったバッチだけ（EntryID は本人の Outlook
+  プロファイルでしか解決できない） ②プレビュー必須 ③件数入りの確認文字「SEND n」
+  ④要確認の人はそもそもバッチに入らない ⑤全件を下書き作成ログに残す。
 - 差し込みは {{列名}}。列が無い・値が空欄の人は「要確認」にして下書きを作らない。
 - 宛先はメール台帳（B=社員番号 / C=氏名 / D=社用 / E=就業先 / F=個人）と社員番号で突合。
   To=社用優先、就業先・個人は本人BCC。台帳に無い人・氏名相違・アドレス無しは自動で対象外。
@@ -25,6 +33,7 @@ from typing import Any, Iterable
 from openpyxl import load_workbook
 
 from config import Config
+from services.sap_import_ledger import current_user
 
 ADDRESS_SHEET_NAMES = ("メール送信", "メール送信シート")
 ID_HEADER_CANDIDATES = ("社員番号", "従業員番号")
@@ -37,6 +46,13 @@ STATUS_OK = "OK"
 STATUS_NG = "要確認"
 LOG_FILENAME = "下書き作成ログ.csv"
 LOG_HEADERS = ["処理日時", "社員番号", "氏名", "To", "BCC", "件名", "結果"]
+
+# 送信バッチ＝下書きを作ったときの控え。EntryID をここに残しておき、あとで
+# send_batch がその下書きを引き当てて送る（新しいメールは作らない）。
+SEND_BATCH_PREFIX = "送信バッチ_"
+SEND_BATCH_GLOB = SEND_BATCH_PREFIX + "*.json"
+SEND_STATE_DRAFT = "draft"
+SEND_STATE_SENT = "sent"
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +379,27 @@ def build_plans_for(
     table_path: str | Path,
     address_book_path: str | Path,
     template: dict[str, Any],
+    *,
+    source: str = "table",
+    source_options: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """一覧表と台帳を読み、(plans, meta) を返す。ルートからの入口。"""
-    headers, rows, id_key, name_key = load_recipients_table(table_path)
+    """一覧表と台帳を読み、(plans, meta) を返す。ルートからの入口。
+
+    source で読み手だけを差し替える。差し込み・宛先突合・要確認の判定は共通。
+
+    - ``table``（既定） … Excel/CSV の一覧表をそのまま読む
+    - ``paid_leave`` … 有休ブック（対象者一覧／有休明細／集計条件）から
+      社員番号・氏名・取得日数・不足日数・取得期限の5列を組み立てる
+    """
+    source_meta: dict[str, Any] = {}
+    if source == "paid_leave":
+        from services.paid_leave_mail import load_paid_leave_table
+        headers, rows, id_key, name_key, source_meta = load_paid_leave_table(
+            table_path, **(source_options or {}))
+    elif source == "table":
+        headers, rows, id_key, name_key = load_recipients_table(table_path)
+    else:
+        raise ValueError(f"一覧表の種類が不正です: {source}")
     address_book = load_address_book(address_book_path)
     plans = build_mail_plans(rows, id_key, name_key, headers, address_book, template)
     ok_count = sum(plan["status"] == STATUS_OK for plan in plans)
@@ -375,6 +409,8 @@ def build_plans_for(
         "name_column": name_key,
         "placeholders": extract_placeholders(template.get("subject", ""), template.get("body", "")),
         "counts": {"total": len(plans), "ok": ok_count, "warn": len(plans) - ok_count},
+        "source": source,
+        "source_meta": source_meta,
     }
     return plans, meta
 
@@ -445,7 +481,13 @@ class OutlookMailer:
         except Exception as exc:
             raise RuntimeError(f"Outlook を起動できません（classic Outlook が必要）: {exc}") from exc
 
-    def create_draft(self, *, to: str, cc: str, bcc: str, subject: str, body: str, importance: int) -> None:
+    def create_draft(self, *, to: str, cc: str, bcc: str, subject: str, body: str,
+                     importance: int) -> dict:
+        """下書きを保存し、あとで引き当てるための EntryID / StoreID を返す。
+
+        Save() 後の EntryID は、人が Outlook で本文を直して保存し直しても変わらない
+        （2026-08-31 に実機で確認）。send_saved() はこの ID で同じ下書きを引き当てる。
+        """
         mail = self.application.CreateItem(0)
         mail.To = to
         if cc:
@@ -456,6 +498,22 @@ class OutlookMailer:
         mail.Body = body
         mail.Importance = importance
         mail.Save()
+        try:
+            store_id = str(mail.Parent.StoreID or "")
+        except Exception:
+            store_id = ""
+        return {"entry_id": str(mail.EntryID or ""), "store_id": store_id}
+
+    def send_saved(self, entry_id: str, store_id: str = "") -> None:
+        """保存済みの下書きを EntryID で引き当てて送る。**新しいメールは作らない。**
+
+        引き当てられない（人が消した・別フォルダへ動かした）ときは COM が例外を投げる。
+        呼び出し側は「送らずスキップ」に倒すこと。
+        """
+        namespace = self.application.GetNamespace("MAPI")
+        item = (namespace.GetItemFromID(entry_id, store_id) if store_id
+                else namespace.GetItemFromID(entry_id))
+        item.Send()
 
 
 def _append_log(log_path: Path, rows: list[list[str]]) -> None:
@@ -476,17 +534,21 @@ def create_drafts(
     only_ids: list[str],
     log_dir: str | Path | None = None,
     mailer: Any | None = None,
+    template_name: str = "",
 ) -> dict[str, Any]:
-    """選択された OK 行だけ Outlook 下書きを作成し、ログを残す。
+    """選択された OK 行だけ Outlook 下書きを作成し、ログと送信バッチを残す。
 
     - status が要確認の行は選択されていても作らない（skipped に数える）。
     - 3件連続で失敗したら中断する（Outlook 側の異常を疑う）。
+    - 作れた下書きの EntryID を**送信バッチ**に控える。あとで send_batch が
+      この控えを使って、同じ下書きを引き当てて送る。
     """
     selected = {str(item) for item in only_ids}
     targets = [p for p in plans if p["employee_id"] in selected and p["status"] == STATUS_OK]
     skipped = len([p for p in plans if p["employee_id"] in selected]) - len(targets)
     if not targets:
-        return {"processed": 0, "skipped": skipped, "failed": 0, "results": [], "log_path": ""}
+        return {"processed": 0, "skipped": skipped, "failed": 0, "results": [],
+                "log_path": "", "batch_id": "", "batch_path": "", "sendable": 0}
 
     log_dir = Path(log_dir or Config.MAIL_OUTPUT_DIR)
     log_path = log_dir / LOG_FILENAME
@@ -505,14 +567,16 @@ def create_drafts(
         consecutive_failures = 0
         results: list[dict[str, str]] = []
         log_rows: list[list[str]] = []
+        batch_items: list[dict[str, Any]] = []
         for plan in targets:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             to = "; ".join(plan["to"])
             bcc = "; ".join(plan["bcc"])
+            cc = "; ".join(plan["cc"])
             try:
-                mailer.create_draft(
+                saved = mailer.create_draft(
                     to=to,
-                    cc="; ".join(plan["cc"]),
+                    cc=cc,
                     bcc=bcc,
                     subject=plan["subject"],
                     body=plan["body"],
@@ -521,6 +585,21 @@ def create_drafts(
                 result_text = "下書き作成済"
                 processed += 1
                 consecutive_failures = 0
+                # 差し替え可能なメーラー（テスト用）は戻り値を返さないことがある。
+                # その場合 entry_id が空になり、あとで送信対象から自然に外れる。
+                info = saved if isinstance(saved, dict) else {}
+                batch_items.append({
+                    "employee_id": plan["employee_id"],
+                    "name": plan["name"],
+                    "to": to,
+                    "cc": cc,
+                    "bcc": bcc,
+                    "subject": plan["subject"],
+                    "entry_id": str(info.get("entry_id") or ""),
+                    "store_id": str(info.get("store_id") or ""),
+                    "state": SEND_STATE_DRAFT,
+                    "created_at": now,
+                })
             except Exception as exc:
                 result_text = f"エラー: {exc}"[:250]
                 failed += 1
@@ -535,8 +614,213 @@ def create_drafts(
                     "Outlook の下書き作成が3件連続で失敗したため中断しました。"
                     f"ログを確認してください: {log_path}")
         _append_log(log_path, log_rows)
+        batch_path = ""
+        batch_id = ""
+        if batch_items:
+            batch = {
+                "batch_id": _new_batch_id(),
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "user": current_user(),
+                "template_name": template_name,
+                "items": batch_items,
+            }
+            saved_path = save_send_batch(batch, log_dir=log_dir)
+            batch_path = str(saved_path)
+            batch_id = batch["batch_id"]
         return {"processed": processed, "skipped": skipped, "failed": failed,
-                "results": results, "log_path": str(log_path)}
+                "results": results, "log_path": str(log_path),
+                "batch_id": batch_id, "batch_path": batch_path,
+                "sendable": len([i for i in batch_items if i["entry_id"]])}
+    finally:
+        if own_com:
+            try:
+                import pythoncom  # type: ignore
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# 送信バッチ — 作った下書きを、あとでまとめて送るための控え
+# ---------------------------------------------------------------------------
+# 送るときは控えた EntryID で同じ下書きを引き当てるだけなので、Outlook 側で人が
+# 本文や宛先を直していれば、直した内容がそのまま送られる（2026-08-31 実機確認）。
+# EntryID は作った本人の Outlook プロファイルでしか解決できない＝他人が作った
+# バッチは実質送れない。これが「誰でも押せる」ことに対する自然な歯止めになる。
+
+
+def _new_batch_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _safe_user(user: Any) -> str:
+    """ファイル名に使えるユーザー名にする。"""
+    cleaned = re.sub(r'[<>:"/|?*\\]', "_", str(user or "")).strip()
+    return cleaned or "unknown"
+
+
+def send_batch_dir(log_dir: str | Path | None = None) -> Path:
+    return Path(log_dir or Config.MAIL_OUTPUT_DIR)
+
+
+def _write_send_batch(path: str | Path, batch: dict[str, Any]) -> None:
+    """壊れたJSONを残さないよう、一時ファイルへ書いてから置き換える。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(batch, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def save_send_batch(batch: dict[str, Any], *, log_dir: str | Path | None = None) -> Path:
+    path = (send_batch_dir(log_dir)
+            / f"{SEND_BATCH_PREFIX}{batch['batch_id']}_{_safe_user(batch.get('user'))}.json")
+    _write_send_batch(path, batch)
+    return path
+
+
+def load_send_batch(path: str | Path) -> dict[str, Any]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"送信バッチが見つかりません: {path}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            batch = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"送信バッチを読み取れません（{path}）: {exc}") from exc
+    if not isinstance(batch, dict) or not isinstance(batch.get("items"), list):
+        raise ValueError(f"送信バッチの形式が不正です（itemsの配列が必要）: {path}")
+    return batch
+
+
+def sendable_items(batch: dict[str, Any],
+                   only_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    """まだ送っていない・EntryIDを控えてある行だけを返す。"""
+    selected = {str(item) for item in only_ids} if only_ids is not None else None
+    targets: list[dict[str, Any]] = []
+    for item in batch.get("items") or []:
+        if item.get("state") == SEND_STATE_SENT:
+            continue
+        if not str(item.get("entry_id") or ""):
+            continue
+        if selected is not None and str(item.get("employee_id") or "") not in selected:
+            continue
+        targets.append(item)
+    return targets
+
+
+def list_send_batches(*, user: str | None = None, log_dir: str | Path | None = None,
+                      limit: int = 20) -> list[dict[str, Any]]:
+    """自分が作ったバッチの概要を新しい順に返す（読み取りのみ）。
+
+    他人のバッチは出さない。EntryID は作った本人の Outlook でしか解決できないので、
+    出しても送れず、誤操作のもとになるだけのため。
+    """
+    folder = send_batch_dir(log_dir)
+    if not folder.exists():
+        return []
+    who = current_user() if user is None else user
+    summaries: list[dict[str, Any]] = []
+    for path in sorted(folder.glob(SEND_BATCH_GLOB),
+                       key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            batch = load_send_batch(path)
+        except (ValueError, OSError):
+            continue
+        if who and normalize_name(str(batch.get("user") or "")) != normalize_name(who):
+            continue
+        items = batch.get("items") or []
+        summaries.append({
+            "batch_id": str(batch.get("batch_id") or path.stem),
+            "path": str(path),
+            "created_at": str(batch.get("created_at") or ""),
+            "user": str(batch.get("user") or ""),
+            "template_name": str(batch.get("template_name") or ""),
+            "subject": str(items[0].get("subject") or "") if items else "",
+            "total": len(items),
+            "sendable": len(sendable_items(batch)),
+            "sent": len([i for i in items if i.get("state") == SEND_STATE_SENT]),
+        })
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
+def send_batch(
+    batch_path: str | Path,
+    *,
+    only_ids: list[str] | None = None,
+    confirm_text: str = "",
+    log_dir: str | Path | None = None,
+    mailer: Any | None = None,
+) -> dict[str, Any]:
+    """控えた下書きを引き当てて送る。**新しいメールは組み立て直さない。**
+
+    - 送る前に「SEND 件数」の確認文字を要求する（件数はこの関数が数え直す）。
+    - 1件送るたびに控えを書き戻すので、途中で落ちても同じ人へ二重に送らない。
+    - 引き当てられない下書き（消された・移動された）は送らずスキップして記録する。
+    - 3件連続で失敗したら中断する（Outlook 側の異常を疑う）。
+    """
+    path = Path(batch_path)
+    batch = load_send_batch(path)
+    targets = sendable_items(batch, only_ids)
+    required = f"SEND {len(targets)}"
+    if str(confirm_text or "").strip() != required:
+        raise ValueError(
+            f"確認文字が一致しません。送信するには「{required}」と入力してください")
+    if not targets:
+        return {"processed": 0, "failed": 0, "results": [], "log_path": "",
+                "batch_path": str(path)}
+
+    log_path = send_batch_dir(log_dir) / LOG_FILENAME
+    own_com = mailer is None
+    if own_com:
+        try:
+            import pythoncom  # type: ignore
+            pythoncom.CoInitialize()
+        except ImportError:
+            pythoncom = None
+    try:
+        mailer = mailer or OutlookMailer()
+        processed = 0
+        failed = 0
+        consecutive_failures = 0
+        results: list[dict[str, str]] = []
+        log_rows: list[list[str]] = []
+        for item in targets:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                mailer.send_saved(str(item.get("entry_id") or ""),
+                                  str(item.get("store_id") or ""))
+                item["state"] = SEND_STATE_SENT
+                item["sent_at"] = now
+                item.pop("last_error", None)
+                result_text = "送信済"
+                processed += 1
+                consecutive_failures = 0
+            except Exception as exc:
+                result_text = f"送信できません（下書きが見つからない可能性）: {exc}"[:250]
+                item["last_error"] = result_text
+                failed += 1
+                consecutive_failures += 1
+            # 1件ごとに控えを書き戻す。途中で落ちても、再実行で同じ人へ二重に送らない。
+            _write_send_batch(path, batch)
+            results.append({"employee_id": str(item.get("employee_id") or ""),
+                            "name": str(item.get("name") or ""),
+                            "result": result_text})
+            log_rows.append([now, str(item.get("employee_id") or ""),
+                             str(item.get("name") or ""), str(item.get("to") or ""),
+                             str(item.get("bcc") or ""), str(item.get("subject") or ""),
+                             result_text])
+            if consecutive_failures >= 3:
+                _append_log(log_path, log_rows)
+                raise RuntimeError(
+                    "Outlook への送信が3件連続で失敗したため中断しました。"
+                    f"ログを確認してください: {log_path}")
+        _append_log(log_path, log_rows)
+        return {"processed": processed, "failed": failed, "results": results,
+                "log_path": str(log_path), "batch_path": str(path)}
     finally:
         if own_com:
             try:

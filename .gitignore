@@ -2,6 +2,9 @@ __pycache__/
 .env
 build/
 dist/
+# build_exe_safe.py の既定の出力先（swap 前の一時ビルド）
+build_new/
+dist_new/
 *.spec
 outputs/
 uploads/

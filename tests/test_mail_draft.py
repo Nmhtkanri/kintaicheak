@@ -12,7 +12,12 @@ from services.mail_draft import (
     STATUS_NG,
     STATUS_OK,
     build_mail_plans,
+    SEND_STATE_SENT,
     create_drafts,
+    list_send_batches,
+    load_send_batch,
+    send_batch,
+    sendable_items,
     extract_placeholders,
     invalid_addresses,
     load_templates,
@@ -141,15 +146,25 @@ class BuildPlansTest(unittest.TestCase):
 
 
 class DummyMailer:
-    def __init__(self, fail_times=0):
+    def __init__(self, fail_times=0, missing_ids=()):
         self.calls = []
         self.fail_times = fail_times
+        self.sent = []
+        self.missing_ids = set(missing_ids)
 
     def create_draft(self, **kwargs):
         if self.fail_times > 0:
             self.fail_times -= 1
             raise RuntimeError("ダミー失敗")
         self.calls.append(kwargs)
+        # 実機の Outlook と同じく、保存した下書きの EntryID を返す
+        return {"entry_id": f"EID{len(self.calls):03d}", "store_id": "STORE"}
+
+    def send_saved(self, entry_id, store_id=""):
+        # 人が下書きを消した・移動した状況を再現する
+        if entry_id in self.missing_ids:
+            raise RuntimeError("下書きが見つかりません")
+        self.sent.append((entry_id, store_id))
 
 
 class CreateDraftsTest(unittest.TestCase):
@@ -176,6 +191,96 @@ class CreateDraftsTest(unittest.TestCase):
         result = create_drafts(self.plans, only_ids=[], log_dir=self.tmp.name, mailer=mailer)
         self.assertEqual(result["processed"], 0)
         self.assertEqual(mailer.calls, [])
+
+
+class SendBatchTest(unittest.TestCase):
+    """作った下書きを、控えた EntryID で引き当ててまとめて送る。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        book = {"2024001": [entry(company=("a@x.jp",))],
+                "2024002": [entry(employee_id="2024002", name="鈴木花子",
+                                  company=("b@x.jp",))]}
+        rows = [{"社員番号": "2024001", "氏名": "山田太郎", "不足日数": 2},
+                {"社員番号": "2024002", "氏名": "鈴木花子", "不足日数": 1}]
+        self.plans = plans_for(rows, book)
+        self.mailer = DummyMailer()
+        self.created = create_drafts(self.plans, only_ids=["2024001", "2024002"],
+                                     log_dir=self.tmp.name, mailer=self.mailer,
+                                     template_name="有休取得のお願い")
+
+    def test_batch_records_entry_ids(self):
+        self.assertEqual(self.created["processed"], 2)
+        self.assertEqual(self.created["sendable"], 2)
+        batch = load_send_batch(self.created["batch_path"])
+        self.assertEqual(batch["template_name"], "有休取得のお願い")
+        self.assertEqual([i["entry_id"] for i in batch["items"]], ["EID001", "EID002"])
+        self.assertEqual([i["state"] for i in batch["items"]], ["draft", "draft"])
+
+    def test_confirm_text_must_match_the_count(self):
+        with self.assertRaises(ValueError) as raised:
+            send_batch(self.created["batch_path"], only_ids=["2024001", "2024002"],
+                       confirm_text="SEND 1", log_dir=self.tmp.name, mailer=self.mailer)
+        self.assertIn("SEND 2", str(raised.exception))
+        self.assertEqual(self.mailer.sent, [])
+
+    def test_sends_saved_drafts_and_marks_them(self):
+        result = send_batch(self.created["batch_path"], only_ids=["2024001", "2024002"],
+                            confirm_text="SEND 2", log_dir=self.tmp.name, mailer=self.mailer)
+        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["failed"], 0)
+        # 新しいメールは作らず、控えた EntryID の下書きを送っている
+        self.assertEqual(self.mailer.sent, [("EID001", "STORE"), ("EID002", "STORE")])
+        self.assertEqual(len(self.mailer.calls), 2)
+        batch = load_send_batch(self.created["batch_path"])
+        self.assertTrue(all(i["state"] == SEND_STATE_SENT for i in batch["items"]))
+        self.assertTrue(all(i.get("sent_at") for i in batch["items"]))
+
+    def test_sent_items_are_not_sent_again(self):
+        send_batch(self.created["batch_path"], only_ids=["2024001", "2024002"],
+                   confirm_text="SEND 2", log_dir=self.tmp.name, mailer=self.mailer)
+        batch = load_send_batch(self.created["batch_path"])
+        self.assertEqual(sendable_items(batch), [])
+        # 送るものが無いので確認文字は SEND 0。二度押しても送らない。
+        result = send_batch(self.created["batch_path"], confirm_text="SEND 0",
+                            log_dir=self.tmp.name, mailer=self.mailer)
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(len(self.mailer.sent), 2)
+
+    def test_only_selected_people_are_sent(self):
+        result = send_batch(self.created["batch_path"], only_ids=["2024002"],
+                            confirm_text="SEND 1", log_dir=self.tmp.name, mailer=self.mailer)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.mailer.sent, [("EID002", "STORE")])
+        batch = load_send_batch(self.created["batch_path"])
+        states = {i["employee_id"]: i["state"] for i in batch["items"]}
+        self.assertEqual(states["2024001"], "draft")
+        self.assertEqual(states["2024002"], SEND_STATE_SENT)
+
+    def test_missing_draft_is_recorded_not_sent(self):
+        mailer = DummyMailer(missing_ids={"EID001"})
+        result = send_batch(self.created["batch_path"], only_ids=["2024001", "2024002"],
+                            confirm_text="SEND 2", log_dir=self.tmp.name, mailer=mailer)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(mailer.sent, [("EID002", "STORE")])
+        batch = load_send_batch(self.created["batch_path"])
+        states = {i["employee_id"]: i["state"] for i in batch["items"]}
+        self.assertEqual(states["2024001"], "draft")   # 送れていないので未送信のまま
+        self.assertEqual(states["2024002"], SEND_STATE_SENT)
+
+    def test_entry_id_missing_is_never_sendable(self):
+        """EntryID を控えられなかった行は、送信対象に入らない。"""
+        batch = load_send_batch(self.created["batch_path"])
+        batch["items"][0]["entry_id"] = ""
+        self.assertEqual([i["employee_id"] for i in sendable_items(batch)], ["2024002"])
+
+    def test_other_users_batches_are_hidden(self):
+        mine = list_send_batches(log_dir=self.tmp.name)
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0]["sendable"], 2)
+        self.assertEqual(list_send_batches(user="別の人", log_dir=self.tmp.name), [])
 
 
 class TemplateStoreTest(unittest.TestCase):

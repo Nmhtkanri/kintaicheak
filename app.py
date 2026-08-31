@@ -3921,8 +3921,16 @@ def _mail_build_plans_from_form():
     if not template["subject"].strip() or not template["body"].strip():
         return None, None, (jsonify({"success": False,
                                      "errors": ["件名と本文を入力してください"]}), 400)
+    # 一覧表の読み手だけを切り替える（差し込み・宛先突合・要確認の判定は共通）。
+    source = (request.form.get("source") or "table").strip()
+    source_options = {}
+    if source == "paid_leave":
+        deadline = (request.form.get("deadline") or "").strip()
+        if deadline:
+            source_options["deadline"] = deadline
     try:
-        plans, meta = build_plans_for(table_path, address_book, template)
+        plans, meta = build_plans_for(table_path, address_book, template,
+                                      source=source, source_options=source_options)
     except (ValueError, FileNotFoundError) as e:
         return None, None, (jsonify({"success": False, "errors": [str(e)]}), 400)
     return plans, meta, None
@@ -3962,12 +3970,124 @@ def route_mail_drafts():
         if err:
             return err
         result = create_drafts(plans, only_ids=[str(item) for item in selected],
-                               log_dir=Config.MAIL_OUTPUT_DIR)
+                               log_dir=Config.MAIL_OUTPUT_DIR,
+                               template_name=(request.form.get("template_name") or "").strip())
     except RuntimeError as e:
         return jsonify({"success": False, "errors": [str(e)]}), 500
     except Exception as e:
         logger.exception("mail_drafts failed")
         return jsonify({"success": False, "errors": [f"下書き作成に失敗しました: {e}"]}), 500
+    payload = {"success": True}
+    payload.update(result)
+    return jsonify(payload)
+
+
+def _mail_send_batch_path_from_form():
+    """フォームの batch_id から、自分が作ったバッチのパスを引く。(path, error_response)
+
+    パス自体はクライアントから受け取らない。任意のファイルを触らせないため、
+    自分のバッチ一覧と突き合わせてから使う。
+    """
+    from services.mail_draft import list_send_batches
+    batch_id = (request.form.get("batch_id") or "").strip()
+    if not batch_id:
+        return None, (jsonify({"success": False,
+                               "errors": ["送信する下書きのまとまり（バッチ）を選んでください"]}), 400)
+    for item in list_send_batches(log_dir=Config.MAIL_OUTPUT_DIR):
+        if item["batch_id"] == batch_id:
+            return item["path"], None
+    return None, (jsonify({"success": False,
+                           "errors": [f"自分が作った送信バッチに {batch_id} が見つかりません"]}), 404)
+
+
+@app.route("/mail_send_batches", methods=["POST"])
+def route_mail_send_batches():
+    """自分が作った送信バッチの一覧。読み取りのみで Outlook には触れない。"""
+    from services.mail_draft import list_send_batches
+    try:
+        batches = list_send_batches(log_dir=Config.MAIL_OUTPUT_DIR)
+    except Exception as e:
+        logger.exception("mail_send_batches failed")
+        return jsonify({"success": False,
+                        "errors": [f"送信バッチの一覧に失敗しました: {e}"]}), 500
+    return jsonify({"success": True, "batches": batches})
+
+
+@app.route("/mail_send_preview", methods=["POST"])
+def route_mail_send_preview():
+    """バッチの中身と、送る予定の件数・確認文字を返す。Outlook には触れない。"""
+    from services.mail_draft import SEND_STATE_SENT, load_send_batch, sendable_items
+    path, err = _mail_send_batch_path_from_form()
+    if err:
+        return err
+    try:
+        batch = load_send_batch(path)
+    except (ValueError, FileNotFoundError) as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    targets = sendable_items(batch)
+    sendable_keys = {id(item) for item in targets}
+    items = []
+    for item in batch.get("items") or []:
+        sendable = id(item) in sendable_keys
+        if sendable:
+            reason = ""
+        elif item.get("state") == SEND_STATE_SENT:
+            reason = f"送信済（{item.get('sent_at') or ''}）"
+        elif not str(item.get("entry_id") or ""):
+            reason = "下書きの控え（EntryID）がありません"
+        else:
+            reason = "送信対象外"
+        items.append({
+            "employee_id": str(item.get("employee_id") or ""),
+            "name": str(item.get("name") or ""),
+            "to": str(item.get("to") or ""),
+            "cc": str(item.get("cc") or ""),
+            "bcc": str(item.get("bcc") or ""),
+            "subject": str(item.get("subject") or ""),
+            "state": str(item.get("state") or ""),
+            "sendable": sendable,
+            "reason": reason,
+        })
+    return jsonify({
+        "success": True,
+        "batch_id": str(batch.get("batch_id") or ""),
+        "created_at": str(batch.get("created_at") or ""),
+        "template_name": str(batch.get("template_name") or ""),
+        "items": items,
+        "sendable": len(targets),
+        "confirm_text": f"SEND {len(targets)}",
+    })
+
+
+@app.route("/mail_send_execute", methods=["POST"])
+def route_mail_send_execute():
+    """確認文字を検証して、控えた下書きをまとめて送る。
+
+    送るのは create_drafts が作った下書きそのもの。宛先・件名・本文はサーバ側の
+    バッチだけを見る（クライアントから来るのは batch_id / 選択 / 確認文字だけ）。
+    """
+    from services.mail_draft import send_batch
+    path, err = _mail_send_batch_path_from_form()
+    if err:
+        return err
+    try:
+        selected = json.loads(request.form.get("selected_ids") or "null")
+    except json.JSONDecodeError:
+        return jsonify({"success": False, "errors": ["選択内容を読み取れません"]}), 400
+    only_ids = [str(item) for item in selected] if isinstance(selected, list) else None
+    if only_ids is not None and not only_ids:
+        return jsonify({"success": False, "errors": ["送信対象が選択されていません"]}), 400
+    try:
+        result = send_batch(path, only_ids=only_ids,
+                            confirm_text=request.form.get("confirm_text") or "",
+                            log_dir=Config.MAIL_OUTPUT_DIR)
+    except (ValueError, FileNotFoundError) as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except RuntimeError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+    except Exception as e:
+        logger.exception("mail_send_execute failed")
+        return jsonify({"success": False, "errors": [f"送信に失敗しました: {e}"]}), 500
     payload = {"success": True}
     payload.update(result)
     return jsonify(payload)
