@@ -38,6 +38,7 @@ import openpyxl
 # モジュール先頭に上げて、モジュールが欠けているなら起動時に大きく落ちるようにする。
 # （どちらも stdlib と openpyxl しか import せず循環参照は無い。
 #   kdx 側の pdfplumber は関数内 import なので起動コストも増えない）
+from services.bbs_shift_parser import is_bbs_shift_xlsx, parse_bbs_shift_xlsx
 from services.higashi_shift_parser import (
     is_higashi_shift_xlsx,
     parse_higashi_shift_xlsx,
@@ -834,6 +835,7 @@ def parse_structured_files(
     higashi_shift_paths: list[str] = []
     kdx_pdf_paths: list[str] = []
     ual_shift_paths: list[str] = []
+    bbs_shift_paths: list[str] = []
     for p in paths:
         low = p.lower()
         if low.endswith(".pdf"):
@@ -853,6 +855,9 @@ def parse_structured_files(
                 if is_ual_shift_xlsx(p):
                     ual_shift_paths.append(p)
                     continue
+                if is_bbs_shift_xlsx(p):
+                    bbs_shift_paths.append(p)
+                    continue
             if is_multi_year_shift_xlsx(p):
                 shift_paths.append(p)
             elif is_monthly_shift_xlsx(p):
@@ -864,7 +869,7 @@ def parse_structured_files(
 
     if (not shift_paths and not monthly_shift_paths
             and not higashi_shift_paths and not kdx_pdf_paths
-            and not ual_shift_paths):
+            and not ual_shift_paths and not bbs_shift_paths):
         return None
 
     # 凡例をマージ（複数渡された場合は重複コードを除外しつつ全件統合）
@@ -933,6 +938,46 @@ def parse_structured_files(
                 f"{result['filename']}: 凡例に無い記号がありました "
                 f"({' / '.join(result['unknown_codes'])})。凡例確認画面で内容を指定してください。")
         consumed.append(up)
+
+    for bp in bbs_shift_paths:
+        try:
+            result = parse_bbs_shift_xlsx(bp, target_year, target_month)
+        except Exception as e:
+            logger.warning("BBS勤務表 %s の構造化解析に失敗: %s", bp, e)
+            warnings.append(
+                f"BBS勤務表の構造化解析に失敗したため AI 読み取りへフォールバックします: "
+                f"{os.path.basename(bp)} — {e}")
+            continue
+        sheets.append({
+            "mode": "code",
+            "filename": result["filename"],
+            "legend": result["legend"],
+            "employees": result["employees"],
+            "off_markers": result["off_markers"],
+            "year": result["year"],
+            "month": result["month"],
+            "source": result.get("source", ""),
+            "section_info": result.get("section_info"),
+        })
+        if result.get("skipped_names"):
+            warnings.append(
+                f"{result['filename']}: 当社社員の目印「(N)」が無い "
+                f"{len(result['skipped_names'])}行を除外しました"
+                f"（{' / '.join(result['skipped_names'])}）")
+        if result.get("legend_filled_from_default"):
+            warnings.append(
+                f"{result['filename']}: シートに凡例が無いため BBS の既定時刻で補いました "
+                f"({' / '.join(result['legend_filled_from_default'])})。"
+                "凡例確認画面で時刻を確認してください。")
+        if result.get("leader_notes"):
+            warnings.append(
+                f"{result['filename']}: 計画が空の日にリーダー行のメモがありました。"
+                f"休暇以外は取り込んでいません（{' / '.join(result['leader_notes'])}）")
+        if result.get("unknown_codes"):
+            warnings.append(
+                f"{result['filename']}: 凡例に無い記号がありました "
+                f"({' / '.join(result['unknown_codes'])})。凡例確認画面で内容を指定してください。")
+        consumed.append(bp)
 
     for hp in higashi_shift_paths:
         try:

@@ -568,9 +568,17 @@ def upload():
                 if structured_result:
                     structured_sheets, consumed_paths, struct_warnings = structured_result
                     consumed_set = set(consumed_paths)
+                    # 構造化パーサは保存先パスしか知らないため、画面には
+                    # 一時ファイル名（ts_<uuid>_元の名前）が出てしまう。元の名前に戻す。
+                    display_names = {os.path.basename(p): fn
+                                     for p, fn in saved_timesheet_paths}
                     for w in struct_warnings:
+                        for tmp_name, orig_name in display_names.items():
+                            w = w.replace(tmp_name, orig_name)
                         yield _sse_event("progress", {"message": f"⚠️ {w}"})
                     for sheet in structured_sheets:
+                        sheet["filename"] = display_names.get(sheet["filename"],
+                                                              sheet["filename"])
                         code_sheets.append({
                             "filename": sheet["filename"],
                             "year": sheet["year"],
