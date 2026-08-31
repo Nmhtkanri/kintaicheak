@@ -40,6 +40,7 @@ python -m PyInstaller ^
   --hidden-import services.higashi_shift_parser ^
   --hidden-import services.kdx_shift_parser ^
   --hidden-import services.ual_shift_parser ^
+  --hidden-import services.bbs_shift_parser ^
   --hidden-import services.employee_alias ^
   --hidden-import services.kotsuhi_seisa ^
   --hidden-import services.sap_import_ledger ^
