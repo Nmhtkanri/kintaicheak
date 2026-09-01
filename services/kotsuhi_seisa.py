@@ -419,7 +419,8 @@ def build_limit_over_rows(details, idx, exempt: dict[str, str],
     return out
 
 
-def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> list[dict]:
+def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict,
+                      target_ym: str = "") -> list[dict]:
     """実費は1日を乗換ごとに複数明細で申請するため、日単位で合算する。
 
     ただしマスタが定期(毎月)登録の人は、実費カテゴリで月額をまとめて申請してくる。
@@ -442,6 +443,11 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
         acc["pairs"].add((norm_station(frm), norm_station(to)))
         acc["経路"].append(f"{frm}→{to}({to_int(r[idx['金額']]):,}/{r[idx['往復']]})")
         acc["備考"].extend(_biko_of(r, idx))
+
+    # 月まとめで申請された行の見出し。対象月を渡さなかったときだけ「当月」に逃がす
+    # （2026-09-01 まで "7月" が固定で埋め込まれていて、8月の結果に7月と出ていた）。
+    m_ym = re.fullmatch(r"(\d{4})-(\d{2})", target_ym or "")
+    month_label = f"{int(m_ym.group(2))}月" if m_ym else "当月"
 
     daily_emps = {k[0] for k in per if master.legs(k[0], "毎日")}
     out = []
@@ -508,7 +514,7 @@ def build_actual_rows(details, idx, master: CommuteMaster, workdays: dict) -> li
                 "社員番号": emp,
                 "氏名": name,
                 "所属グループ": group,
-                "利用日": f"(7月合計 {len(m['日'])}日分)",
+                "利用日": f"({month_label}合計 {len(m['日'])}日分)",
                 "ステータス": m["ステータス"],
                 "申請書No.": ", ".join(sorted(m["申請書"])),
                 "明細件数": m["件数"],
@@ -969,8 +975,38 @@ def build_master_gap_rows(details, idx, master: CommuteMaster, workdays: dict,
     return gaps, stock
 
 
+def _commute_overlap_note(applied) -> str:
+    """移動交通費の人が通勤費でも申請しているかを一言にする。
+
+    実費は日単位、定期代は申請単位なので数え方の単位を変える。
+    """
+    if not applied:
+        return "通勤費の申請なし"
+    parts = []
+    for kind, unit in ((KIND_ACTUAL, "日"), (KIND_PASS, "件")):
+        if kind in applied:
+            parts.append(f"{kind} {len(applied[kind])}{unit}")
+    return "通勤費でも申請している（" + "・".join(parts) + "）"
+
+
 def build_travel_rows(details, idx, target_ids: set[str]) -> tuple[list[dict], list[dict]]:
-    """移動交通費は通勤費マスタに相手がいないので金額突合はしない。一覧化＋リスト外フラグ。"""
+    """移動交通費は通勤費マスタに相手がいないので金額突合はしない。
+
+    見るのは「通勤費でも申請していないか」の一点だけ（2026-09-01 谷津さん指定）。
+    この人たちは行き先が毎回違うため、経費そのものは管理部ではなく別の担当が確認する。
+    管理部が知る必要があるのは、立替精算で計上すべき人が通勤費側にも申請を出していないか
+    だけ。以前は対象者リストに載っていない人を要確認にしていたが、リストへの登録漏れは
+    経費の誤りではないので、判定には使わず列で見せるだけにする（上限免除の判定では
+    引き続きリストを使う）。
+    """
+    # 通勤費（定期代・実費）を出している人。ここに載る＝移動交通費と二重に出している。
+    commute = defaultdict(lambda: defaultdict(set))
+    for r in details:
+        kind = r[idx["交通機関"]]
+        if kind not in (KIND_PASS, KIND_ACTUAL) or r[idx["ステータス"]] not in ACTIVE_STATUS:
+            continue
+        commute[r[idx["社員番号"]]][kind].add(r[idx["利用日"]])
+
     per = defaultdict(lambda: {"金額": 0, "件数": 0, "日": set()})
     detail_rows = []
     for r in details:
@@ -1012,8 +1048,8 @@ def build_travel_rows(details, idx, target_ids: set[str]) -> tuple[list[dict], l
                 "利用日数": len(acc["日"]),
                 "金額合計": acc["金額"],
                 "対象者リスト": "○" if emp in target_ids else "リスト外",
-                "区分": "OK" if emp in target_ids else "要確認",
-                "説明": "" if emp in target_ids else "移動交通費対象者リストに未登録",
+                "区分": "要確認" if emp in commute else "OK",
+                "説明": _commute_overlap_note(commute.get(emp)),
             }
         )
     return summary, detail_rows
@@ -1351,7 +1387,7 @@ def main(csv_path: Path, check_path: Path, out_path: Path,
     out_of_month = src.out_of_month
 
     pass_rows = build_pass_rows(details, idx, master)
-    actual_rows = build_actual_rows(details, idx, master, workdays)
+    actual_rows = build_actual_rows(details, idx, master, workdays, target_ym)
     limit_rows = build_limit_over_rows(details, idx, limit_exempt, monthly_limit, target_ids)
     travel_rows, travel_details = build_travel_rows(details, idx, target_ids)
     gap_rows, stock_rows = build_master_gap_rows(details, idx, master, workdays, pass_rows, actual_rows, excluded)

@@ -597,3 +597,94 @@ def test_no_warning_when_the_month_actually_has_applications():
 def test_no_warning_when_there_is_simply_nothing_to_exclude():
     # 申請が本当に0件の月（除外も0）は取り違えではないので黙る
     assert month_mismatch_warning("2026-08", 0, 0) is None
+
+
+# ----------------------------------------------------------------------
+# 移動交通費: 見るのは「通勤費でも申請していないか」だけ
+# ----------------------------------------------------------------------
+
+def _travel(emp, name, date, amount="480"):
+    return _biko_row("交通費（電車・バス）", emp, name, amount, "品川", "泉岳寺", date)
+
+
+def _actual(emp, name, date, amount="500"):
+    return _biko_row("通勤交通費（実費）", emp, name, amount, "品川", "大崎", date)
+
+
+def test_travel_rows_flag_only_people_who_also_claim_commuting_cost():
+    """行き先が毎回違う人の経費は別担当が見るので、管理部は二重申請だけ見る。
+
+    2026-09-01 以前は対象者リストに載っていないだけで要確認にしていたが、
+    リストへの登録漏れは経費の誤りではないので判定から外した。
+    """
+    details = [
+        _travel("2024001", "移動のみ", "2026/8/5"),
+        _travel("2024002", "二重申請", "2026/8/5"),
+        _actual("2024002", "二重申請", "2026/8/6"),
+        _actual("2024002", "二重申請", "2026/8/7"),
+    ]
+    rows, _ = build_travel_rows(details, BIKO_IDX, set())   # 2人ともリスト外
+    by = {r["社員番号"]: r for r in rows}
+    assert by["2024001"]["区分"] == "OK"
+    assert by["2024001"]["説明"] == "通勤費の申請なし"
+    assert by["2024002"]["区分"] == "要確認"
+    assert "通勤交通費（実費） 2日" in by["2024002"]["説明"]
+
+
+def test_travel_rows_flag_roster_members_too():
+    # リストに載っていても、通勤費でも出していれば知りたい（載っている＝免罪符ではない）
+    details = [
+        _travel("2024003", "リスト上の人", "2026/8/5"),
+        _actual("2024003", "リスト上の人", "2026/8/6"),
+    ]
+    rows, _ = build_travel_rows(details, BIKO_IDX, {"2024003"})
+    assert rows[0]["対象者リスト"] == "○"
+    assert rows[0]["区分"] == "要確認"
+
+
+def test_travel_rows_stay_ok_for_roster_gaps_alone():
+    details = [_travel("2024004", "リスト外だけ", "2026/8/5")]
+    rows, _ = build_travel_rows(details, BIKO_IDX, set())
+    assert rows[0]["対象者リスト"] == "リスト外"
+    assert rows[0]["区分"] == "OK"
+
+
+def test_travel_rows_count_pass_applications_by_case_not_by_day():
+    details = [
+        _travel("2024005", "定期も出す", "2026/8/5"),
+        _biko_row("通勤定期代", "2024005", "定期も出す", "8000", "綾瀬", "東銀座", "2026/8/1"),
+    ]
+    rows, _ = build_travel_rows(details, BIKO_IDX, set())
+    assert "通勤定期代 1件" in rows[0]["説明"]
+
+
+def test_travel_rows_ignore_withdrawn_commuting_applications():
+    # 取下げ・否認は精査対象外なので、二重申請にも数えない
+    details = [
+        _travel("2024006", "取下げ済み", "2026/8/5"),
+        _biko_row("通勤交通費（実費）", "2024006", "取下げ済み", "500", "品川", "大崎",
+                  "2026/8/6", status="取下げ"),
+    ]
+    rows, _ = build_travel_rows(details, BIKO_IDX, set())
+    assert rows[0]["区分"] == "OK"
+
+
+# ----------------------------------------------------------------------
+# 月まとめ行の見出しに対象月を入れる
+# ----------------------------------------------------------------------
+
+def test_monthly_rollup_label_uses_the_target_month():
+    # 2026-09-01 まで "7月" が固定で埋め込まれており、8月の結果に7月と出ていた
+    master = _biko_master([("2024002", "月次", "綾瀬", "東銀座", "毎月", 8000)])
+    details = [_biko_row("通勤交通費（実費）", "2024002", "月次", "8000", "綾瀬",
+                         "東銀座", "2026/8/1")]
+    rows = build_actual_rows(details, BIKO_IDX, master, {}, "2026-08")
+    assert rows[0]["利用日"] == "(8月合計 1日分)"
+
+
+def test_monthly_rollup_label_falls_back_when_no_month_given():
+    master = _biko_master([("2024002", "月次", "綾瀬", "東銀座", "毎月", 8000)])
+    details = [_biko_row("通勤交通費（実費）", "2024002", "月次", "8000", "綾瀬",
+                         "東銀座", "2026/8/1")]
+    rows = build_actual_rows(details, BIKO_IDX, master, {})
+    assert rows[0]["利用日"] == "(当月合計 1日分)"
