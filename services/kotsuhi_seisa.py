@@ -975,18 +975,23 @@ def build_master_gap_rows(details, idx, master: CommuteMaster, workdays: dict,
     return gaps, stock
 
 
-def _commute_overlap_note(applied) -> str:
+def _commute_overlap_note(applied, on_roster: bool) -> str:
     """移動交通費の人が通勤費でも申請しているかを一言にする。
 
+    判定するのは移動交通費対象者リストに載っている人だけ（2026-09-01 谷津さん決定）。
+    リスト外の人は立替精算の対象者ではなく、常駐先へ毎日通いながら時々出張する形なので、
+    通勤費があるのはむしろ普通。参考として書くだけで要確認には数えない。
     実費は日単位、定期代は申請単位なので数え方の単位を変える。
     """
-    if not applied:
-        return "通勤費の申請なし"
     parts = []
     for kind, unit in ((KIND_ACTUAL, "日"), (KIND_PASS, "件")):
-        if kind in applied:
+        if applied and kind in applied:
             parts.append(f"{kind} {len(applied[kind])}{unit}")
-    return "通勤費でも申請している（" + "・".join(parts) + "）"
+    detail = "・".join(parts)
+    if not on_roster:
+        return (f"対象者リスト外のため判定対象外（参考: {detail}）" if detail
+                else "対象者リスト外のため判定対象外")
+    return f"通勤費でも申請している（{detail}）" if detail else "通勤費の申請なし"
 
 
 def build_travel_rows(details, idx, target_ids: set[str]) -> tuple[list[dict], list[dict]]:
@@ -994,10 +999,10 @@ def build_travel_rows(details, idx, target_ids: set[str]) -> tuple[list[dict], l
 
     見るのは「通勤費でも申請していないか」の一点だけ（2026-09-01 谷津さん指定）。
     この人たちは行き先が毎回違うため、経費そのものは管理部ではなく別の担当が確認する。
-    管理部が知る必要があるのは、立替精算で計上すべき人が通勤費側にも申請を出していないか
-    だけ。以前は対象者リストに載っていない人を要確認にしていたが、リストへの登録漏れは
-    経費の誤りではないので、判定には使わず列で見せるだけにする（上限免除の判定では
-    引き続きリストを使う）。
+    管理部が知る必要があるのは、立替精算で計上すべき人＝対象者リストに載っている人が、
+    通勤費側にも申請を出していないかだけ。以前は「リストに載っていない」ことを要確認に
+    していたが、登録漏れは経費の誤りではないので判定から外した。リスト外の人は常駐先へ
+    毎日通いながら時々出張する形が普通なので、通勤費があっても要確認にしない。
     """
     # 通勤費（定期代・実費）を出している人。ここに載る＝移動交通費と二重に出している。
     commute = defaultdict(lambda: defaultdict(set))
@@ -1048,8 +1053,8 @@ def build_travel_rows(details, idx, target_ids: set[str]) -> tuple[list[dict], l
                 "利用日数": len(acc["日"]),
                 "金額合計": acc["金額"],
                 "対象者リスト": "○" if emp in target_ids else "リスト外",
-                "区分": "要確認" if emp in commute else "OK",
-                "説明": _commute_overlap_note(commute.get(emp)),
+                "区分": "要確認" if (emp in target_ids and emp in commute) else "OK",
+                "説明": _commute_overlap_note(commute.get(emp), emp in target_ids),
             }
         )
     return summary, detail_rows

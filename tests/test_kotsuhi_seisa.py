@@ -611,8 +611,8 @@ def _actual(emp, name, date, amount="500"):
     return _biko_row("通勤交通費（実費）", emp, name, amount, "品川", "大崎", date)
 
 
-def test_travel_rows_flag_only_people_who_also_claim_commuting_cost():
-    """行き先が毎回違う人の経費は別担当が見るので、管理部は二重申請だけ見る。
+def test_travel_rows_flag_roster_members_who_also_claim_commuting_cost():
+    """立替精算で計上すべき人が通勤費側にも出していないか、それだけを見る。
 
     2026-09-01 以前は対象者リストに載っていないだけで要確認にしていたが、
     リストへの登録漏れは経費の誤りではないので判定から外した。
@@ -623,7 +623,7 @@ def test_travel_rows_flag_only_people_who_also_claim_commuting_cost():
         _actual("2024002", "二重申請", "2026/8/6"),
         _actual("2024002", "二重申請", "2026/8/7"),
     ]
-    rows, _ = build_travel_rows(details, BIKO_IDX, set())   # 2人ともリスト外
+    rows, _ = build_travel_rows(details, BIKO_IDX, {"2024001", "2024002"})
     by = {r["社員番号"]: r for r in rows}
     assert by["2024001"]["区分"] == "OK"
     assert by["2024001"]["説明"] == "通勤費の申請なし"
@@ -631,15 +631,22 @@ def test_travel_rows_flag_only_people_who_also_claim_commuting_cost():
     assert "通勤交通費（実費） 2日" in by["2024002"]["説明"]
 
 
-def test_travel_rows_flag_roster_members_too():
-    # リストに載っていても、通勤費でも出していれば知りたい（載っている＝免罪符ではない）
+def test_travel_rows_do_not_flag_people_outside_the_roster():
+    """リスト外の人は常駐先へ毎日通いながら時々出張する形が普通。
+
+    ここを要確認にすると、2026年8月の実データで11人が19人に膨らみ、
+    見なくていい人が8人混ざる（2026-09-01 谷津さん判断で案Bを採用）。
+    """
     details = [
-        _travel("2024003", "リスト上の人", "2026/8/5"),
-        _actual("2024003", "リスト上の人", "2026/8/6"),
+        _travel("2024007", "常駐＋出張", "2026/8/5"),
+        _actual("2024007", "常駐＋出張", "2026/8/6"),
     ]
-    rows, _ = build_travel_rows(details, BIKO_IDX, {"2024003"})
-    assert rows[0]["対象者リスト"] == "○"
-    assert rows[0]["区分"] == "要確認"
+    rows, _ = build_travel_rows(details, BIKO_IDX, set())
+    assert rows[0]["対象者リスト"] == "リスト外"
+    assert rows[0]["区分"] == "OK"
+    # 判定はしないが、通勤費を出している事実は参考として残す
+    assert "判定対象外" in rows[0]["説明"]
+    assert "通勤交通費（実費） 1日" in rows[0]["説明"]
 
 
 def test_travel_rows_stay_ok_for_roster_gaps_alone():
@@ -647,6 +654,7 @@ def test_travel_rows_stay_ok_for_roster_gaps_alone():
     rows, _ = build_travel_rows(details, BIKO_IDX, set())
     assert rows[0]["対象者リスト"] == "リスト外"
     assert rows[0]["区分"] == "OK"
+    assert rows[0]["説明"] == "対象者リスト外のため判定対象外"
 
 
 def test_travel_rows_count_pass_applications_by_case_not_by_day():
@@ -654,7 +662,8 @@ def test_travel_rows_count_pass_applications_by_case_not_by_day():
         _travel("2024005", "定期も出す", "2026/8/5"),
         _biko_row("通勤定期代", "2024005", "定期も出す", "8000", "綾瀬", "東銀座", "2026/8/1"),
     ]
-    rows, _ = build_travel_rows(details, BIKO_IDX, set())
+    rows, _ = build_travel_rows(details, BIKO_IDX, {"2024005"})
+    assert rows[0]["区分"] == "要確認"
     assert "通勤定期代 1件" in rows[0]["説明"]
 
 
@@ -665,8 +674,9 @@ def test_travel_rows_ignore_withdrawn_commuting_applications():
         _biko_row("通勤交通費（実費）", "2024006", "取下げ済み", "500", "品川", "大崎",
                   "2026/8/6", status="取下げ"),
     ]
-    rows, _ = build_travel_rows(details, BIKO_IDX, set())
+    rows, _ = build_travel_rows(details, BIKO_IDX, {"2024006"})
     assert rows[0]["区分"] == "OK"
+    assert rows[0]["説明"] == "通勤費の申請なし"
 
 
 # ----------------------------------------------------------------------
