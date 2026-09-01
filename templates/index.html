@@ -1791,7 +1791,7 @@
                     <b>リセットして作り直す場合は、上の「統合を実行」から従来どおり進めてください。</b>
                     追加できるのはイレギュラー経費の項目だけです（承認が遅れた経費行は作り直しが必要）。
                 </p>
-                <div id="ki-ledger-status" style="margin:6px 0; padding:8px 11px; border-radius:6px; background:#eef3fa; font-size:12px; color:#334">投入台帳を読み込み中...</div>
+                <div id="ki-addon-ledger-status" style="margin:6px 0; padding:8px 11px; border-radius:6px; background:#eef3fa; font-size:12px; color:#334">投入台帳を読み込み中...</div>
                 <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
                     <label class="field" style="gap:3px">
                         <span class="field-sub">対象月</span>
@@ -3598,7 +3598,7 @@
     }
 
     async function kiLoadImportLedger() {
-        const el = document.getElementById('ki-ledger-status');
+        const el = document.getElementById('ki-addon-ledger-status');
         if (!el) return;
         try {
             const res = await fetch('/keihi_import_ledger_status');
