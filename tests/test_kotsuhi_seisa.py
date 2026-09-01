@@ -12,6 +12,7 @@ from services.kotsuhi_seisa import (
     build_limit_over_rows,
     build_no_commute_rows,
     build_workdays,
+    collect_flagged,
     is_company_employee,
     load_limit_exempt_members,
     read_previous_keys,
@@ -506,3 +507,68 @@ def test_travel_detail_rows_carry_biko():
                          "2026/7/2", biko="客先往訪", app_biko="研修のため")]
     _summary, detail_rows = build_travel_rows(details, BIKO_IDX, set())
     assert detail_rows[0]["備考"] == "客先往訪／研修のため"
+
+
+# ----------------------------------------------------------------------
+# 要確認カード（数えた件数と、画面に出す行を一致させる）
+# ----------------------------------------------------------------------
+
+class _MultiBook:
+    """シート名 -> 行リスト（1行目が見出し）のフェイクブック。"""
+
+    def __init__(self, sheets):
+        self._sheets = sheets
+        self.sheetnames = list(sheets)
+
+    def __getitem__(self, name):
+        return _Sheet(self._sheets[name])
+
+
+def _flagged_book():
+    return _MultiBook({
+        # 判定列は確認要否。同じシートの「区分」は交通機関の種別で、意味が違う
+        "通勤費申請なし": [
+            ("社員番号", "氏名", "支給金額", "区分", "判定", "確認要否", "備考"),
+            ("2018003", "梅本 剛史", 0, "通勤定期代", "支給漏れの疑い", "要確認", None),
+            ("2019004", "佐藤 花子", 12000, "通勤定期代", "問題なし", "OK", None),
+        ],
+        "マスタ更新漏れ": [
+            ("検知区分", "社員番号", "氏名", "内容", "関係金額", "区分"),
+            ("M1", "2026015", "木村 悠樹", "マスタ未登録", 3600, "要確認"),
+        ],
+        "定期代突合": [
+            ("社員番号", "氏名", "差額", "判定", "区分"),
+            ("2024014", "千代田 昭広", 17590, "D", "要確認"),
+        ],
+        # 判定列が無いシートは件数にもカードにも入れない
+        "移動交通費": [("社員番号", "氏名"), ("2020001", "山田 太郎")],
+    })
+
+
+def test_collect_flagged_shows_every_sheet_it_counts():
+    # サマリの「要確認」の数字とカードの枚数がずれないことがこの機能の肝。
+    # 2026-09-01 に、13件と出ているのにカードが0枚という画面になった。
+    flagged, rows = collect_flagged(_flagged_book())
+    assert flagged == {"通勤費申請なし": 1, "マスタ更新漏れ": 1, "定期代突合": 1}
+    assert sum(flagged.values()) == len(rows) == 3
+    assert [r["シート"] for r in rows] == ["通勤費申請なし", "マスタ更新漏れ", "定期代突合"]
+
+
+def test_collect_flagged_drops_judgement_column_but_keeps_same_named_kubun():
+    rows = collect_flagged(_flagged_book())[1]
+    no_apply, gap = rows[0], rows[1]
+    # 確認要否は全行「要確認」なので落とす。名前が同じでも意味の違う区分は残す
+    assert "確認要否" not in no_apply
+    assert no_apply["区分"] == "通勤定期代"
+    assert no_apply["判定"] == "支給漏れの疑い"
+    assert no_apply["支給金額"] == 0        # 0円は「値なし」ではないので残す
+    assert "備考" not in no_apply           # 空セルは画面に出さない
+    # マスタ更新漏れ側では区分が判定列なので落ちる
+    assert "区分" not in gap
+    assert gap["検知区分"] == "M1"
+
+
+def test_collect_flagged_skips_sheets_without_judgement_column():
+    flagged, rows = collect_flagged(_flagged_book())
+    assert "移動交通費" not in flagged
+    assert all(r["シート"] != "移動交通費" for r in rows)

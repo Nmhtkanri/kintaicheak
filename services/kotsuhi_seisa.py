@@ -1445,6 +1445,57 @@ def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+# 承認前精査で「要確認」を数え、画面にもカードで出すシート。
+# マスタ棚卸しは差し戻し判断の対象ではないので入れない。
+FLAGGED_SHEETS = ("通勤費申請なし", "マスタ更新漏れ", "定期代突合", "実費突合",
+                  "通勤費上限超過", "移動交通費")
+
+
+def _json_cell(v):
+    """openpyxl の値を jsonify できる形にする。日付セルが混ざっても落ちないように。"""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, (int, float, str)):
+        return v
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    return str(v)
+
+
+def collect_flagged(wb):
+    """要確認の「件数」と「画面カード用の行」を1回の走査でまとめて作る。
+
+    数えたものは必ずカードにも出す。件数は全シート・カードは一部シートという作りに
+    すると、「要確認13」と出ているのにカードが0枚の画面になる（2026-09-01 に発生。
+    13件は通勤費申請なし4＋マスタ更新漏れ9で、どちらもカード対象外だった）。
+    """
+    flagged = {}
+    rows_out = []
+    for sheet in FLAGGED_SHEETS:
+        if sheet not in wb.sheetnames:
+            continue
+        rows = list(wb[sheet].iter_rows(values_only=True))
+        head = [str(c or "") for c in rows[0]] if rows else []
+        sev = "確認要否" if "確認要否" in head else ("区分" if "区分" in head else None)
+        if not sev:
+            continue
+        n = 0
+        for r in rows[1:]:
+            d = dict(zip(head, r))
+            if d.get(sev) != "要確認":
+                continue
+            n += 1
+            # 判定列は全行「要確認」なので落とす。残りはシートの列順のまま渡す
+            # （画面はこの順で項目を並べるので、列を足せば画面にも出る）。
+            rows_out.append(dict(
+                {"シート": sheet},
+                **{k: _json_cell(v) for k, v in d.items()
+                   if k and k != sev and v not in ("", None)},
+            ))
+        flagged[sheet] = n
+    return flagged, rows_out
+
+
 @dataclass
 class PreReviewResult:
     ok: bool
@@ -1457,7 +1508,7 @@ class PreReviewResult:
     new_count: int = 0
     resolved_count: int = 0
     flagged: "dict[str, int] | None" = None
-    flagged_rows: "list[dict] | None" = None   # 定期代突合・実費突合の要確認行（画面表示用）
+    flagged_rows: "list[dict] | None" = None   # FLAGGED_SHEETS の要確認行（画面表示用）
     mail_targets: int = 0
     first_run: bool = True
 
@@ -1513,18 +1564,7 @@ def run_pre_approval_review(
 
     wb = openpyxl.load_workbook(out, data_only=True, read_only=True)
     try:
-        flagged = {}
-        for sheet in ("通勤費申請なし", "マスタ更新漏れ", "定期代突合", "実費突合",
-                      "通勤費上限超過", "移動交通費"):
-            if sheet not in wb.sheetnames:
-                continue
-            rows = list(wb[sheet].iter_rows(values_only=True))
-            head = [str(c or "") for c in rows[0]] if rows else []
-            sev = "確認要否" if "確認要否" in head else ("区分" if "区分" in head else None)
-            if not sev:
-                continue
-            n = sum(1 for r in rows[1:] if dict(zip(head, r)).get(sev) == "要確認")
-            flagged[sheet] = n
+        flagged, flagged_rows = collect_flagged(wb)
         summary = {str(r[0] or ""): r[1] for r in wb["サマリ"].iter_rows(values_only=True) if r and r[0]}
     finally:
         wb.close()
@@ -1546,17 +1586,9 @@ def run_pre_approval_review(
     result.flagged = flagged
     result.mail_targets = len(mail_rows)
 
-    # 金額・経路の要確認行は画面にも返す。Excelを開かなくても差し戻し判断が
-    # できるようにするため（承認が進むたびに回す運用なので往復が回数分効く）。
-    review_cols = ("社員番号", "氏名", "利用日", "ステータス", "判定", "申請額(合計)",
-                   "申請額(日計)", "マスタ支給額", "マスタ日額", "差額", "経路判定",
-                   "申請経路", "マスタ経路", "説明", "備考", "テレワーク重複", "前回比")
-    result.flagged_rows = [
-        dict({"シート": sheet}, **{k: r[k] for k in review_cols
-                                   if k in r and r[k] not in ("", None)})
-        for sheet, rows_ in (("定期代突合", pass_rows), ("実費突合", actual_rows))
-        for r in rows_ if r.get("区分") == "要確認"
-    ]
+    # 要確認行は Excel を開かなくても判断できるよう画面にも返す（承認が進むたびに
+    # 回す運用なので、xlsxを開く往復が回数分効く）。
+    result.flagged_rows = flagged_rows
 
     log_func(f"[info] 承認状況: 承認完了 {result.approved_rows}行 / 進行中 {result.pending_rows}行")
     if result.first_run:
