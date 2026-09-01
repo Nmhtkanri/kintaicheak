@@ -6,6 +6,21 @@
 - Prefer staged, reviewable automation. Favour maintainable Python services over extending VBA where practical.
 - Preserve existing behaviour unless the requested change explicitly alters it. Explain the design, validate it, then implement it.
 
+## Commit cadence
+
+- Branch **before** starting the work, not after it. One large commit at the end makes it hard to
+  see what changed and impossible to roll back one piece.
+- Commit at each checkpoint that stands on its own:
+  1. a self-contained unit lands **and its tests pass** (a new pure function + its tests, one UI
+     component, one route wiring),
+  2. **before** a risky or wide-reaching edit, so there is a known-good point to return to,
+  3. **before** rebuilding the executable, so the build always maps to a commit.
+- Prefer several small commits over one big one, even when the pieces ship together. Merge the
+  branch when the whole change is verified.
+- Never `git add -A`. Stage explicit paths only — this worktree can hold other sessions'
+  uncommitted work (see below).
+- Commit and push only when the user asks.
+
 ## Shared-worktree safety
 
 - This worktree can be used by multiple agent sessions. Before editing, inspect `git status --short`, recent commits, and recent file modification times.
