@@ -1520,6 +1520,9 @@
                 <span id="pr-status" class="status-text"></span>
             </div>
             <div id="pr-result-area" style="display:none; margin-top:8px">
+                <!-- 対象月を取り違えると全行が「対象月外」で捨てられるのに、下のサマリは
+                     「進行中0＝見終わり」に見えてしまう。数字で気付けるようここに出す。 -->
+                <div id="pr-month-warn" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:13px; line-height:1.8"></div>
                 <div class="summary-cards" style="margin-bottom:8px">
                     <div class="summary-card"><div class="card-label">要確認</div><div class="card-value" id="pr-cnt-flagged">0</div></div>
                     <div class="summary-card"><div class="card-label">進行中(未承認)</div><div class="card-value" id="pr-cnt-pending">0</div></div>
@@ -2619,6 +2622,9 @@
                     return;
                 }
                 const s = data.stats;
+                const monthWarn = document.getElementById('pr-month-warn');
+                monthWarn.textContent = s.month_warning || '';
+                monthWarn.style.display = s.month_warning ? 'block' : 'none';
                 prRenderFlagged(data.flagged_rows || []);
                 document.getElementById('pr-cnt-flagged').textContent = s.flagged_total;
                 document.getElementById('pr-cnt-pending').textContent = s.pending_rows;
@@ -2639,8 +2645,9 @@
                 consoleEl.textContent = (data.console || []).join('\n');
                 consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
                 document.getElementById('pr-result-area').style.display = 'block';
-                document.getElementById('pr-status').textContent =
-                    s.pending_rows === 0 ? '完了（進行中の申請なし＝この月は見終わりです）' : '完了';
+                document.getElementById('pr-status').textContent = s.month_warning
+                    ? '⚠ 対象月を確認してください'
+                    : (s.pending_rows === 0 ? '完了（進行中の申請なし＝この月は見終わりです）' : '完了');
                 exRenderStepper();
             } catch (e) {
                 showError('pr-error-area', ['通信エラー: ' + e.message]);

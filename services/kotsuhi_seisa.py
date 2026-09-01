@@ -1462,6 +1462,23 @@ def _json_cell(v):
     return str(v)
 
 
+def month_mismatch_warning(month: str, target_rows: int, excluded_other_month: int) -> "str | None":
+    """対象月を取り違えた可能性が高いときだけ、画面に出す文言を返す。
+
+    対象月が1つズレると、その月の申請が1行も残らないのに「進行中の申請なし＝
+    この月は見終わりです」と表示されてしまい、成功に読める（2026-09-01、対象月を
+    2026-09 で回して 2026-08 の600行が全部「対象月外」で捨てられた）。
+    通勤費マスタ側の指摘（申請なし・マスタ更新漏れ）は申請が無くても出るので、
+    要確認の件数が0でないことは「精査できた」の根拠にならない。
+    """
+    if target_rows or not excluded_other_month:
+        return None
+    return (f"この月（{month}）の交通費申請は0件です。"
+            f"{excluded_other_month:,}行を「対象月外の利用日」として除外しました。"
+            "対象月が違いませんか？ "
+            "いま出ている要確認は通勤費マスタ側の指摘だけで、金額・経路の突合はできていません。")
+
+
 def collect_flagged(wb):
     """要確認の「件数」と「画面カード用の行」を1回の走査でまとめて作る。
 
@@ -1507,6 +1524,9 @@ class PreReviewResult:
     pending_rows: int = 0
     new_count: int = 0
     resolved_count: int = 0
+    target_rows: int = 0            # サマリの「対象明細行(承認完了+進行中)」
+    excluded_other_month: int = 0   # サマリの「除外(対象月外の利用日)」
+    month_warning: "str | None" = None
     flagged: "dict[str, int] | None" = None
     flagged_rows: "list[dict] | None" = None   # FLAGGED_SHEETS の要確認行（画面表示用）
     mail_targets: int = 0
@@ -1586,6 +1606,17 @@ def run_pre_approval_review(
     result.flagged = flagged
     result.mail_targets = len(mail_rows)
 
+    def _summary_int(key: str) -> int:
+        m = re.search(r"\d[\d,]*", str(summary.get(key) or ""))
+        return int(m.group().replace(",", "")) if m else 0
+
+    result.target_rows = _summary_int("対象明細行(承認完了+進行中)")
+    result.excluded_other_month = _summary_int("除外(対象月外の利用日)")
+    result.month_warning = month_mismatch_warning(
+        month, result.target_rows, result.excluded_other_month)
+    if result.month_warning:
+        log_func("[warn] " + result.month_warning)
+
     # 要確認行は Excel を開かなくても判断できるよう画面にも返す（承認が進むたびに
     # 回す運用なので、xlsxを開く往復が回数分効く）。
     result.flagged_rows = flagged_rows
@@ -1599,6 +1630,7 @@ def run_pre_approval_review(
         if n:
             log_func(f"[info] 要確認 {sheet}: {n}件")
     log_func(f"[info] 通勤費未登録（メール対象）: {result.mail_targets}名")
-    if result.pending_rows == 0:
+    # 対象月がズレているときは「完了」と言わない（言うと成功に読める）
+    if result.pending_rows == 0 and not result.month_warning:
         log_func("[done] 進行中の申請はありません。この月の精査は完了です")
     return result

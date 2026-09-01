@@ -61,3 +61,15 @@ def test_rows_without_a_jinjer_status_are_not_labelled_as_if_they_were_fine():
     assert "(ステータスなし)" not in html
     assert "const PR_NO_STATUS = '人単位の指摘';" in html
     assert "確認不要という意味ではありません" in html
+
+
+def test_month_mismatch_warning_has_a_place_on_screen():
+    """対象月を取り違えたときに気付ける枠。
+
+    サマリの数字だけだと「進行中0＝見終わり」に見えるので、結果エリアの先頭に
+    警告を出す。ステータス文言も「完了」と言わせない。
+    """
+    html = _html()
+    assert 'id="pr-month-warn"' in html
+    assert "monthWarn.style.display = s.month_warning ? 'block' : 'none';" in html
+    assert "'⚠ 対象月を確認してください'" in html

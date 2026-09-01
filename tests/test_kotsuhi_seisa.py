@@ -13,6 +13,7 @@ from services.kotsuhi_seisa import (
     build_no_commute_rows,
     build_workdays,
     collect_flagged,
+    month_mismatch_warning,
     is_company_employee,
     load_limit_exempt_members,
     read_previous_keys,
@@ -572,3 +573,27 @@ def test_collect_flagged_skips_sheets_without_judgement_column():
     flagged, rows = collect_flagged(_flagged_book())
     assert "移動交通費" not in flagged
     assert all(r["シート"] != "移動交通費" for r in rows)
+
+
+# ----------------------------------------------------------------------
+# 対象月の取り違え検知
+# ----------------------------------------------------------------------
+
+def test_warns_when_every_row_was_dropped_as_out_of_month():
+    # 2026-09-01、対象月を 2026-09 で回して 2026-08 の600行が全部捨てられたのに
+    # 「進行中の申請なし＝この月は見終わりです」と出て、成功に読めた。
+    msg = month_mismatch_warning("2026-09", 0, 600)
+    assert msg is not None
+    assert "2026-09" in msg and "600行" in msg
+    assert "対象月が違いませんか" in msg
+    # 要確認が0件でないことを「精査できた」と誤読させない一言を必ず添える
+    assert "金額・経路の突合はできていません" in msg
+
+
+def test_no_warning_when_the_month_actually_has_applications():
+    assert month_mismatch_warning("2026-08", 569, 31) is None
+
+
+def test_no_warning_when_there_is_simply_nothing_to_exclude():
+    # 申請が本当に0件の月（除外も0）は取り違えではないので黙る
+    assert month_mismatch_warning("2026-08", 0, 0) is None
