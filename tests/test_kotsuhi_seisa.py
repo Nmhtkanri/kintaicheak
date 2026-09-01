@@ -250,9 +250,9 @@ def _nc_row(kind, emp, date, status="承認完了"):
     return [status, kind, emp, date]
 
 
-def _nc_workdays(emp="2020001", name="山田 太郎", work=20, tw=0):
+def _nc_workdays(emp="2020001", name="山田 太郎", work=20, tw=0, tw_dates=()):
     return {emp: {"氏名": name, "出勤日数": work, "テレワーク日数": tw,
-                  "出社日数": work - tw, "テレワーク実施日": set()}}
+                  "出社日数": work - tw, "テレワーク実施日": set(tw_dates)}}
 
 
 def _nc_master(*legs):
@@ -698,3 +698,53 @@ def test_monthly_rollup_label_falls_back_when_no_month_given():
                          "東銀座", "2026/8/1")]
     rows = build_actual_rows(details, BIKO_IDX, master, {})
     assert rows[0]["利用日"] == "(当月合計 1日分)"
+
+
+# ----------------------------------------------------------------------
+# 日数不一致は「どの日が重なっているか」まで書く
+# ----------------------------------------------------------------------
+
+def _nc_actual(*dates, emp="2020001"):
+    return [_nc_row("通勤交通費（実費）", emp, d) for d in dates]
+
+
+def test_no_commute_names_the_days_that_overlap_telework():
+    """日数だけだと、どの日を見ればいいのか分からない。
+
+    2026-09-01、「実費申請がテレワーク日と重なっている疑い」とだけ出ていたため、
+    無関係な日（8/27）をテレワークだと誤解する事故が起きた。日付を名指しする。
+    """
+    got = _no_commute(_nc_actual("2026/8/1", "2026/8/5", "2026/8/7"),
+                      _nc_workdays(work=5, tw=3, tw_dates={"8/1", "8/5", "8/13"}))
+    assert got[0]["判定"] == "実費申請の日数不一致"
+    assert "重なっている日: 8/1、8/5" in got[0]["説明"]
+
+
+def test_overlap_days_are_listed_oldest_first():
+    # 文字列順だと 8/10 が 8/2 より前に来てしまうので、月日で並べていることを固定する
+    got = _no_commute(_nc_actual("2026/8/10", "2026/8/2", "2026/8/21"),
+                      _nc_workdays(work=5, tw=3, tw_dates={"8/2", "8/10", "8/21"}))
+    assert "重なっている日: 8/2、8/10、8/21" in got[0]["説明"]
+
+
+def test_no_commute_says_when_nothing_actually_overlaps_telework():
+    # 申請が多いのにテレワークと1日も重ならないなら、多い理由はテレワークではない
+    got = _no_commute(_nc_actual("2026/8/7", "2026/8/8", "2026/8/9"),
+                      _nc_workdays(work=5, tw=3, tw_dates={"8/1", "8/5", "8/13"}))
+    assert "テレワーク日との重なりは無し" in got[0]["説明"]
+    assert "重なっている日" not in got[0]["説明"]
+
+
+def test_no_commute_admits_when_the_telework_dates_are_unknown():
+    # サマリに実施日の一覧が無いブックでは日付を出せない。断定せずそう書く
+    got = _no_commute(_nc_actual("2026/8/7", "2026/8/8", "2026/8/9"),
+                      _nc_workdays(work=5, tw=3))
+    assert "日付までは特定できません" in got[0]["説明"]
+
+
+def test_no_commute_names_overlaps_even_when_applications_are_short():
+    # 申請漏れ側でも、テレワーク日に出している申請があるなら知りたい
+    got = _no_commute(_nc_actual("2026/8/1", "2026/8/7"),
+                      _nc_workdays(work=20, tw=3, tw_dates={"8/1", "8/5", "8/13"}))
+    assert "申請漏れの可能性" in got[0]["説明"]
+    assert "うちテレワーク日と重なる申請: 8/1" in got[0]["説明"]

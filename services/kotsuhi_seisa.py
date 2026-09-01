@@ -565,6 +565,18 @@ def _md(value: str) -> str:
     return f"{int(m.group(1))}/{int(m.group(2))}" if m else str(value)
 
 
+def _md_key(md: str):
+    """'8/5' → (8, 5)。日付を古い順に並べるため。想定外の表記は末尾へ送る。"""
+    m = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})\s*", str(md))
+    return (int(m.group(1)), int(m.group(2))) if m else (99, 99)
+
+
+def _overlap_text(days: list) -> str:
+    """重なった日の並び。多すぎるときは頭だけ出して残りは件数にする。"""
+    shown = "、".join(days[:8])
+    return shown + (f" 他{len(days) - 8}日" if len(days) > 8 else "")
+
+
 def _date_key(value: str):
     m = re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", str(value))
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else (0, 0, 0)
@@ -635,11 +647,27 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
         if actual > 0:
             # ここに来るのはテレワークありで式が合わない人だけ（テレワーク無しの実費申請者は
             # 上で除外済み）。どちらに振れているかで意味が変わるので向きを書き分ける。
+            # 重なっている日を名指しする（2026-09-01 谷津さん要望）。日数だけだと、どの日を
+            # 見ればいいのか分からず、無関係な日をテレワークと誤解する事故が起きた。
             judge = "実費申請の日数不一致"
-            direction = ("実費申請がテレワーク日と重なっている疑い"
-                         if actual + tw > work else "出社日の一部しか実費申請が無い（申請漏れの可能性）")
+            tw_dates = info.get("テレワーク実施日") or set()
+            overlap = sorted({_md(d) for d in actual_days.get(emp, ())} & tw_dates, key=_md_key)
+            if actual + tw > work:
+                if overlap:
+                    direction = "実費申請がテレワーク日と重なっている疑い"
+                    detail = "。重なっている日: " + _overlap_text(overlap)
+                elif tw_dates:
+                    # 重なりが1日も無いなら、多い理由はテレワークではない
+                    direction = "出社日数より実費申請が多い（テレワーク日との重なりは無し）"
+                    detail = ""
+                else:
+                    direction = "実費申請がテレワーク日と重なっている疑い"
+                    detail = "。テレワーク実施日の一覧がブックに無く、日付までは特定できません"
+            else:
+                direction = "出社日の一部しか実費申請が無い（申請漏れの可能性）"
+                detail = ("。うちテレワーク日と重なる申請: " + _overlap_text(overlap)) if overlap else ""
             note = (f"出勤{int(work)}日・テレワーク{int(tw)}日・実費申請{actual}日で"
-                    f"一致しない（{direction}）")
+                    f"一致しない（{direction}）{detail}")
             kubun_judge = "要確認"
         elif work <= 0:
             # 代表取締役や打刻申請の無い人も出勤0になる。支給漏れとは断定できない。
