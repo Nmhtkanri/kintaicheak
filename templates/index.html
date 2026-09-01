@@ -1530,8 +1530,8 @@
                 <!-- 金額・経路の要確認は画面でも見せる。差し戻し判断のたびにxlsxを開く往復を無くすため。
                      カード型（1行=1判断）。id は描画先として prRenderFlagged が参照する -->
                 <div id="pr-flagged-area" style="display:none; margin-bottom:8px">
-                    <div class="section-title" style="font-size:13px; margin-bottom:2px">金額・経路の要確認（定期代突合・実費突合）</div>
-                    <div class="hint" style="margin-bottom:4px">申請と jinjer の登録（通勤費マスタ）の言い分を並べています。差し戻すかどうかはここで判断できます。マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください。</div>
+                    <div class="section-title" style="font-size:13px; margin-bottom:2px">要確認の内訳（上の「要確認」の件数と同じ数だけ出ます）</div>
+                    <div class="hint" style="margin-bottom:4px">申請と jinjer の登録（通勤費マスタ）の言い分を並べています。差し戻すかどうかはここで判断できます。定期代・実費のほか、申請なし／マスタ更新漏れ／上限超過／移動交通費もここに出ます（並びと表記はxlsxの各シートと同じです）。</div>
                     <!-- ステータス絞り込み。中身は prPaintFlagged が実データから作る（固定のボタンは置かない） -->
                     <div class="pr-filter" id="pr-flagged-filter"></div>
                     <!-- カードを広げた分だけ枠も高くする（1画面に見えるカード数を保つため） -->
@@ -2428,7 +2428,7 @@
             A: {label: '金額一致', bg: '#efefef', edge: '#555555'},
         };
         // 1行=1判断のカード。申請/マスタの経路並記・金額差・備考・理由を面に出す
-        const cardHtml = (r) => {
+        const routeCardHtml = (r) => {
             const j = JUDGE[r['判定']] || {label: r['判定'] || '—', bg: '#eeeeee', edge: '#555555'};
             const applied = ('申請額(合計)' in r) ? r['申請額(合計)'] : r['申請額(日計)'];
             const masterAmt = ('マスタ支給額' in r) ? r['マスタ支給額'] : r['マスタ日額'];
@@ -2483,11 +2483,81 @@
                 + '<div>' + amount + '</div>'
                 + '</div>';
         };
-        // 定期／実費のグループ見出し（スクロール中も上に残す）。想定外のシート名は末尾に素で出す
-        const groups = [
-            {key: '定期代突合', label: '定期代（人単位で合算）'},
-            {key: '実費突合', label: '実費（日単位）'},
-        ];
+        // 定期代・実費以外のシートは列の顔ぶれが違う（経路も差額も無い）。
+        // シートごとに個別レイアウトを書くと列が増えたとき置いていかれるので、
+        // 見出し／金額／それ以外の3つに振り分けるだけの汎用カードで出す。
+        const PLAIN_MONEY = ['支給金額', '関係金額', '通勤費合計', 'うち定期代', 'うち実費',
+                             '上限', '超過額', '金額合計'];
+        const PLAIN_META = ['所属グループ', '利用日', 'ステータス', '申請書No.', '利用交通機関'];
+        const PLAIN_SKIP = ['シート', '社員番号', '氏名', '判定', '検知区分', '前回比'];
+        const SHEET_INFO = {
+            '通勤費申請なし':   {label: '通勤費の申請なし（人単位）', bg: '#fff6dd', edge: '#8f5600'},
+            'マスタ更新漏れ':   {label: 'jinjer通勤情報の更新漏れ',   bg: '#fdecea', edge: '#ab2318'},
+            '定期代突合':       {label: '定期代（人単位で合算）'},
+            '実費突合':         {label: '実費（日単位）'},
+            '通勤費上限超過':   {label: '通勤費の上限超過',           bg: '#fdecea', edge: '#ab2318'},
+            '移動交通費':       {label: '移動交通費（通勤以外）',     bg: '#eef5fa', edge: '#14608f'},
+        };
+
+        const plainCardHtml = (r) => {
+            const info = SHEET_INFO[r['シート']] || {};
+            const tone = {bg: info.bg || '#eef5fa', edge: info.edge || '#14608f'};
+            const isNew = r['前回比'] === '新規';
+            // 判定コードが無いシート（上限超過・移動交通費）はグループ見出しと同じ語に
+            // なるだけなのでバッジを出さない。想定外のシートのときだけシート名を出す。
+            const codes = [r['検知区分'], r['判定']].filter(Boolean).map(esc).join(' ');
+            const head = codes || (info.label ? '' : esc(r['シート']));
+            const badge = head
+                ? '<span style="display:inline-block; font-size:12px; font-weight:bold;'
+                  + ' border-radius:4px; padding:0 8px; margin-right:8px; line-height:1.7; background:'
+                  + tone.bg + '; color:' + tone.edge + '">' + head + '</span>'
+                : '';
+            const newTag = isNew
+                ? '<span style="font-size:12px; font-weight:bold; color:#ab2318; margin-left:10px">● 新規</span>'
+                : (r['前回比'] ? '<span style="font-size:12px; color:#888; margin-left:10px">'
+                                 + esc(r['前回比']) + '</span>' : '');
+            const meta = PLAIN_META.filter(k => r[k] !== undefined && r[k] !== '')
+                .map(k => esc(r[k])).join(' ・ ');
+            const bodyKeys = Object.keys(r).filter(k => PLAIN_SKIP.indexOf(k) < 0
+                && PLAIN_META.indexOf(k) < 0 && PLAIN_MONEY.indexOf(k) < 0);
+            const body = bodyKeys.length
+                ? '<div style="display:grid; grid-template-columns:max-content minmax(0,1fr);'
+                  + ' gap:7px 12px; margin-top:8px">'
+                  + bodyKeys.map(k => '<span style="color:#8a97a3">' + esc(k) + '</span><span>'
+                      + esc(r[k]) + '</span>').join('') + '</div>'
+                : '';
+            const moneyKeys = PLAIN_MONEY.filter(k => r[k] !== undefined && r[k] !== '');
+            const amount = moneyKeys.length
+                ? '<div style="display:grid; grid-template-columns:auto auto; gap:7px 10px;'
+                  + ' text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap">'
+                  + moneyKeys.map(k => '<span style="color:#8a97a3">' + esc(k) + '</span>'
+                      + (k === '超過額'
+                          ? '<b style="color:#ab2318">' + num(r[k]) + '円</b>'
+                          : '<span>' + num(r[k]) + '円</span>')).join('') + '</div>'
+                : '';
+            return '<div style="border:1px solid #dde4ea; border-left:4px solid ' + tone.edge
+                + '; border-radius:6px; padding:15px 16px; margin:12px 0; background:'
+                + (isNew ? '#fffafa' : '#ffffff') + '; font-size:12.5px; line-height:2.05; display:grid;'
+                + ' grid-template-columns:minmax(0,700px) max-content; justify-content:start;'
+                + ' gap:7px 3.5em; align-items:start">'
+                + '<div>'
+                +   '<div>' + badge + '<b>' + esc(r['氏名']) + '</b>'
+                +   '<span style="color:#888; margin-left:6px">' + esc(r['社員番号']) + '</span>'
+                +   (meta ? '<span style="color:#555; margin-left:12px">' + meta + '</span>' : '')
+                +   newTag + '</div>'
+                +   body
+                + '</div>'
+                + '<div>' + amount + '</div>'
+                + '</div>';
+        };
+
+        const ROUTE_SHEETS = ['定期代突合', '実費突合'];
+        const cardHtml = (r) => ROUTE_SHEETS.indexOf(r['シート']) >= 0
+            ? routeCardHtml(r) : plainCardHtml(r);
+
+        // グループ見出し（スクロール中も上に残す）。順番はxlsxのシート順に合わせる。
+        // 想定外のシート名は末尾に素で出す
+        const groups = Object.keys(SHEET_INFO).map(k => ({key: k, label: SHEET_INFO[k].label}));
         let html = '';
         let rest = rows.slice();
         groups.forEach(g => {
