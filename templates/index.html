@@ -136,6 +136,26 @@
             </div>
         </div>
 
+        <!-- KDX（ユニアデックス）シフト表専用。様式に関わらず固定時刻を強制適用する -->
+        <div class="upload-section" id="kdx-files-section" style="display:none">
+            <div class="section-title">
+                KDXシフト表 <span class="tag tag-opt">任意</span>
+            </div>
+            <div class="drop-zone" id="kdx-files-drop-zone" data-input="kdx_files">
+                <div class="drop-zone-inner">
+                    <div class="drop-icon">🌙</div>
+                    <p>KDXのシフト表をドラッグ&ドロップ、または</p>
+                    <label class="btn btn-secondary">
+                        ファイルを選択
+                        <input type="file" name="kdx_files" id="kdx-files-input"
+                               accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg" multiple style="display:none" disabled>
+                    </label>
+                    <p class="hint">ここに入れたファイルは <b>A1〜A6 → 9:00〜17:30</b> ／ <b>C1〜C6 → 16:30〜34:00</b> を必ず適用します。文字が入っていないPDFもこの欄へ</p>
+                </div>
+                <div class="selected-files" id="kdx-files-selected"></div>
+            </div>
+        </div>
+
         <!-- 対象年月（スケジュールアップロードモード用）-->
         <div class="upload-section" id="target-ym-section" style="display:none">
             <div class="section-title">

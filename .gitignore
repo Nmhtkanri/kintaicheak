@@ -5,6 +5,8 @@ dist/
 # build_exe_safe.py の既定の出力先（swap 前の一時ビルド）
 build_new/
 dist_new/
+# swap 時に退避した1つ前の配布物（切り戻し用）
+dist_old_*/
 *.spec
 outputs/
 uploads/

@@ -65,6 +65,7 @@ function updateSelected(files, container) {
 setupDropZone('jinjer-drop-zone', 'jinjer-input', 'jinjer-selected', false);
 setupDropZone('timesheet-drop-zone', 'timesheet-input', 'timesheet-selected', true);
 setupDropZone('shift-files-drop-zone', 'shift-files-input', 'shift-files-selected', true);
+setupDropZone('kdx-files-drop-zone', 'kdx-files-input', 'kdx-files-selected', true);
 setupDropZone('hh-drop-zone', 'hh-file-input', 'hh-selected', false);
 
 // =============================================================================
@@ -132,6 +133,8 @@ function applyModeUI(mode) {
     const jinjerInput = document.getElementById('jinjer-input');
     const timesheetInput = document.getElementById('timesheet-input');
     const shiftFilesInput = document.getElementById('shift-files-input');
+    const kdxFilesSection = document.getElementById('kdx-files-section');
+    const kdxFilesInput = document.getElementById('kdx-files-input');
     const targetYearInput = document.getElementById('target-year');
     const targetMonthInput = document.getElementById('target-month');
     const settingsSection = document.getElementById('settings-section');
@@ -178,6 +181,9 @@ function applyModeUI(mode) {
     if (targetYmSection) targetYmSection.style.display = isSchedule ? '' : 'none';
     if (shiftFilesSection) shiftFilesSection.style.display = isSchedule ? '' : 'none';
     if (shiftFilesInput) shiftFilesInput.disabled = !isSchedule;
+    // KDX専用欄。disabled を外し忘れると FormData が送らないので display と必ず対で切る
+    if (kdxFilesSection) kdxFilesSection.style.display = isSchedule ? '' : 'none';
+    if (kdxFilesInput) kdxFilesInput.disabled = !isSchedule;
     if (targetYearInput) targetYearInput.disabled = !isSchedule;
     if (targetMonthInput) targetMonthInput.disabled = !isSchedule;
     if (scheduleStepHeader) scheduleStepHeader.style.display = isSchedule ? '' : 'none';
@@ -697,6 +703,7 @@ function collectUnresolvedNames() {
 }
 
 function closeLegendModal() {
+    tplComboClose();   // body 直下の候補パネルを残さない
     legendModal.style.display = 'none';
     pendingSessionId = null;
     pendingCodeSheets = [];
@@ -1069,7 +1076,7 @@ function renderLegendRow(entry, sheetIdx, rowIdx, tmMatchedMap) {
         tplTd.appendChild(lbl);
     } else if (pendingTemplates && pendingTemplates.length) {
         // jinjer 雛形をプルダウンで選択（初期値＝自動マッチ）。選んだ雛形IDがCSVに入る。
-        tplTd.appendChild(buildTemplateSelect(entry, matched));
+        tplTd.appendChild(buildTemplateCombo(entry, matched));
     } else {
         // 雛形マスタが読めない場合は従来のタグ表示
         const tag = document.createElement('span');
@@ -1113,34 +1120,259 @@ function fmtTplTime(s) {
     return (parts.length >= 2) ? `${parts[0]}:${parts[1]}` : String(s);
 }
 
-// jinjer 雛形選択プルダウンを作る。選択値（雛形ID）が CSV の各セルに入る。
-// 初期選択: 凡例エントリの template_id > 自動マッチ結果 > （自動マッチ）
-function buildTemplateSelect(entry, matched) {
-    const sel = document.createElement('select');
-    sel.className = 'legend-template-select';
-    sel.dataset.field = 'template_id';
+// =============================================================================
+// jinjer 雛形の検索コンボボックス
+// 雛形マスタは 80 件超あり、素の <select> では目的の雛形に辿り着けない。
+// "9" と打ったら 9 時始まりが上に出る当て方にする（出勤時刻の前方一致を最優先）。
+//
+// 値の置き場は hidden input（data-field="template_id"）。collectLegendFromUI が
+// 行内の全 input を dataset.field で舐めて凡例に詰めるので、**検索用のテキスト
+// 入力には data-field を絶対に付けない**（打ちかけの文字列が凡例に混入する）。
+// =============================================================================
 
-    const auto = document.createElement('option');
-    auto.value = '';
-    auto.textContent = '（自動マッチ）';
-    sel.appendChild(auto);
+// 全角→半角・「：」→「:」・波ダッシュ統一・空白除去・小文字化。
+// クエリと照合文字列の両方をこれに通してから比べる。
+function tplNormalize(s) {
+    return String(s == null ? '' : s)
+        .normalize('NFKC')
+        .replace(/[：]/g, ':')
+        .replace(/[～〜—―]/g, '~')
+        .replace(/\s+/g, '')
+        .toLowerCase();
+}
 
-    pendingTemplates.forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = (t.id != null) ? String(t.id) : '';
-        const times = (t.start || t.end) ? `（${fmtTplTime(t.start)}〜${fmtTplTime(t.end)}）` : '';
-        opt.textContent = `${t.name || t.id}${times}`;
-        sel.appendChild(opt);
+// "09:00:00" → {pad:"09:00", trim:"9:00", minutes:540}。読めなければ null。
+// マスタは 0 埋め表記なので、"9:00" と "09:00" の両方で当てられるようにする。
+function tplTimeParts(raw) {
+    const m = /^(\d{1,2}):(\d{2})/.exec(String(raw == null ? '' : raw).trim());
+    if (!m) return null;
+    const h = parseInt(m[1], 10);
+    return {
+        pad: String(h).padStart(2, '0') + ':' + m[2],
+        trim: String(h) + ':' + m[2],
+        minutes: h * 60 + parseInt(m[2], 10),
+    };
+}
+
+// 雛形1件のスコア。大きいほど上に出す。0 なら候補から外す。
+function tplScore(t, q) {
+    if (!q) return 1;
+    const start = tplTimeParts(t.start);
+    const end = tplTimeParts(t.end);
+    const id = tplNormalize(t.id);
+    const name = tplNormalize(t.name);
+    const abbr = tplNormalize(t.abbr);
+    if (start) {
+        if (start.trim.startsWith(q) || start.pad.startsWith(q)) return 100;
+        // "9" のような時だけの入力は 9 時台をまとめて拾う（9:00 も 9:30 も 9:45 も）
+        if (/^\d{1,2}$/.test(q) && Math.floor(start.minutes / 60) === parseInt(q, 10)) return 95;
+    }
+    if (id && id === q) return 90;
+    if (id && id.startsWith(q)) return 80;
+    if (abbr && abbr.includes(q)) return 70;
+    if (end && (end.trim.startsWith(q) || end.pad.startsWith(q))) return 60;
+    if (name && name.includes(q)) return 50;
+    if (id && id.includes(q)) return 40;
+    return 0;
+}
+
+// 絞り込み＋並べ替え。同スコアは出勤時刻の早い順 → ID順。
+function filterTemplates(list, rawQuery) {
+    const q = tplNormalize(rawQuery);
+    const out = [];
+    (list || []).forEach(t => {
+        const score = tplScore(t, q);
+        if (score > 0) out.push({ t: t, score: score });
     });
+    out.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        const am = tplTimeParts(a.t.start);
+        const bm = tplTimeParts(b.t.start);
+        if (am && bm && am.minutes !== bm.minutes) return am.minutes - bm.minutes;
+        if (am && !bm) return -1;
+        if (!am && bm) return 1;
+        return String(a.t.id).localeCompare(String(b.t.id));
+    });
+    return out;
+}
+
+// 確定後にテキスト入力へ出す1行表記
+function tplLabel(t) {
+    if (!t) return '';
+    const times = (t.start || t.end) ? `${fmtTplTime(t.start)}〜${fmtTplTime(t.end)}` : '';
+    const head = t.abbr ? String(t.abbr) : (t.name || t.id);
+    return `${head}${times ? ' ' + times : ''} [${t.id}]`;
+}
+
+function tplById(id) {
+    if (id === '' || id == null) return null;
+    return pendingTemplates.find(t => String(t.id) === String(id)) || null;
+}
+
+// 候補パネルは body 直下に1つだけ作って使い回す。
+// .legend-sheet が overflow:hidden、.modal-body が overflow-y:auto なので
+// セル内に position:absolute で出すと必ずクリップされる。position:fixed で逃がす。
+let tplComboPanel = null;
+let tplComboOwner = null;      // 今パネルを開けているコンボの state
+let tplComboItems = [];        // 表示中の候補 [{t, score}]
+let tplComboActive = -1;
+
+function tplComboEnsurePanel() {
+    if (tplComboPanel) return tplComboPanel;
+    tplComboPanel = document.createElement('div');
+    tplComboPanel.className = 'tpl-combo-panel';
+    tplComboPanel.style.display = 'none';
+    // click だと入力の blur が先に走って閉じてしまうので mousedown で確定する
+    tplComboPanel.addEventListener('mousedown', ev => {
+        const item = ev.target.closest('.tpl-combo-item');
+        if (!item) return;
+        ev.preventDefault();
+        tplComboCommit(parseInt(item.dataset.idx, 10));
+    });
+    document.body.appendChild(tplComboPanel);
+    return tplComboPanel;
+}
+
+function tplComboPosition() {
+    if (!tplComboPanel || !tplComboOwner) return;
+    const r = tplComboOwner.input.getBoundingClientRect();
+    const panelH = tplComboPanel.offsetHeight || 260;
+    const below = window.innerHeight - r.bottom;
+    tplComboPanel.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 280)) + 'px';
+    tplComboPanel.style.minWidth = Math.max(260, r.width) + 'px';
+    if (below < panelH + 8 && r.top > below) {
+        tplComboPanel.style.top = Math.max(4, r.top - panelH - 2) + 'px';
+    } else {
+        tplComboPanel.style.top = (r.bottom + 2) + 'px';
+    }
+}
+
+function tplComboClose() {
+    if (tplComboPanel) tplComboPanel.style.display = 'none';
+    tplComboOwner = null;
+    tplComboItems = [];
+    tplComboActive = -1;
+}
+
+function tplComboRender(state, query) {
+    const panel = tplComboEnsurePanel();
+    tplComboOwner = state;
+    tplComboItems = filterTemplates(pendingTemplates, query);
+    tplComboActive = tplComboItems.length ? 0 : -1;
+
+    let html = '<div class="tpl-combo-item tpl-combo-auto" data-idx="-1">（自動マッチ）'
+        + '<span class="tpl-combo-note">出退勤時刻から自動で選ぶ</span></div>';
+    if (!tplComboItems.length) {
+        html += '<div class="tpl-combo-empty">該当する雛形がありません</div>';
+    } else {
+        html += tplComboItems.map((row, i) => {
+            const t = row.t;
+            const times = (t.start || t.end) ? `${fmtTplTime(t.start)}〜${fmtTplTime(t.end)}` : '';
+            return '<div class="tpl-combo-item' + (i === 0 ? ' is-active' : '') + '" data-idx="' + i + '">'
+                + '<span class="tpl-combo-abbr">' + escapeHtml(String(t.abbr || t.name || t.id)) + '</span>'
+                + '<span class="tpl-combo-time">' + escapeHtml(times) + '</span>'
+                + '<span class="tpl-combo-id">' + escapeHtml(String(t.id)) + '</span>'
+                + '</div>';
+        }).join('');
+    }
+    panel.innerHTML = html;
+    panel.style.display = 'block';
+    tplComboPosition();
+}
+
+function tplComboSetActive(delta) {
+    if (!tplComboPanel || tplComboPanel.style.display === 'none') return;
+    const nodes = Array.from(tplComboPanel.querySelectorAll('.tpl-combo-item'));
+    if (!nodes.length) return;
+    // -1（自動マッチ）〜 tplComboItems.length-1 の範囲で動かす
+    let next = tplComboActive + delta;
+    if (next < -1) next = tplComboItems.length - 1;
+    if (next > tplComboItems.length - 1) next = -1;
+    tplComboActive = next;
+    nodes.forEach(n => n.classList.toggle('is-active', parseInt(n.dataset.idx, 10) === next));
+    const cur = nodes.find(n => parseInt(n.dataset.idx, 10) === next);
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+}
+
+// idx = -1 で「（自動マッチ）」＝雛形IDを空に戻す
+function tplComboCommit(idx) {
+    const state = tplComboOwner;
+    if (!state) return;
+    if (idx === -1 || !tplComboItems[idx]) {
+        state.hidden.value = '';
+        state.input.value = '';
+    } else {
+        const t = tplComboItems[idx].t;
+        state.hidden.value = String(t.id);
+        state.input.value = tplLabel(t);
+    }
+    tplComboClose();
+    state.input.blur();
+}
+
+// jinjer 雛形の選択UIを作る。選んだ雛形IDが CSV の各セルに入る。
+// 初期選択: 凡例エントリの template_id > 自動マッチ結果 > （自動マッチ）
+function buildTemplateCombo(entry, matched) {
+    const wrap = document.createElement('span');
+    wrap.className = 'tpl-combo';
+
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.dataset.field = 'template_id';   // ← 値の唯一の置き場
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tpl-combo-input';
+    input.dataset.role = 'tpl-combo-input'; // ← data-field は付けない（凡例を汚さない）
+    input.autocomplete = 'off';
+    input.placeholder = '（自動マッチ）検索: 9:00 / 夜20 / N20';
 
     let initial = (entry && entry.template_id != null && entry.template_id !== '')
         ? String(entry.template_id) : '';
     if (!initial && matched && matched.template_id != null) {
         initial = String(matched.template_id);
     }
-    sel.value = (initial && pendingTemplates.some(t => String(t.id) === initial)) ? initial : '';
-    return sel;
+    const initialTpl = tplById(initial);
+    hidden.value = initialTpl ? String(initialTpl.id) : '';
+    input.value = initialTpl ? tplLabel(initialTpl) : '';
+
+    const state = { input: input, hidden: hidden };
+
+    input.addEventListener('focus', () => {
+        input.select();
+        tplComboRender(state, '');
+    });
+    input.addEventListener('input', () => tplComboRender(state, input.value));
+    input.addEventListener('keydown', ev => {
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); tplComboSetActive(1); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); tplComboSetActive(-1); }
+        else if (ev.key === 'Enter') { ev.preventDefault(); tplComboCommit(tplComboActive); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); tplComboRestore(state); tplComboClose(); }
+        else if (ev.key === 'Tab') { tplComboCommit(tplComboActive); }
+    });
+    // 確定していない打ちかけの文字列を残さない（選択済みに見えてしまうため）
+    input.addEventListener('blur', () => {
+        window.setTimeout(() => {
+            if (tplComboOwner === state) tplComboClose();
+            tplComboRestore(state);
+        }, 0);
+    });
+
+    wrap.appendChild(hidden);
+    wrap.appendChild(input);
+    return wrap;
 }
+
+// 表示テキストを hidden の値（＝確定値）に戻す
+function tplComboRestore(state) {
+    const t = tplById(state.hidden.value);
+    state.input.value = t ? tplLabel(t) : '';
+}
+
+// スクロール/リサイズで位置がずれるので追従させる。
+// 実際にスクロールするのは .modal-body なので capture:true で拾う必要がある。
+window.addEventListener('scroll', () => { if (tplComboOwner) tplComboPosition(); }, true);
+window.addEventListener('resize', () => { if (tplComboOwner) tplComboPosition(); });
 
 // 詳細行(日別シフト編集)から {date, code, comment} のリストを読み取る
 function readShiftsFromDetail(detailRow) {
@@ -1181,9 +1413,10 @@ function collectLegendFromUI() {
                     else if (f === 'break_minutes') obj[f] = parseInt(inp.value, 10) || 0;
                     else obj[f] = inp.value.trim();
                 });
-                // 選択した jinjer 雛形ID（プルダウン）。空＝自動マッチ。
-                const tplSel = tr.querySelector('select[data-field="template_id"]');
-                if (tplSel) obj.template_id = tplSel.value || '';
+                // 選択した jinjer 雛形ID（検索コンボの hidden）。空＝自動マッチ。
+                // select 限定にしない（コンボは hidden input で値を持つ）。
+                const tplSel = tr.querySelector('[data-field="template_id"]');
+                if (tplSel) obj.template_id = (tplSel.value || '').trim();
                 if (obj.code) legend.push(obj);
             });
         }

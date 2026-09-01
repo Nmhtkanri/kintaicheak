@@ -1488,3 +1488,46 @@ details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
     font-variant-numeric: tabular-nums;
 }
 .pr-filter-note { font-size: 12px; color: #8a97a3; }
+
+/* jinjer 雛形の検索コンボボックス（凡例レビューモーダル） --------------- */
+/* .legend-template-select は経費モードの経路選択(ki-route-choice)でも使うので残す */
+.tpl-combo {
+    display: inline-block;
+}
+/* .legend-table input[type="text"] の width:100% / text-align:center を打ち消す */
+.legend-table .tpl-combo input[type="text"].tpl-combo-input {
+    width: 230px;
+    text-align: left;
+    font-size: 12px;
+    padding: 3px 6px;
+}
+/* 候補パネルは body 直下・position:fixed。
+   .legend-sheet(overflow:hidden) と .modal-body(overflow-y:auto) のクリップを避ける。
+   z-index は .modal-overlay(1000) より上。 */
+.tpl-combo-panel {
+    position: fixed;
+    z-index: 1100;
+    max-height: 260px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    font-size: 12px;
+}
+.tpl-combo-item {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.tpl-combo-item.is-active { background: #ebf5fb; }
+.tpl-combo-item:hover { background: #f1f6fa; }
+.tpl-combo-auto { color: #555; border-bottom: 1px solid #ecf0f1; }
+.tpl-combo-note { color: #999; font-size: 11px; }
+.tpl-combo-abbr { font-weight: 600; min-width: 74px; }
+.tpl-combo-time { color: #2980b9; font-variant-numeric: tabular-nums; }
+.tpl-combo-id { color: #999; margin-left: auto; padding-left: 12px; }
+.tpl-combo-empty { padding: 8px 10px; color: #999; }

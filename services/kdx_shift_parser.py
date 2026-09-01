@@ -399,3 +399,164 @@ def parse_kdx_shift_pdf(
         len(result["employees"]), len(result["legend"]),
     )
     return result
+
+
+# =============================================================================
+# AI読み取り経路への凡例の強制適用（2026-09 の文字なしPDF対策）
+# =============================================================================
+
+# AI が返しうる表記のうち _norm_code() が拾えないもの → 代表記号。
+# 2026-09 のシフト表は文字がアウトライン化されていて構造化パースが使えず、
+# セルの文字列は Claude の画像読み取りが返した文字列になる。表記ゆれを吸収する。
+_EXTRA_CODE_ALIASES = {
+    "休": _OFF_CODE, "公": _OFF_CODE, "公休": _OFF_CODE, "希望休": _OFF_CODE,
+    "明": _AKE_CODE, "明け": _AKE_CODE, "夜勤明け": _AKE_CODE,
+    "有休": _YUKYU_CODE, "有給": _YUKYU_CODE, "年休": _YUKYU_CODE,
+    "有給休暇": _YUKYU_CODE,
+}
+
+_FILENAME_YEAR_RE = re.compile(r"(20\d{2})\s*年")
+_FILENAME_MONTH_RE = re.compile(r"(\d{1,2})\s*月")
+
+
+def normalize_kdx_code(text) -> "str | None":
+    """KDX表のセル文字列 → 代表記号。記号として解釈できなければ None。
+
+    構造化パース用の `_norm_code()` を土台に、AI読み取り経路で出うる表記ゆれ
+    （小文字 `a1`、「休」「明け」「有給」といった語）まで寄せる。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return None
+    code = _norm_code(s)
+    if code:
+        return code
+    upper = unicodedata.normalize("NFKC", s).upper()
+    code = _norm_code(upper)
+    if code:
+        return code
+    return _EXTRA_CODE_ALIASES.get(s) or _EXTRA_CODE_ALIASES.get(upper)
+
+
+def _year_month_from_filename(filename: str) -> tuple["int | None", "int | None"]:
+    """ファイル名から年月を拾う（例「KDXオペチーム9月シフト.pdf」→ (None, 9)）。"""
+    name = str(filename or "")
+    ym = _FILENAME_YEAR_RE.search(name)
+    mm = _FILENAME_MONTH_RE.search(name)
+    year = int(ym.group(1)) if ym else None
+    month = int(mm.group(1)) if mm else None
+    if month is not None and not (1 <= month <= 12):
+        month = None
+    return year, month
+
+
+def _as_int(value) -> "int | None":
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def force_kdx_code_sheet(
+    parsed: dict,
+    *,
+    filename: str,
+    target_year: "int | None" = None,
+    target_month: "int | None" = None,
+) -> dict:
+    """AI読み取り結果（code モード）に KDX の固定凡例を強制適用する。
+
+    2026-09 の勤務シフト表（`KDXオペチーム9月シフト.pdf`）は文字がすべて
+    アウトライン化されたベクターPDFで、pdfplumber でも pypdf でも1文字も
+    抽出できない（chars=0 / rect=5084 / curve=1521）。そのため
+    `is_kdx_shift_pdf()` が False になり構造化パースに乗らず、Claude の
+    画像読み取りへ回る。AI は記号グリッドは読めるが「A1＝9:00〜17:30」という
+    凡例を持たないので、`build_legend_to_template_name()` が
+    `suggest_template_id("A1") == "A1"` に落ち、**生記号がそのまま jinjer
+    スケジュールCSVのセルに書かれる**（2026-09 実例）。
+
+    この関数は AI が付けた凡例を捨て、`build_kdx_legend()` の固定凡例
+    （A系→9:00〜17:30 / C系→16:30〜34:00）に置き換える。記号の読み取り結果
+    （employees）だけを使い、時刻は一切 AI に決めさせない。
+
+    Args:
+        parsed: `parse_timesheet_smart()` が返す code モードの dict
+        filename: 画面に出す表示名
+        target_year, target_month: 画面で指定された対象年月（最優先）
+
+    Returns:
+        `parse_kdx_shift_pdf()` と同形の code_sheet ＋ `unknown_codes`
+    """
+    # --- 年月: 画面指定 > ファイル名 > AI読み取り値 ---
+    fn_year, fn_month = _year_month_from_filename(filename)
+    year = target_year if target_year is not None else (
+        fn_year if fn_year is not None else _as_int(parsed.get("year")))
+    month = target_month if target_month is not None else (
+        fn_month if fn_month is not None else _as_int(parsed.get("month")))
+
+    days_in_month = None
+    if year is not None and month is not None and 1 <= month <= 12:
+        days_in_month = calendar.monthrange(year, month)[1]
+
+    # --- 記号の正規化。読めない記号は捨てず unknown_codes に積む ---
+    seen_codes: set[str] = set()
+    unknown_codes: list[str] = []
+    employees: list[dict] = []
+    for emp in parsed.get("employees") or []:
+        if not isinstance(emp, dict):
+            continue
+        shifts: list[dict] = []
+        for shift in emp.get("shifts") or []:
+            if not isinstance(shift, dict):
+                continue
+            raw = str(shift.get("code") or "").strip()
+            code = normalize_kdx_code(raw)
+            if code:
+                seen_codes.add(code)
+            elif raw:
+                code = raw            # 捨てない。凡例確認画面で直せるように残す
+                if raw not in unknown_codes:
+                    unknown_codes.append(raw)
+            else:
+                code = ""
+            new_shift = dict(shift)
+            new_shift["code"] = code
+            # 年月が確定しているなら日付もその月に揃える（確認画面の表示用。
+            # 日の割り当ては exporter が .day しか見ないので結果は変わらない）
+            iso = _realign_shift_date(shift.get("date"), year, month, days_in_month)
+            if iso is not None:
+                new_shift["date"] = iso
+            shifts.append(new_shift)
+        employees.append({"name": emp.get("name") or "", "shifts": shifts})
+
+    legend = build_kdx_legend({}, seen_codes)
+
+    return {
+        "filename": filename,
+        "year": year,
+        "month": month,
+        "legend": legend,
+        "employees": employees,
+        "off_markers": [_OFF_CODE, _AKE_CODE],
+        "source": KDX_SOURCE,
+        "unknown_codes": unknown_codes,
+        "section_info": {
+            "section_index": None,
+            # AI読み取り経路なので曜日行の突合はできない（0/0 で「未検証」を表す）
+            "weekday_matched": 0,
+            "weekday_total": 0,
+        },
+    }
+
+
+def _realign_shift_date(raw_date, year, month, days_in_month) -> "str | None":
+    """シフトの日付を対象年月へ揃える。揃えられなければ None（元のまま）。"""
+    if year is None or month is None or days_in_month is None:
+        return None
+    try:
+        day = date.fromisoformat(str(raw_date).strip()).day
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if not (1 <= day <= days_in_month):
+        return None
+    return date(year, month, day).isoformat()

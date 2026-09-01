@@ -45,6 +45,16 @@ from services.employee_alias import (
     load_aliases_for_source,
     load_roster_for_source,
 )
+from services.kdx_shift_parser import (
+    KDX_DAY_END,
+    KDX_DAY_START,
+    KDX_NIGHT_END,
+    KDX_NIGHT_START,
+    KDX_SOURCE,
+    force_kdx_code_sheet,
+    is_kdx_shift_pdf,
+    parse_kdx_shift_pdf,
+)
 from services.multi_year_shift_parser import parse_structured_files
 
 import threading
@@ -392,8 +402,18 @@ def resolve_schedule_names():
 
 
 def _apply_single_supplemental_legend(code_sheets: list[dict]) -> list[dict]:
-    """別画像の凡例を、凡例なしのコード表へ安全に補う。"""
-    legend_sources = [sheet for sheet in code_sheets if sheet.get("legend")]
+    """別画像の凡例を、凡例なしのコード表へ安全に補う。
+
+    補完元にできるのは「系統の付いていないシート」だけ（＝別画像として渡された
+    凡例表）。KDX/BBS/UAL のような系統付きシートは常に自前の凡例を持つので、
+    ここで補完元にすると **その現場の時刻が別現場のシフトに被さる**。
+    KDX専用欄（source="kdx"）は必ず凡例を持つため、除外しないと
+    「KDX 1枚＋凡例なしの他社シフト1枚」で静かに間違ったCSVができる。
+    """
+    legend_sources = [
+        sheet for sheet in code_sheets
+        if sheet.get("legend") and not str(sheet.get("source") or "").strip()
+    ]
     legendless_employee_sheets = [
         sheet
         for sheet in code_sheets
@@ -483,6 +503,9 @@ def upload():
     mode = request.form.get("mode", "match")
     jinjer_file = request.files.get("jinjer_csv")
     timesheet_files = request.files.getlist("timesheet_files")
+    # KDX専用欄。ここに入ったファイルは様式に関わらず KDX の固定時刻
+    # （A系→9:00〜17:30 / C系→16:30〜34:00）を強制適用する。
+    kdx_files = request.files.getlist("kdx_files")
     threshold = int(request.form.get("threshold", Config.DEFAULT_THRESHOLD_MINUTES))
 
     # 多年度横並びレイアウトを構造化パースする際に使う対象年月（任意）
@@ -505,11 +528,14 @@ def upload():
         if jinjer_file and jinjer_file.filename and not allowed_file(jinjer_file.filename, "jinjer"):
             errors.append("jinjer ファイルはCSV形式のみ対応しています")
 
-    if not timesheet_files or all(f.filename == "" for f in timesheet_files):
+    # KDX欄だけに入れて実行するケースがあるので、どちらか一方にファイルがあればよい
+    valid_timesheet_files = [f for f in timesheet_files if f.filename]
+    valid_kdx_files = [f for f in kdx_files if f.filename]
+    if not valid_timesheet_files and not valid_kdx_files:
         errors.append("請求勤怠ファイルが選択されていません")
     else:
-        for f in timesheet_files:
-            if f.filename and not allowed_file(f.filename, "timesheet"):
+        for f in valid_timesheet_files + valid_kdx_files:
+            if not allowed_file(f.filename, "timesheet"):
                 errors.append(f"{f.filename} は未対応の形式です（対応: xlsx, xls, xlsb, pdf, png, jpg, jpeg）")
 
     if errors:
@@ -522,11 +548,16 @@ def upload():
         jinjer_file.save(jinjer_path)
 
     saved_timesheet_paths = []
-    valid_timesheet_files = [f for f in timesheet_files if f.filename]
     for ts_file in valid_timesheet_files:
         ts_path = os.path.join(Config.UPLOAD_FOLDER, f"ts_{uuid.uuid4().hex}_{ts_file.filename}")
         ts_file.save(ts_path)
         saved_timesheet_paths.append((ts_path, ts_file.filename))
+
+    saved_kdx_paths = []
+    for kdx_file in valid_kdx_files:
+        kdx_path = os.path.join(Config.UPLOAD_FOLDER, f"kdx_{uuid.uuid4().hex}_{kdx_file.filename}")
+        kdx_file.save(kdx_path)
+        saved_kdx_paths.append((kdx_path, kdx_file.filename))
 
     def generate():
         nonlocal saved_timesheet_paths
@@ -548,6 +579,89 @@ def upload():
             direct_dfs: list[pd.DataFrame] = []
             code_sheets: list[dict] = []  # 凡例レビュー対象
             total = len(saved_timesheet_paths)
+            parse_failures: list[str] = []
+
+            # ----- KDX専用欄（様式に関わらず固定時刻を強制適用）-----
+            # 2026-09 の勤務シフト表は文字がすべてアウトライン化されたベクターPDFで、
+            # 本文から1文字も抽出できない → is_kdx_shift_pdf() が False になり
+            # 構造化パースの入口を通れない。AI読み取りに回ると記号→時刻の凡例が
+            # 無いため、生記号 "A1"/"C4" がそのまま jinjer CSV のセルに書かれる。
+            # この欄に入れたファイルは経路に関わらず KDX の固定凡例をかぶせる。
+            for kdx_path, kdx_filename in saved_kdx_paths:
+                yield _sse_event("progress", {
+                    "message": f"KDXシフト表を解析中... ({kdx_filename})"
+                })
+                result = None
+                route = ""
+                if is_kdx_shift_pdf(kdx_path):
+                    try:
+                        result = parse_kdx_shift_pdf(kdx_path, target_year, target_month)
+                        route = "構造化解析"
+                    except Exception as e:
+                        logger.warning("KDXシフト表 %s の構造化解析に失敗: %s", kdx_filename, e)
+                        yield _sse_event("progress", {
+                            "message": f"  ⚠️ 構造化解析に失敗したためAI読み取りに切り替えます: {e}"
+                        })
+                if result is None:
+                    try:
+                        parsed = parse_timesheet_smart(kdx_path)
+                    except Exception as e:
+                        logger.error("KDXシフト表解析エラー (%s): %s", kdx_filename, e)
+                        parse_failures.append(f"{kdx_filename}: {str(e)}")
+                        yield _sse_event("progress", {
+                            "message": f"スキップ: {kdx_filename} - {str(e)}"
+                        })
+                        _safe_remove(kdx_path)
+                        continue
+                    if parsed.get("mode") != "code":
+                        msg = "記号式のシフト表として読めませんでした（時刻直書きと判定）"
+                        parse_failures.append(f"{kdx_filename}: {msg}")
+                        yield _sse_event("progress", {
+                            "message": f"スキップ: {kdx_filename} - {msg}"
+                        })
+                        _safe_remove(kdx_path)
+                        continue
+                    result = force_kdx_code_sheet(
+                        parsed, filename=kdx_filename,
+                        target_year=target_year, target_month=target_month,
+                    )
+                    route = "AI読み取り"
+
+                _safe_remove(kdx_path)
+                code_sheets.append({
+                    "filename": kdx_filename,
+                    "year": result.get("year"),
+                    "month": result.get("month"),
+                    "legend": result.get("legend") or [],
+                    "employees": result.get("employees") or [],
+                    "off_markers": result.get("off_markers") or [],
+                    # 氏名エイリアス表（スケジュール氏名エイリアス_KDX.csv）を効かせる
+                    "source": result.get("source") or KDX_SOURCE,
+                })
+                yield _sse_event("progress", {
+                    "message": (
+                        f"KDXシフト表({route}): {kdx_filename} → "
+                        f"{result.get('year')}年{result.get('month')}月 "
+                        f"従業員 {len(result.get('employees') or [])}人。"
+                        f"記号を A系→{KDX_DAY_START}〜{KDX_DAY_END} / "
+                        f"C系→{KDX_NIGHT_START}〜{KDX_NIGHT_END} に強制変換しました"
+                    )
+                })
+                if route == "AI読み取り":
+                    yield _sse_event("progress", {
+                        "message": (
+                            "  ⚠️ このPDFは文字情報が無いためAIが画像から読み取りました。"
+                            "記号と年月に読み違いがないか、次の確認画面で目視してください"
+                        )
+                    })
+                if result.get("unknown_codes"):
+                    yield _sse_event("progress", {
+                        "message": (
+                            f"  ⚠️ KDXの凡例に無い記号がありました "
+                            f"({' / '.join(result['unknown_codes'])})。"
+                            "確認画面で内容を指定してください"
+                        )
+                    })
 
             # ----- 構造化パース（多年度/月次 xlsx + KDX PDF 専用 fast path）-----
             # 構造化解析できるファイルは Claude を経由せず確定的に解析する。
@@ -616,7 +730,6 @@ def upload():
 
             # モードに応じた表示名（スケジュールアップロード時は「スケジュール」）
             parse_noun = "スケジュール" if mode == "csv_export" else "請求勤怠"
-            parse_failures = []
             for idx, (ts_path, ts_filename) in enumerate(saved_timesheet_paths, start=1):
                 yield _sse_event("progress", {
                     "message": f"{parse_noun}を解析中... ({idx}/{total}: {ts_filename})"
