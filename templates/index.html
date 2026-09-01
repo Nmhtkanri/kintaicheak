@@ -2367,8 +2367,12 @@
 
     // 絞り込みの選択肢は実データから拾う。jinjer側のステータスが増えても取りこぼさず、
     // どのボタンにも入らない行（＝画面から消える行）が出ないようにするため。
+    // 申請なし・マスタ更新漏れ・上限超過・移動交通費は人・月単位の指摘で、
+    // 個別の経費申請に紐づかないので jinjer の承認ステータスを持たない。
+    // 単に「ステータス無し」と出すと「確認不要」と読めてしまうので、そう名乗らせる。
+    const PR_NO_STATUS = '人単位の指摘';
     function prFlaggedStatusOf(r) {
-        return String(r['ステータス'] || '').trim() || '(ステータスなし)';
+        return String(r['ステータス'] || '').trim() || PR_NO_STATUS;
     }
     function prFlaggedStatusKinds() {
         const order = ['進行中', '承認完了'];   // 差し戻せる進行中を先頭に
@@ -2415,7 +2419,10 @@
                     + (k === prFlaggedStatus ? ' is-on' : '') + '" data-status="'
                     + escapeHtml(k) + '">' + escapeHtml(k)
                     + '<span class="pr-filter-n">' + n + '</span></button>';
-            }).join('') + '<span class="pr-filter-note">差し戻せるのは進行中だけです</span>';
+            }).join('')
+                + '<span class="pr-filter-note">差し戻せるのは「進行中」だけです。'
+                + '「' + PR_NO_STATUS + '」は個別の申請ではなく人・月単位の指摘なので'
+                + '差し戻す申請書がありません（確認不要という意味ではありません）</span>';
         }
         const esc = (v) => escapeHtml(String(v === undefined || v === null ? '' : v));
         const num = (v) => (v === undefined || v === null || v === '') ? '' : Number(v).toLocaleString();

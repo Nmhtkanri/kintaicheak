@@ -48,3 +48,16 @@ def test_route_sheets_use_the_route_card_and_the_rest_use_the_plain_card():
 def test_hint_no_longer_sends_the_user_to_the_xlsx_for_sheets_now_on_screen():
     # 4シートが画面に出るようになったので、旧案内文が残っていると嘘になる
     assert "マスタ更新漏れ・上限超過・申請なしの明細はxlsxで確認してください" not in _html()
+
+
+def test_rows_without_a_jinjer_status_are_not_labelled_as_if_they_were_fine():
+    """申請に紐づかない行のラベル。
+
+    以前は「(ステータスなし)」で、利用者から「経路も金額も問題ないから確認不要の
+    申請という意味か」と聞かれた。逆で、人・月単位の指摘＝差し戻す申請書が無い、
+    という意味しかない。誤読させないことをここで固定する。
+    """
+    html = _html()
+    assert "(ステータスなし)" not in html
+    assert "const PR_NO_STATUS = '人単位の指摘';" in html
+    assert "確認不要という意味ではありません" in html
