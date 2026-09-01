@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}健康診断申込テスト版{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="test-ribbon">テスト環境 / TEST ENVIRONMENT</div>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <div class="brand-mark" aria-hidden="true">＋</div>
+      <div>
+        <p class="eyebrow">Operation Hub Prototype</p>
+        <p class="brand-name">健康診断申込 / Health Check Application</p>
+      </div>
+    </div>
+  </header>
+  <main class="page-shell">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="site-footer">
+    架空データを使用したPC内テストです。メール送信・Google保存・jinjer更新は行いません。<br>
+    Local test with fictitious data. No email, Google storage, or jinjer update occurs.
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
+

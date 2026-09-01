@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}{{ fiscal_year }}年度 健康診断申込{% endblock %}
+{% block content %}
+<section class="hero">
+  <span class="status-pill">受付期間：テスト中 / Test period</span>
+  <h1>{{ fiscal_year }}年度 健康診断申込<br><span>Health Check Application</span></h1>
+  <p>受診期間：2027年4月1日～2028年3月31日<br><span>Examination period: Apr 1, 2027 – Mar 31, 2028</span></p>
+</section>
+
+{% if existing %}
+<section class="card result-card result-card--notice">
+  <div class="result-icon">✓</div>
+  <h2>このURLでは既に申込済みです</h2>
+  <p>This personal link has already been used.</p>
+  <dl class="summary-list">
+    <div><dt>受付番号 / Receipt ID</dt><dd>{{ existing.receipt_id }}</dd></div>
+    <div><dt>社員番号 / Employee ID</dt><dd>{{ existing.employee_id }}</dd></div>
+    <div><dt>健診機関 / Clinic</dt><dd>{{ existing.clinic }}</dd></div>
+    <div><dt>健診内容 / Course</dt><dd>{{ existing.course }}</dd></div>
+    {% if existing.dependent_requested %}
+    <div><dt>被扶養者 / Dependent</dt><dd>{{ existing.dependent_relationship }}・{{ existing.dependent_name }}</dd></div>
+    {% endif %}
+  </dl>
+  <a class="button button--secondary" href="{{ url_for('test_menu') }}">テスト入口へ戻る</a>
+</section>
+{% else %}
+<form id="application-form" class="form-stack" novalidate>
+  <section class="card identity-card">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Your information</p>
+        <h2>対象者情報</h2>
+      </div>
+      <span class="lock-badge">🔒 変更不可 / Locked</span>
+    </div>
+    <div class="identity-grid">
+      <div class="read-only-field">
+        <span>社員番号 / Employee ID</span>
+        <strong>{{ employee.employee_id }}</strong>
+      </div>
+      <div class="read-only-field">
+        <span>氏名 / Name</span>
+        <strong>{{ employee.name_ja }}</strong>
+        <small>{{ employee.name_en }}</small>
+      </div>
+      <div class="read-only-field read-only-field--wide">
+        <span>送付先の社用メール / Company email</span>
+        <strong>{{ employee.email }}</strong>
+      </div>
+    </div>
+    <p class="helper-text">表示内容がご本人と異なる場合は、入力せず健康診断担当者へご連絡ください。<br>
+      If this is not your information, stop and contact the health-check administrator.</p>
+  </section>
+
+  <section class="card">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Previous registration</p>
+        <h2>前年度の登録内容</h2>
+      </div>
+    </div>
+    <dl class="summary-list summary-list--green">
+      <div><dt>健診機関 / Clinic</dt><dd>{{ employee.previous_clinic }}</dd></div>
+      <div><dt>健診内容 / Course</dt><dd>{{ employee.previous_course }}</dd></div>
+    </dl>
+  </section>
+
+  <section class="card">
+    <fieldset>
+      <legend><span class="step-number">1</span>今回の申込内容 / Application option <em>必須 / Required</em></legend>
+      <div class="choice-grid">
+        <label class="choice-card">
+          <input type="radio" name="application_type" value="same" required>
+          <span class="choice-card__body">
+            <strong>前年度と同じ内容で申し込む</strong>
+            <small>Use the same clinic and course as last year</small>
+          </span>
+        </label>
+        <label class="choice-card">
+          <input type="radio" name="application_type" value="change" required>
+          <span class="choice-card__body">
+            <strong>健診機関または内容を変更する</strong>
+            <small>Change the clinic or course</small>
+          </span>
+        </label>
+      </div>
+    </fieldset>
+  </section>
+
+  <section id="change-fields" class="card is-hidden" aria-hidden="true">
+    <fieldset>
+      <legend><span class="step-number">2</span>変更内容 / Changes</legend>
+      <label class="field">
+        <span>希望する健診機関 / Preferred clinic <em>必須 / Required</em></span>
+        <select id="clinic-choice" name="clinic_choice">
+          <option value="">選択してください / Please select</option>
+          {% for clinic in clinic_options %}
+          <option value="{{ clinic }}">{{ clinic }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <div id="standard-options" class="conditional-panel is-hidden" aria-hidden="true">
+        <p class="field-label">健診オプション / Health-check options <em>1つ以上選択 / Select at least one</em></p>
+        <div class="checkbox-grid">
+          {% for option in health_options %}
+          <label class="checkbox-card">
+            <input type="checkbox" name="health_options" value="{{ option }}">
+            <span>{{ option }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div id="other-fields" class="conditional-panel is-hidden" aria-hidden="true">
+        <p class="helper-text helper-text--top">「その他」を選択した場合は、分かる範囲で入力してください。どちらも任意です。<br>
+          If you selected “Other,” enter the information if known. Both fields are optional.</p>
+        <div class="field-grid">
+          <label class="field">
+            <span>医療機関名 / Clinic name <small>任意 / Optional</small></span>
+            <input type="text" name="custom_clinic" maxlength="100" autocomplete="off" placeholder="未定の場合は空欄で構いません">
+          </label>
+          <label class="field">
+            <span>健診予定日 / Planned date <small>任意 / Optional</small></span>
+            <input type="date" name="other_planned_date" min="{{ exam_date_min }}" max="{{ exam_date_max }}">
+          </label>
+        </div>
+      </div>
+    </fieldset>
+  </section>
+
+  <section class="card">
+    <fieldset>
+      <legend><span class="step-number">3</span>被扶養者の健診 / Dependent health check</legend>
+      <label class="toggle-check">
+        <input id="dependent-requested" type="checkbox" name="dependent_requested">
+        <span><strong>被扶養者も健診にいれたい</strong><small>Include my dependent in the health check</small></span>
+      </label>
+      <div id="dependent-fields" class="conditional-panel is-hidden" aria-hidden="true">
+        <div class="field-grid">
+          <label class="field">
+            <span>対象者 / Relationship <em>必須 / Required</em></span>
+            <select name="dependent_relationship">
+              <option value="">選択してください / Please select</option>
+              <option value="妻">妻 / Wife</option>
+              <option value="夫">夫 / Husband</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>被扶養者氏名 / Dependent name <em>必須 / Required</em></span>
+            <input type="text" name="dependent_name" maxlength="100" autocomplete="off">
+          </label>
+        </div>
+      </div>
+    </fieldset>
+  </section>
+
+  <section class="card">
+    <fieldset>
+      <legend><span class="step-number">4</span>備考 / Notes</legend>
+      <label class="field">
+        <span>健康診断担当者への連絡事項 / Message to administrator</span>
+        <textarea name="remarks" maxlength="500" rows="4" placeholder="担当者への連絡があれば入力してください。"></textarea>
+        <small>健診結果や病名など、申込に不要な健康情報は入力しないでください。</small>
+      </label>
+    </fieldset>
+  </section>
+
+  <section class="card confirm-card">
+    <label class="confirm-check">
+      <input type="checkbox" name="agreement" required>
+      <span>上記の対象者情報と申込内容を確認しました。<br><small>I have confirmed the employee information and application details above.</small></span>
+    </label>
+    <div id="form-message" class="form-message" role="alert" aria-live="polite"></div>
+    <button id="submit-button" class="button button--primary button--large" type="submit">
+      この内容でテスト申込を送信する
+      <span>Submit test application</span>
+    </button>
+  </section>
+</form>
+
+<section id="success-panel" class="card result-card is-hidden" aria-hidden="true">
+  <div class="result-icon">✓</div>
+  <p class="eyebrow">Application received</p>
+  <h2>テスト申込を受け付けました</h2>
+  <p>社員番号は個別URLから会社側で確定して保存しました。</p>
+  <dl class="summary-list">
+    <div><dt>受付番号 / Receipt ID</dt><dd id="receipt-id"></dd></div>
+    <div><dt>社員番号 / Employee ID</dt><dd id="confirmed-employee-id"></dd></div>
+  </dl>
+  <div class="button-row">
+    <a class="button button--primary" href="{{ url_for('admin_view') }}">管理者用一覧で確認する</a>
+    <a class="button button--secondary" href="{{ url_for('test_menu') }}">テスト入口へ戻る</a>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if not existing %}
+<script>
+  window.healthCheckPrototype = {
+    submitUrl: {{ url_for('submit_application', token=token)|tojson }},
+    otherClinic: {{ other_clinic|tojson }}
+  };
+</script>
+<script src="{{ url_for('static', filename='application.js') }}"></script>
+{% endif %}
+{% endblock %}

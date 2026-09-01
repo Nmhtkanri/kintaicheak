@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}管理者用一覧｜健康診断申込テスト{% endblock %}
+{% block content %}
+<section class="hero hero--compact">
+  <span class="status-pill">ADMIN TEST VIEW</span>
+  <h1>管理者用 申込一覧<br><span>Administrator view</span></h1>
+  <p>実際の運用では、この一覧は管理者だけが閲覧できるGoogleスプレッドシートに相当します。</p>
+</section>
+
+<section class="metrics">
+  <article><span>対象者 / Employees</span><strong>{{ total_people }}</strong></article>
+  <article><span>回答済み / Submitted</span><strong>{{ submissions|length }}</strong></article>
+  <article><span>未回答 / Pending</span><strong>{{ total_people - submissions|length }}</strong></article>
+</section>
+
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <p class="eyebrow">Submission list</p>
+      <h2>申込データ</h2>
+    </div>
+    <div class="button-row">
+      <a class="button button--secondary" href="{{ url_for('test_menu') }}">テスト入口へ戻る</a>
+      {% if submissions %}
+      <form action="{{ url_for('reset_test_data') }}" method="post" onsubmit="return confirm('テスト回答をすべて消去してよいですか？');">
+        <button class="button button--danger" type="submit">テスト回答をリセット</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if submissions %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>受付番号</th>
+          <th>社員番号</th>
+          <th>氏名</th>
+          <th>申込</th>
+          <th>健診機関</th>
+          <th>健診内容</th>
+          <th>その他の健診予定日</th>
+          <th>被扶養者</th>
+          <th>備考</th>
+          <th>状態</th>
+          <th>受付日時</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in submissions %}
+        <tr>
+          <td><strong>{{ item.receipt_id }}</strong></td>
+          <td>{{ item.employee_id }}</td>
+          <td>{{ item.name_ja }}</td>
+          <td>{{ '前年と同じ' if item.application_type == 'same' else '変更' }}</td>
+          <td>{{ item.clinic }}</td>
+          <td>{{ item.course }}</td>
+          <td>{{ item.other_planned_date or '―' }}</td>
+          <td>
+            {% if item.dependent_requested %}
+            {{ item.dependent_relationship }}・{{ item.dependent_name }}
+            {% else %}
+            なし
+            {% endif %}
+          </td>
+          <td>{{ item.remarks or '―' }}</td>
+          <td><span class="tag tag--done">{{ item.status }}</span></td>
+          <td>{{ item.received_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <div>⌁</div>
+    <h3>まだテスト回答はありません</h3>
+    <p>テスト入口から架空の従業員を選び、申込を送信してください。</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

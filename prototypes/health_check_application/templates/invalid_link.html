@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}無効な申込URL{% endblock %}
+{% block content %}
+<section class="card result-card result-card--error">
+  <div class="result-icon">!</div>
+  <h1>申込URLが無効です</h1>
+  <p>Invalid application link.</p>
+  <p>URLが途中で切れていないか確認してください。</p>
+  <a class="button button--secondary" href="{{ url_for('test_menu') }}">テスト入口へ戻る</a>
+</section>
+{% endblock %}
+
