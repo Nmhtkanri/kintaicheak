@@ -67,6 +67,9 @@ python -m PyInstaller ^
   --hidden-import services.keihi_payroll_import ^
   --hidden-import services.keihi_summary ^
   --collect-submodules services.daicho ^
+  --collect-submodules services.health_apply ^
+  --hidden-import google.oauth2.service_account ^
+  --hidden-import google.auth.transport.requests ^
   --hidden-import win32com.client.dynamic ^
   --hidden-import pythoncom ^
   --hidden-import win32timezone ^

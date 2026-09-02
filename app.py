@@ -5177,6 +5177,408 @@ def route_haken_verify():
     return jsonify({"success": True, **result})
 
 
+# ======================================================================
+# 健康診断申込モード — Google スプレッドシートの対象者登録・回答読込（jinjer には書かない）
+# ======================================================================
+# 個人情報（社員番号・氏名・メール・申込内容）はレスポンスにだけ載せ、サーバ側には
+# 保存しない。ログにも社員番号以外を出さない。許可CSV・年度JSON・シート構成は
+# 毎リクエスト読み直す（NASの反映遅れや権限剥奪を即時に効かせる）。
+# Google への書き込みは「対象者」「監査ログ」への追記だけ（sheets_gateway が構造で止める）。
+
+
+class _HealthApplyHalt(Exception):
+    """権限・設定・シート構成の不備で処理を止めるときの内部例外（HTTP status 付き）。"""
+
+    def __init__(self, status: int, errors: list[str], **extra):
+        super().__init__("; ".join(errors))
+        self.status = status
+        self.errors = list(errors)
+        self.extra = extra
+
+
+def _health_apply_halt_response(halt: _HealthApplyHalt, **base):
+    payload = {"success": False, "errors": halt.errors}
+    payload.update(base)
+    payload.update(halt.extra)
+    return jsonify(payload), halt.status
+
+
+def health_apply_gateway(year_settings):
+    """Sheets ゲートウェイ。テストは FakeSheetsGateway に差し替える（fetch_employees_for_health の流儀）。"""
+    from services.health_apply.sheets_gateway import GoogleSheetsGateway
+
+    return GoogleSheetsGateway(
+        year_settings.spreadsheet_id,
+        Config.HEALTH_APPLY_SERVICE_ACCOUNT_JSON,
+        timeout=Config.HEALTH_APPLY_HTTP_TIMEOUT_SEC,
+    )
+
+
+def _health_apply_require_access() -> str:
+    """利用許可CSVに載っていなければ 403 で止める。戻り値は Windows ユーザー名。"""
+    from services.health_apply.access import check_access
+    from services.sap_import_ledger import current_user
+
+    user = current_user()
+    ok, reason = check_access(Config.HEALTH_APPLY_ALLOWED_USERS_CSV, user)
+    if not ok:
+        raise _HealthApplyHalt(403, [reason], forbidden=True, user=user)
+    return user
+
+
+def _health_apply_load_config():
+    """年度設定JSON（NAS）を読む。無い・壊れているは 400。"""
+    from services.health_apply.settings import SettingsError, load_year_config
+
+    try:
+        return load_year_config(Config.HEALTH_APPLY_SETTINGS_JSON)
+    except SettingsError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+
+
+def _health_apply_pick_year(config, year_param):
+    """年度を選ぶ（未指定は default_year）。登録の無い年度は 400。"""
+    from services.health_apply.settings import SettingsError
+
+    try:
+        return config.pick(year_param)
+    except SettingsError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+
+
+def _health_apply_load_year(year_param):
+    """年度設定JSON → (YearConfig, YearSettings)。不備は 400。"""
+    config = _health_apply_load_config()
+    return config, _health_apply_pick_year(config, year_param)
+
+
+def _health_apply_open_workbook(year_settings) -> dict:
+    """スプレッドシートを開き、シート構成を検証してから設定と選択肢を読む。
+
+    対象者・回答（個人情報）はここでは読まない。検証に通った後、各ルートが必要な分だけ読む。
+    """
+    from services.health_apply import schema as ha_schema
+    from services.health_apply.options import OptionCatalog
+    from services.health_apply.sheets_gateway import GatewayConfigError, GatewayError, sheet_titles
+
+    try:
+        gateway = health_apply_gateway(year_settings)
+        metadata = gateway.get_metadata()
+        titles = sheet_titles(metadata)
+        headers: dict[str, list] = {}
+        full: dict[str, list] = {}
+        for name in ha_schema.ALL_SHEETS:
+            if name not in titles:
+                continue
+            if name in (ha_schema.SHEET_SETTINGS, ha_schema.SHEET_OPTIONS):
+                values = gateway.read_values(name)
+                full[name] = values
+                headers[name] = values[0] if values else []
+            else:
+                first = gateway.read_values(name, "1:1")
+                headers[name] = first[0] if first else []
+        _, setting_rows = ha_schema.split_header(full.get(ha_schema.SHEET_SETTINGS, []))
+        settings_kv = ha_schema.settings_to_kv(setting_rows)
+        errors = ha_schema.verify_workbook(titles, headers, settings_kv, year_settings.fiscal_year)
+        if errors:
+            raise _HealthApplyHalt(400, errors, workbook={"title": metadata.get("title", ""), "sheets": titles})
+        _, option_rows = ha_schema.split_header(full.get(ha_schema.SHEET_OPTIONS, []))
+        catalog = OptionCatalog.from_rows(ha_schema.rows_to_dicts(ha_schema.OPTION_HEADERS, option_rows))
+    except GatewayConfigError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+    except GatewayError as e:
+        raise _HealthApplyHalt(500, [str(e)]) from e
+    except ha_schema.SchemaError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+    return {
+        "year": year_settings,
+        "gateway": gateway,
+        "metadata": metadata,
+        "titles": titles,
+        "settings_kv": settings_kv,
+        "catalog": catalog,
+    }
+
+
+def _health_apply_open(year_param) -> dict:
+    """権限 → 年度設定 → シート構成 の順で検査し、通ったら ctx を返す（失敗は _HealthApplyHalt）。"""
+    user = _health_apply_require_access()
+    config, year_settings = _health_apply_load_year(year_param)
+    ctx = _health_apply_open_workbook(year_settings)
+    ctx["user"] = user
+    ctx["config"] = config
+    return ctx
+
+
+def _health_apply_settings_payload(year_settings, settings_kv: dict) -> dict:
+    return {
+        "fiscal_year": year_settings.fiscal_year,
+        "previous_year": year_settings.previous_year,
+        "label": year_settings.label,
+        "spreadsheet_id_tail": year_settings.spreadsheet_id_tail,
+        "webapp_url": year_settings.webapp_url or settings_kv.get("WebアプリURL", ""),
+        "accept_from": settings_kv.get("受付開始", ""),
+        "accept_to": settings_kv.get("受付終了", ""),
+        "exam_from": settings_kv.get("受診期間開始", ""),
+        "exam_to": settings_kv.get("受診期間終了", ""),
+        "accepting": settings_kv.get("回答受付", ""),
+    }
+
+
+@app.route("/health_apply_status", methods=["GET"])
+def route_health_apply_status():
+    """接続状態。権限→年度設定→鍵→シート構成の順に見て、どこで止まったかを返す。"""
+    from services.health_apply.schema import SCHEMA_VERSION
+    from services.health_apply.settings import service_account_info
+
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "allowed_users_csv": Config.HEALTH_APPLY_ALLOWED_USERS_CSV,
+        "settings_file": {"path": Config.HEALTH_APPLY_SETTINGS_JSON, "mtime": ""},
+        "service_account": service_account_info(Config.HEALTH_APPLY_SERVICE_ACCOUNT_JSON),
+    }
+    try:
+        base["user"] = _health_apply_require_access()
+        config = _health_apply_load_config()
+        base["settings_file"]["mtime"] = config.mtime
+        base["years"] = config.year_keys()
+        year_settings = _health_apply_pick_year(config, request.args.get("year"))
+        base["year"] = year_settings.key
+        base["settings"] = _health_apply_settings_payload(year_settings, {})
+        ctx = _health_apply_open_workbook(year_settings)
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt, **base)
+    base["settings"] = _health_apply_settings_payload(year_settings, ctx["settings_kv"])
+    return jsonify({
+        "success": True,
+        **base,
+        "workbook": {
+            "title": ctx["metadata"].get("title", ""),
+            "schema_version": ctx["settings_kv"].get("スキーマ版", ""),
+            "sheets": ctx["titles"],
+        },
+        "catalog": ctx["catalog"].counts(),
+    })
+
+
+@app.route("/health_apply_responses", methods=["GET"])
+def route_health_apply_responses():
+    """対象者×回答を突き合わせて集計・一覧を返す。Google から毎回取り、サーバ側に保存しない。"""
+    from services.health_apply import schema as ha_schema
+    from services.health_apply.responses import build_report
+    from services.health_apply.sheets_gateway import GatewayError
+
+    try:
+        ctx = _health_apply_open(request.args.get("year"))
+        gateway = ctx["gateway"]
+        _, target_rows = ha_schema.split_header(gateway.read_values(ha_schema.SHEET_TARGETS))
+        _, response_rows = ha_schema.split_header(gateway.read_values(ha_schema.SHEET_RESPONSES))
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt)
+    except GatewayError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+
+    targets = ha_schema.rows_to_dicts(ha_schema.TARGET_HEADERS, target_rows)
+    responses = ha_schema.rows_to_dicts(ha_schema.RESPONSE_HEADERS, response_rows)
+    report = build_report(targets, responses, ctx["catalog"], ctx["year"].fiscal_year)
+    logger.info("health_apply_responses: year=%s targets=%d responses=%d",
+                ctx["year"].key, len(targets), len(responses))
+    return jsonify({
+        "success": True,
+        "year": ctx["year"].key,
+        "fetched_at": _now_iso(),
+        "settings": _health_apply_settings_payload(ctx["year"], ctx["settings_kv"]),
+        **report,
+    })
+
+
+def fetch_health_apply_sources(employee_ids, previous_year):
+    """jinjer から (社員プロフィール, 前年度の健診内容, 選択肢名) を取る。GET のみ・逐次。
+
+    レート制限がテナント共有なので並行させない。テストはこの関数をスタブに差し替える
+    （fetch_employees_for_health と同じ流儀）。
+    """
+    from services.health_apply import jinjer_source as ha_jinjer
+    from services.keiri_api import get_client
+
+    client = get_client()
+    profiles = ha_jinjer.fetch_profiles(client, employee_ids)
+    option_names = ha_jinjer.fetch_option_names(client)
+    previous = ha_jinjer.fetch_previous(client, employee_ids, previous_year, option_names)
+    return profiles, previous, option_names
+
+
+def _health_apply_read_rows(ctx) -> tuple[list[dict], list[dict]]:
+    """対象者・回答の行（dict）。構成検査に通った ctx でだけ呼ぶ。"""
+    from services.health_apply import schema as ha_schema
+
+    gateway = ctx["gateway"]
+    _, target_rows = ha_schema.split_header(gateway.read_values(ha_schema.SHEET_TARGETS))
+    _, response_rows = ha_schema.split_header(gateway.read_values(ha_schema.SHEET_RESPONSES))
+    return (ha_schema.rows_to_dicts(ha_schema.TARGET_HEADERS, target_rows),
+            ha_schema.rows_to_dicts(ha_schema.RESPONSE_HEADERS, response_rows))
+
+
+@app.route("/health_apply_targets_preview", methods=["POST"])
+def route_health_apply_targets_preview():
+    """社員番号の貼り付け → jinjer 取得 → 既存対象者との差分。まだ何も書かない。
+
+    結果は管理者PCのローカル（HEALTH_APPLY_SESSION_DIR）に2時間だけ置き、commit はその
+    session_id と確認語を要求する。
+    """
+    from services.health_apply import preview_store
+    from services.health_apply import targets as ha_targets
+    from services.health_apply.sheets_gateway import GatewayError
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        ctx = _health_apply_open(payload.get("year"))
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt)
+
+    ids, input_issues = ha_targets.parse_employee_ids(payload.get("employee_ids_text"))
+    if not ids:
+        return jsonify({"success": False,
+                        "errors": ["社員番号を1件以上貼り付けてください（20始まり7桁・1行1件）"]
+                        + [i.message for i in input_issues],
+                        "input_issues": [i.as_dict() for i in input_issues]}), 400
+
+    try:
+        profiles, previous_raw, _option_names = fetch_health_apply_sources(ids, ctx["year"].previous_year)
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except Exception as e:  # noqa: BLE001
+        logger.exception("health_apply_targets_preview: jinjer fetch failed")
+        return jsonify({"success": False, "errors": [f"jinjer からの取得に失敗しました: {e}"]}), 500
+    try:
+        target_rows, response_rows = _health_apply_read_rows(ctx)
+    except GatewayError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+
+    candidates = ha_targets.build_candidates(ids, profiles, previous_raw, ctx["catalog"])
+    plan = ha_targets.plan_targets(candidates, target_rows, response_rows,
+                                   ctx["year"].fiscal_year, input_issues)
+    fingerprint = ha_targets.plan_fingerprint(plan)
+    plan_dict = plan.as_dict()
+
+    preview_store.sweep_previews(Config.HEALTH_APPLY_SESSION_DIR, Config.HEALTH_APPLY_PREVIEW_TTL_HOURS)
+    session_id = preview_store.save_preview(Config.HEALTH_APPLY_SESSION_DIR, {
+        "kind": "health_apply_targets",
+        "user": ctx["user"],
+        "year": ctx["year"].key,
+        "fiscal_year": ctx["year"].fiscal_year,
+        "employee_ids": ids,
+        "fingerprint": fingerprint,
+        "confirm_phrase": plan_dict["confirm_phrase"],
+        "candidates": [c.as_dict() for c in candidates],
+    })
+    logger.info("health_apply_targets_preview: year=%s input=%d add=%d unchanged=%d conflict=%d blocked=%d",
+                ctx["year"].key, plan_dict["counts"]["input"], plan_dict["counts"]["add"],
+                plan_dict["counts"]["unchanged"], plan_dict["counts"]["conflict"], plan_dict["counts"]["blocked"])
+    return jsonify({
+        "success": True,
+        "session_id": session_id,
+        "ttl_hours": Config.HEALTH_APPLY_PREVIEW_TTL_HOURS,
+        "year": ctx["year"].key,
+        "fingerprint": fingerprint,
+        **plan_dict,
+    })
+
+
+@app.route("/health_apply_targets_commit", methods=["POST"])
+def route_health_apply_targets_commit():
+    """プレビューを Google の「対象者」へ追記し、監査ログを書き、追記後に読み直して検証する。
+
+    プレビューから時間が経つ間に Apps Script が行を更新しているかもしれないので、
+    シートを読み直して差分を再計算し、指紋が違えば 409 で止める（何も書かない）。
+    """
+    from services.health_apply import audit as ha_audit
+    from services.health_apply import preview_store
+    from services.health_apply import schema as ha_schema
+    from services.health_apply import targets as ha_targets
+    from services.health_apply.sheets_gateway import GatewayError
+
+    payload = request.get_json(silent=True) or {}
+    session_id = str(payload.get("session_id", "") or "")
+    confirm = str(payload.get("confirm", "") or "").strip()
+    try:
+        user = _health_apply_require_access()
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt)
+
+    preview = preview_store.load_preview(Config.HEALTH_APPLY_SESSION_DIR, session_id,
+                                         Config.HEALTH_APPLY_PREVIEW_TTL_HOURS)
+    if preview is None or preview.get("kind") != "health_apply_targets":
+        return jsonify({"success": False, "errors": [
+            f"プレビューが見つからないか期限（{Config.HEALTH_APPLY_PREVIEW_TTL_HOURS:g}時間）が切れています。"
+            "もう一度プレビューしてください"]}), 400
+    if str(preview.get("user", "")) != user:
+        return jsonify({"success": False, "forbidden": True,
+                        "errors": ["このプレビューは別のユーザーが作ったものです。自分でプレビューし直してください"]}), 403
+    expected = str(preview.get("confirm_phrase", ""))
+    if not confirm or confirm != expected:
+        return jsonify({"success": False,
+                        "errors": [f"確認語が違います。「{expected}」と入力してください"]}), 400
+
+    try:
+        ctx = _health_apply_open(preview.get("year"))
+        target_rows, response_rows = _health_apply_read_rows(ctx)
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt)
+    except GatewayError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+
+    candidates = [ha_targets.candidate_from_dict(d) for d in preview.get("candidates", [])]
+    plan = ha_targets.plan_targets(candidates, target_rows, response_rows, ctx["year"].fiscal_year)
+    fingerprint = ha_targets.plan_fingerprint(plan)
+    if fingerprint != str(preview.get("fingerprint", "")) or not plan.can_commit():
+        return jsonify({"success": False, "counts": plan.counts(), "can_commit": plan.can_commit(),
+                        "errors": ["プレビューの後にスプレッドシートが変わりました（追加予定の内容が一致しません）。"
+                                   "もう一度プレビューしてください"]}), 409
+
+    now = _now_iso()
+    rows = ha_targets.build_target_rows(plan, user, now)
+    added = [r.as_dict() for r in plan.by_action(ha_targets.ACTION_ADD)]
+    gateway = ctx["gateway"]
+    try:
+        gateway.append_rows(ha_schema.SHEET_TARGETS, rows)
+    except GatewayError as e:
+        return jsonify({"success": False, "errors": [f"対象者シートへの追記に失敗しました: {e}"]}), 500
+    audit_rows = ha_audit.target_register_rows(user, ctx["year"].fiscal_year, added, now, fingerprint)
+    try:
+        gateway.append_rows(ha_schema.SHEET_AUDIT, audit_rows)
+    except GatewayError as e:
+        return jsonify({"success": False, "errors": [
+            f"対象者は追記済みですが監査ログを書けませんでした: {e}"
+            "（もう一度プレビュー→登録すると、追記済みの人は「変更なし」になります）"]}), 500
+
+    # 書いた直後に読み直して、追加分が全員いることを確かめる
+    missing: list[str] = []
+    try:
+        after_rows, _ = _health_apply_read_rows(ctx)
+        present = {str(r.get("社員番号", "")).strip() for r in after_rows
+                   if str(r.get("年度", "")).strip() == ctx["year"].key}
+        missing = [c["employee_id"] for c in added if c["employee_id"] not in present]
+    except GatewayError as e:
+        logger.warning("health_apply_targets_commit: verify read failed: %s", e)
+        missing = ["（読み直しに失敗: 手でシートを確認してください）"]
+
+    preview_store.drop_preview(Config.HEALTH_APPLY_SESSION_DIR, session_id)
+    logger.info("health_apply_targets_commit: year=%s added=%d audit=%d missing=%d",
+                ctx["year"].key, len(rows), len(audit_rows), len(missing))
+    return jsonify({
+        "success": True,
+        "year": ctx["year"].key,
+        "added": len(rows),
+        "unchanged": plan.counts()["unchanged"],
+        "audit_rows": len(audit_rows),
+        "verified": len(rows) - len([m for m in missing if not m.startswith("（")]),
+        "missing": missing,
+        "fingerprint": fingerprint,
+        "registered_at": now,
+    })
+
+
 def _sse_event(event_type, data):
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 

@@ -369,6 +369,30 @@ class Config:
     # 実績: 同友会の1回分は3〜7ページ。増やすなら環境変数で。
     HEALTH_HPM_PDF_MAX_PAGES = int(os.environ.get("HEALTH_HPM_PDF_MAX_PAGES", "20"))
 
+    # ------------------------------------------------------------------
+    # 健康診断申込モード（Google スプレッドシート連携。jinjer は GET のみ・書かない）
+    # ------------------------------------------------------------------
+    # 画面も API もこの CSV に載った Windows ユーザーだけ使える（列: ユーザー名, 表示名, 備考）。
+    # 読めなければ誰も使えない（SAP台帳の書き込み許可と同じフェイルクローズ）。
+    HEALTH_APPLY_ALLOWED_USERS_CSV = os.environ.get(
+        "HEALTH_APPLY_ALLOWED_USERS_CSV", r"Z:\API連携\docs\健診申込_閲覧許可ユーザー.csv")
+    # 年度ごとのスプレッドシートID・WebアプリURL。翌年度は years に1項目足すだけ。
+    HEALTH_APPLY_SETTINGS_JSON = os.environ.get(
+        "HEALTH_APPLY_SETTINGS_JSON", r"Z:\API連携\docs\健診申込_年度設定.json")
+    # 健診専用サービスアカウントの鍵JSON。**管理者PCのローカルにだけ**置く
+    # （共有フォルダ・リポジトリ・.env（exe に同梱される）には置かない）。
+    HEALTH_APPLY_SERVICE_ACCOUNT_JSON = os.environ.get(
+        "HEALTH_APPLY_SERVICE_ACCOUNT_JSON",
+        os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(),
+                     "KintaiChecker", "health_apply", "service_account.json"))
+    # 対象者登録のプレビュー（社員番号・氏名・メールを含む）を一時保持する場所。ローカルのみ。
+    HEALTH_APPLY_SESSION_DIR = os.environ.get(
+        "HEALTH_APPLY_SESSION_DIR",
+        os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(),
+                     "KintaiChecker", "health_apply_sessions"))
+    HEALTH_APPLY_PREVIEW_TTL_HOURS = float(os.environ.get("HEALTH_APPLY_PREVIEW_TTL_HOURS", "2"))
+    HEALTH_APPLY_HTTP_TIMEOUT_SEC = float(os.environ.get("HEALTH_APPLY_HTTP_TIMEOUT_SEC", "30"))
+
     # jinjer CSV カラムマッピング候補
     # ※先頭に置くほど優先度が高い（完全一致を試みたあと部分一致）
     JINJER_COLUMN_MAPPING = {

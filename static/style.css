@@ -1179,6 +1179,7 @@ body {
 .acc-keihi    { border-left-color: #2f5597; }
 .acc-health   { border-left-color: #0e7c66; }
 .acc-haken    { border-left-color: #b45309; }
+.acc-happly   { border-left-color: #116548; }
 .icon-match    { background: #2E75B6; }
 .icon-schedule { background: #2E75B6; }
 .icon-keiri    { background: #7030a0; }
@@ -1187,6 +1188,20 @@ body {
 .icon-keihi    { background: #2f5597; }
 .icon-health   { background: #0e7c66; }
 .icon-haken    { background: #b45309; }
+.icon-happly   { background: #116548; }
+
+/* --- 健康診断申込モード: 回答一覧・対象者プレビュー --- */
+.ha-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ha-table th, .ha-table td { border: 1px solid #d7dee5; padding: 4px 6px; vertical-align: top; text-align: left; }
+.ha-table th { background: #f2f6f4; position: sticky; top: 0; white-space: nowrap; }
+.ha-row-error td { background: #fff4f4; }
+.ha-row-reanswer_pending td { background: #fff9e8; }
+.ha-row-conflict td, .ha-row-blocked td { background: #fff4f4; }
+.ha-row-unchanged td { color: #777; }
+.ha-issue { display: inline-block; margin: 1px 4px 1px 0; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.ha-issue-error { background: #fde2e2; color: #8a1f1f; }
+.ha-issue-warning { background: #fff1c7; color: #6b4d00; }
+.ha-issue-info { background: #e8f1fb; color: #1d4e89; }
 
 /* --- 健康診断HPMモード: 1人1ブロックの一覧 --- */
 .hh-person {
