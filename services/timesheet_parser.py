@@ -1133,15 +1133,22 @@ def _parse_estaffing_timesheet_csv(filepath):
         return None
 
 
-def _extract_fieldglass_name_from_filename(filepath):
-    stem = os.path.splitext(os.path.basename(filepath))[0]
-    match = re.search(r"timesheet_[A-Za-z]+[0-9]+(.+)$", stem, flags=re.IGNORECASE)
-    if not match:
-        return None
+# 「氏名_社員番号.pdf」形式（例: 太田 琢也_2025030.pdf）。FieldglassのPDF本文は
+# ローマ字氏名しか持たず（Worker Ohta, Takuya）、jinjerは漢字氏名（太田 琢也）なので
+# そのままでは突合できない。谷津さんがこの名前に付け替えて運用しているため、
+# ファイル名の氏名を優先して読む。社員番号は突合には使わず、氏名の切れ目の目印。
+# 社員番号は7桁（自社=20YY###、派遣=5/6/9始まり）。6桁を許すと「作業報告書_…_202608」の
+# ような年月付きファイル名を氏名と誤読するので、桁数はちょうど7に絞る。
+_FIELDGLASS_NAME_WITH_ID_RE = re.compile(r"^(?P<name>.+?)[_＿](?P<employee_no>\d{7})$")
 
-    tail = match.group(1)
+
+def _clean_fieldglass_name(tail):
     tail = tail.strip(" _,.-")
-    if not tail:
+    # timesheet_ERCSTS01200802… は [0-9]+ が最短1桁残すため、氏名の無いファイル名でも
+    # 末尾の数字1文字が氏名として残ってしまう（実際に氏名が「2」になっていた）。
+    # 先頭の数字を落とし、文字が1つも無ければ氏名なしとしてPDF本文へ回す。
+    tail = tail.lstrip("0123456789").strip(" _,.-")
+    if not tail or not re.search(r"[^\W\d_]", tail):
         return None
 
     if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", tail):
@@ -1151,6 +1158,18 @@ def _extract_fieldglass_name_from_filename(filepath):
     tail = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", tail)
     tail = re.sub(r"\s+", " ", tail).strip()
     return tail.upper() if tail else None
+
+
+def _extract_fieldglass_name_from_filename(filepath):
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    match = re.search(r"timesheet_[A-Za-z]+[0-9]+(.+)$", stem, flags=re.IGNORECASE)
+    if match:
+        return _clean_fieldglass_name(match.group(1))
+
+    with_id = _FIELDGLASS_NAME_WITH_ID_RE.match(stem.strip())
+    if with_id:
+        return _clean_fieldglass_name(with_id.group("name"))
+    return None
 
 
 def _is_katakana_only_name(name):
