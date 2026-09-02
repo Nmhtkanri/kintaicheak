@@ -94,7 +94,11 @@ def test_find_invoice_files_prefers_revised_and_ignores_reports(tmp_path):
     assert report.name not in " ".join(got["selected"])
 
 
-def test_build_preview_groups_main_and_commute(monkeypatch, tmp_path):
+def _preview(monkeypatch, tmp_path, *, jinjer_names=None):
+    """e-staffing の本体＋立替金PDFが1組ある状態でプレビューを作る。
+
+    jinjer は見に行かせない（部門はマスタの値、氏名は jinjer_names で差し替える）。
+    """
     month_dir = tmp_path / "会社" / "01,提出データ" / "FY2026" / "2026年7月"
     month_dir.mkdir(parents=True)
     main_path = month_dir / "【出澤信晃】御請求書_202607.pdf"
@@ -116,7 +120,14 @@ def test_build_preview_groups_main_and_commute(monkeypatch, tmp_path):
             "partner": "S＆I", "department": "SI：その他", "source": "test",
         }
     })
-    got = im.build_preview("2026-07", roots=[tmp_path / "会社"])
+    monkeypatch.setattr(im, "load_departments", lambda *a, **k: {})
+    monkeypatch.setattr(im, "load_employee_names",
+                        lambda *a, **k: dict(jinjer_names or {}))
+    return im.build_preview("2026-07", roots=[tmp_path / "会社"])
+
+
+def test_build_preview_groups_main_and_commute(monkeypatch, tmp_path):
+    got = _preview(monkeypatch, tmp_path, jinjer_names={"2017012": "出澤 信晃"})
     assert len(got["rows"]) == 2
     main, commute = got["rows"]
     assert main["管理番号"] == "2017012"
@@ -133,6 +144,28 @@ def test_build_preview_groups_main_and_commute(monkeypatch, tmp_path):
     assert commute["税額"] == 536
     assert not main["_errors"]
     assert not commute["_errors"]
+
+
+def test_employee_name_is_written_with_a_space(monkeypatch, tmp_path):
+    """freee の従業員は「姓 名」で登録されているので半角スペースを入れて出す。
+
+    氏名の元にしている年度営業実績・補正マスタは「出澤信晃」と詰まっているため、
+    姓と名を別に持っている jinjer から引く。
+    """
+    got = _preview(monkeypatch, tmp_path, jinjer_names={"2017012": "出澤 信晃"})
+    main, commute = got["rows"]
+    assert main["従業員"] == "出澤 信晃"
+    assert commute["従業員"] == "出澤 信晃", "交通費行も同じ表記で出す"
+    assert not [w for w in main["_warnings"] if "半角スペース" in w]
+
+
+def test_employee_name_falls_back_when_jinjer_is_unavailable(monkeypatch, tmp_path):
+    """jinjerが引けなくてもCSVは作れる。詰まったままだと分かるよう警告を出す。"""
+    got = _preview(monkeypatch, tmp_path, jinjer_names={})
+    main = got["rows"][0]
+    assert main["従業員"] == "出澤信晃"
+    assert any("半角スペース" in w for w in main["_warnings"])
+    assert not main["_errors"], "氏名の警告だけで出力は止めない"
 
 
 def _valid_rows():

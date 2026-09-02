@@ -3182,6 +3182,9 @@ def route_invoice_preview():
             # 経理モードが作ったキャッシュがあれば API を叩かずに済む。
             custom_items_cache=os.path.join(
                 Config.KEIRI_OUTPUT_DIR, "raw", "custom_items.json"),
+            # 従業員名も同じく jinjer（姓・名）から。こちらは従業員一覧のキャッシュ。
+            roster_cache=os.path.join(
+                Config.KEIRI_OUTPUT_DIR, "raw", "roster.json"),
             partner_master_csv=Config.INVOICE_PARTNER_MASTER_CSV,
             excluded_csv=Config.INVOICE_EXCLUDED_CSV,
             breakdown_csv=Config.INVOICE_BREAKDOWN_CSV,
