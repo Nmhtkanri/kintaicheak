@@ -96,6 +96,10 @@ let mailTemplates = [];
 let mailTemplatesLoaded = false;
 let mailDefaultCc = '';
 
+// 健康診断申込モードの状態。applyModeUI の初回実行から haLoadStatus が参照するため、
+// mailPlans と同じくここ（初回実行より前）で宣言しておくこと。
+let haState = { year: '', status: null, responses: null, filter: 'all', search: '', preview: null, forbidden: false };
+
 // =============================================================================
 // モード切替UI
 // =============================================================================
@@ -116,6 +120,7 @@ const MODE_HINTS = {
     mail:       '下書きを作り、確認してからまとめて送る',
     health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
     haken:      '四半期の派遣元管理台帳を作成し jinjer へ添付する',
+    health_apply: '健診申込の対象者を登録し、Google の回答を集計する（jinjer には書きません）',
 };
 
 // 進捗バー／エラー表示がどのモードのものかを覚えておく。
@@ -155,6 +160,7 @@ function applyModeUI(mode) {
     const mailCard = document.getElementById('mail-card');
     const healthCard = document.getElementById('health-card');
     const hakenCard = document.getElementById('haken-card');
+    const healthApplyCard = document.getElementById('ha-card');
     const sseCard = document.getElementById('sse-card');
 
     const isSchedule = mode === 'csv_export';
@@ -166,8 +172,9 @@ function applyModeUI(mode) {
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
     const isHaken = mode === 'haken';
+    const isHealthApply = mode === 'health_apply';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isInvoice && !isShaho && !isMail && !isHealthHpm && !isHaken;
+        && !isInvoice && !isShaho && !isMail && !isHealthHpm && !isHaken && !isHealthApply;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -229,6 +236,11 @@ function applyModeUI(mode) {
     if (hakenCard) {
         hakenCard.style.display = isHaken ? '' : 'none';
         if (isHaken) hakenLoadStatus();
+    }
+    // 健康診断申込モード: 申込カードのみ表示（初回表示時に接続状態を読み込む）
+    if (healthApplyCard) {
+        healthApplyCard.style.display = isHealthApply ? '' : 'none';
+        if (isHealthApply) haLoadStatus();
     }
 
     // アップロードフォーム（＝スケジュールモードの入力カード）はスケジュールモードのみ表示
@@ -5238,4 +5250,242 @@ if (hakenBuildBtn) {
             if (status) status.textContent = '';
         }
     });
+}
+
+
+// =============================================================================
+// 健康診断申込モード（Google スプレッドシート連携・jinjer には書かない）
+// =============================================================================
+// 状態は haState（ファイル先頭で宣言。初回 applyModeUI から haLoadStatus が参照する）。
+// 読み込んだ回答（個人情報）は haState に持つだけで、localStorage 等には残さない。
+
+function haEsc(s) { return escapeHtml(s == null ? '' : String(s)); }
+
+function haShowError(msg) {
+    const area = document.getElementById('ha-error-area');
+    if (!area) return;
+    if (!msg) { area.style.display = 'none'; area.textContent = ''; return; }
+    area.textContent = msg;
+    area.style.display = '';
+}
+
+function haSetForbidden(reason) {
+    haState.forbidden = !!reason;
+    const banner = document.getElementById('ha-access-banner');
+    if (banner) {
+        banner.textContent = reason || '';
+        banner.style.display = reason ? '' : 'none';
+    }
+    ['ha-responses-btn', 'ha-preview-btn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !!reason;
+    });
+}
+
+function haYear() {
+    const sel = document.getElementById('ha-year');
+    return sel && sel.value ? sel.value : (haState.year || '');
+}
+
+function haQuery(url) {
+    const year = haYear();
+    return url + (year ? `?year=${encodeURIComponent(year)}` : '');
+}
+
+async function haFetchJson(url, options) {
+    const res = await fetch(url, options);
+    let data;
+    try {
+        data = await res.json();
+    } catch (e) {
+        data = { success: false, errors: [`応答を読めません (HTTP ${res.status})`] };
+    }
+    return { res, data };
+}
+
+async function haLoadStatus() {
+    const status = document.getElementById('ha-status');
+    if (status) status.textContent = '接続状態を確認しています…';
+    haShowError('');
+    try {
+        const { data } = await haFetchJson(haQuery('/health_apply_status'));
+        haState.status = data;
+        haRenderStatus(data);
+        if (data.forbidden) {
+            haSetForbidden((data.errors || []).join(' / '));
+            return;
+        }
+        haSetForbidden('');
+        if (!data.success) haShowError((data.errors || ['接続状態を取得できませんでした']).join(' / '));
+    } catch (e) {
+        haShowError(`接続状態を取得できませんでした: ${e}`);
+    } finally {
+        if (status) status.textContent = '';
+    }
+}
+
+function haRenderStatus(data) {
+    const sel = document.getElementById('ha-year');
+    if (sel && Array.isArray(data.years)) {
+        const current = data.year || haState.year || '';
+        sel.innerHTML = data.years
+            .map(y => `<option value="${haEsc(y)}"${y === current ? ' selected' : ''}>${haEsc(y)}年度</option>`)
+            .join('');
+        haState.year = current;
+    }
+    const line = document.getElementById('ha-status-line');
+    if (!line) return;
+    const parts = [];
+    if (data.user) parts.push(`ユーザー: ${haEsc(data.user)}`);
+    if (data.workbook && data.workbook.title) parts.push(`ブック: ${haEsc(data.workbook.title)}`);
+    if (data.workbook && data.workbook.schema_version) parts.push(`スキーマ版: ${haEsc(data.workbook.schema_version)}`);
+    if (data.settings) {
+        if (data.settings.accept_from || data.settings.accept_to) {
+            parts.push(`受付期間: ${haEsc(data.settings.accept_from)} 〜 ${haEsc(data.settings.accept_to)}`);
+        }
+        if (data.settings.accepting !== undefined && data.settings.accepting !== '') {
+            parts.push(`回答受付: ${data.settings.accepting === '1' ? '受付中' : '停止中'}`);
+        }
+    }
+    if (data.catalog) {
+        parts.push(`選択肢: 機関 ${haEsc(data.catalog.institutions)} / 種別 ${haEsc(data.catalog.exam_types)} / 追加検査 ${haEsc(data.catalog.extras)}`);
+    }
+    if (data.service_account) {
+        parts.push(data.service_account.exists
+            ? `サービスアカウント: ${haEsc(data.service_account.client_email || '(client_email 不明)')}（このアドレスにスプレッドシートを編集者で共有）`
+            : `サービスアカウントの鍵JSONがありません: ${haEsc(data.service_account.path || '')}`);
+    }
+    if (data.settings_file && data.settings_file.mtime) parts.push(`年度設定JSONの更新: ${haEsc(data.settings_file.mtime)}`);
+    line.innerHTML = parts.join('<br>');
+}
+
+function haOptionText(o) {
+    return o ? haEsc(o.name || o.code || '') : '';
+}
+
+function haIssuesHtml(issues) {
+    return (issues || [])
+        .map(i => `<span class="ha-issue ha-issue-${haEsc(i.level)}">${haEsc(i.message)}</span>`)
+        .join('');
+}
+
+function haRowMatches(row) {
+    const f = haState.filter || 'all';
+    if (f === 'pending') {
+        if (!['unsent', 'sent_not_accessed', 'accessed_only'].includes(row.bucket)) return false;
+    } else if (f !== 'all' && row.bucket !== f) {
+        return false;
+    }
+    const q = (haState.search || '').trim().toLowerCase();
+    if (!q) return true;
+    return String(row.employee_id || '').includes(q) || String(row.name || '').toLowerCase().includes(q);
+}
+
+function haRenderResponseSummary(data) {
+    const c = data.counts || {};
+    const map = {
+        targets: 'ha-cnt-targets', unsent: 'ha-cnt-unsent', sent_not_accessed: 'ha-cnt-sent',
+        accessed_only: 'ha-cnt-accessed', answered: 'ha-cnt-answered',
+        reanswer_pending: 'ha-cnt-reanswer', error: 'ha-cnt-error',
+    };
+    Object.keys(map).forEach(k => {
+        const el = document.getElementById(map[k]);
+        if (el) el.textContent = c[k] != null ? c[k] : 0;
+    });
+    const wb = document.getElementById('ha-workbook-issues');
+    if (wb) {
+        const issues = data.workbook_issues || [];
+        wb.innerHTML = issues.length
+            ? `<div class="alert alert-warning" style="margin:6px 0"><b>シート全体の指摘</b>`
+              + `<ul style="margin:4px 0 0; padding-left:20px">${issues.map(i => `<li>${haEsc(i.message)}</li>`).join('')}</ul></div>`
+            : '';
+    }
+}
+
+function haPaintResponseTable() {
+    const body = document.getElementById('ha-resp-body');
+    const countEl = document.getElementById('ha-resp-count');
+    if (!body) return;
+    const rows = (haState.responses && haState.responses.rows) || [];
+    const shown = rows.filter(haRowMatches);
+    body.innerHTML = shown.map(row => {
+        const t = row.target || {};
+        const l = row.latest;
+        const dep = (l && l.dependent && l.dependent.requested)
+            ? `${haEsc(l.dependent.relationship)} ${haEsc(l.dependent.name)}` : '';
+        const inst = l ? (haOptionText(l.institution) + (l.other_institution ? `（${haEsc(l.other_institution)}）` : '')) : '';
+        const history = row.history_count > 1 ? `<br><small>回答 ${haEsc(row.history_count)} 回</small>` : '';
+        return `<tr class="ha-row-${haEsc(row.bucket)}">`
+            + `<td>${haEsc(row.bucket_label || row.bucket)}</td>`
+            + `<td>${haEsc(row.employee_id)}</td>`
+            + `<td>${haEsc(row.name)}</td>`
+            + `<td>${haEsc(t.enrollment_label || '')}</td>`
+            + `<td>${l ? haEsc(l.kind_label) : ''}</td>`
+            + `<td>${inst}</td>`
+            + `<td>${l ? haOptionText(l.exam_type) : ''}</td>`
+            + `<td>${l ? (l.extras || []).map(haOptionText).join('、') : ''}</td>`
+            + `<td>${dep}</td>`
+            + `<td>${l ? haEsc(l.other_date) : ''}</td>`
+            + `<td>${l ? haEsc(l.receipt) : haEsc(t.receipt || '')}${history}</td>`
+            + `<td>${l ? haEsc(l.answered_at) : ''}</td>`
+            + `<td>${l ? haEsc(l.remarks) : ''}</td>`
+            + `<td>${haIssuesHtml(row.issues)}</td>`
+            + '</tr>';
+    }).join('');
+    if (countEl) countEl.textContent = `${shown.length} / ${rows.length} 件を表示`;
+}
+
+async function haLoadResponses() {
+    if (haState.forbidden) return;
+    const btn = document.getElementById('ha-responses-btn');
+    const status = document.getElementById('ha-responses-status');
+    const area = document.getElementById('ha-responses-area');
+    haShowError('');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Google から回答を読み込んでいます…';
+    let done = false;
+    try {
+        const { data } = await haFetchJson(haQuery('/health_apply_responses'));
+        if (data.forbidden) {
+            haSetForbidden((data.errors || []).join(' / '));
+            return;
+        }
+        if (!data.success) {
+            haShowError((data.errors || ['回答を読み込めませんでした']).join(' / '));
+            return;
+        }
+        haState.responses = data;
+        haRenderResponseSummary(data);
+        haPaintResponseTable();
+        if (area) area.style.display = '';
+        if (status) status.textContent = `取得: ${data.fetched_at || ''}`;
+        done = true;
+    } catch (e) {
+        haShowError(`回答を読み込めませんでした: ${e}`);
+    } finally {
+        if (btn && !haState.forbidden) btn.disabled = false;
+        if (status && !done) status.textContent = '';
+    }
+}
+
+// --- イベント配線（要素が無いページでは何もしない） ---
+{
+    const haYearSel = document.getElementById('ha-year');
+    if (haYearSel) {
+        haYearSel.addEventListener('change', () => {
+            haState.year = haYearSel.value;
+            haState.responses = null;
+            const area = document.getElementById('ha-responses-area');
+            if (area) area.style.display = 'none';
+            haLoadStatus();
+        });
+    }
+    const haReloadBtn = document.getElementById('ha-reload-btn');
+    if (haReloadBtn) haReloadBtn.addEventListener('click', haLoadStatus);
+    const haRespBtn = document.getElementById('ha-responses-btn');
+    if (haRespBtn) haRespBtn.addEventListener('click', haLoadResponses);
+    const haFilter = document.getElementById('ha-resp-filter');
+    if (haFilter) haFilter.addEventListener('change', () => { haState.filter = haFilter.value; haPaintResponseTable(); });
+    const haSearch = document.getElementById('ha-resp-search');
+    if (haSearch) haSearch.addEventListener('input', () => { haState.search = haSearch.value; haPaintResponseTable(); });
 }

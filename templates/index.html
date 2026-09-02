@@ -46,6 +46,10 @@
             <input type="radio" name="mode" value="haken">
             <span class="mode-tab-face">派遣台帳</span>
         </label>
+        <label class="mode-tab" title="健康診断申込の対象者登録と回答集計（Googleスプレッドシート連携・jinjerには書きません）">
+            <input type="radio" name="mode" value="health_apply">
+            <span class="mode-tab-face">健診申込</span>
+        </label>
         <span class="mode-tabs-hint" id="mode-bar-hint"></span>
     </div>
 
@@ -1388,6 +1392,94 @@
             <pre id="hh-console" style="display:none; margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:12px; white-space:pre-wrap"></pre>
         </div>
         <div id="hh-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
+    </div>
+
+    <div class="workflow-card mode-accent acc-happly" id="ha-card" style="display:none">
+        <div class="card-head">
+            <span class="card-icon icon-happly">📝</span>
+            <div>
+                <div class="card-title">
+                    健康診断申込（Google スプレッドシート連携）
+                    <span class="tag tag-safe">jinjer には書きません・Google の対象者と監査ログにだけ書きます</span>
+                </div>
+                <p class="card-lead">年度別スプレッドシートの回答を読み込んで集計し、対象者を jinjer から取って登録します。</p>
+            </div>
+        </div>
+
+        <div id="ha-access-banner" class="alert alert-error" style="display:none; margin:10px 0"></div>
+
+        <div class="alert alert-warning" style="margin:10px 0">
+            <b>このモードの約束事</b>
+            <ul style="margin:6px 0 0; padding-left:20px">
+                <li>読み込んだ回答は画面に出すだけで、<b>サーバや共有フォルダには保存しません</b>（毎回 Google から取り直します）。</li>
+                <li>「初回アクセス日時」はメールのセキュリティ検査でも付くことがあるので、<b>本人が見た証拠にはしません</b>。</li>
+                <li>回答は上書きされず<b>追記</b>されます（回答版が増えます）。訂正は Google 側で「再回答待ち」に戻してから、同じURLで再回答してもらいます。</li>
+                <li>Google への書き込み先は「対象者」「監査ログ」だけです。「回答」「選択肢」「設定」には書きません。</li>
+            </ul>
+        </div>
+
+        <div class="upload-section">
+            <div class="section-title">年度と接続状態</div>
+            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
+                <label class="field" style="margin:0; min-width:160px">
+                    <span class="field-label">年度</span>
+                    <select id="ha-year"></select>
+                </label>
+                <button type="button" class="btn btn-secondary" id="ha-reload-btn">状態を読み直す</button>
+                <span id="ha-status" class="status-text"></span>
+            </div>
+            <div id="ha-status-line" class="hint" style="margin-top:8px"></div>
+        </div>
+
+        <div class="actions">
+            <button type="button" class="btn btn-primary btn-run-main" id="ha-responses-btn">① 回答を読み込む（Google から取得・保存しません）</button>
+            <span id="ha-responses-status" class="status-text"></span>
+        </div>
+
+        <div id="ha-responses-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+            <div class="summary-cards" style="margin-bottom:8px">
+                <div class="summary-card"><div class="card-label">対象者</div><div class="card-value" id="ha-cnt-targets">0</div></div>
+                <div class="summary-card"><div class="card-label">未送信</div><div class="card-value" id="ha-cnt-unsent">0</div></div>
+                <div class="summary-card"><div class="card-label">送信済み・未アクセス</div><div class="card-value" id="ha-cnt-sent">0</div></div>
+                <div class="summary-card"><div class="card-label">URLが開かれた記録あり・未回答</div><div class="card-value" id="ha-cnt-accessed">0</div></div>
+                <div class="summary-card"><div class="card-label">回答済み</div><div class="card-value" id="ha-cnt-answered">0</div></div>
+                <div class="summary-card card-caution"><div class="card-label">再回答待ち</div><div class="card-value" id="ha-cnt-reanswer">0</div></div>
+                <div class="summary-card card-ng"><div class="card-label">取込不可</div><div class="card-value" id="ha-cnt-error">0</div></div>
+            </div>
+            <div id="ha-workbook-issues"></div>
+            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin:8px 0">
+                <label class="field" style="margin:0">
+                    <span class="field-label">絞り込み</span>
+                    <select id="ha-resp-filter">
+                        <option value="all">すべて</option>
+                        <option value="error">取込不可</option>
+                        <option value="answered">回答済み</option>
+                        <option value="reanswer_pending">再回答待ち</option>
+                        <option value="pending">未回答（未送信・未アクセスを含む）</option>
+                        <option value="invalid">無効</option>
+                    </select>
+                </label>
+                <label class="field" style="margin:0">
+                    <span class="field-label">検索（社員番号・氏名）</span>
+                    <input type="text" id="ha-resp-search" placeholder="例: 2018 / 山田">
+                </label>
+                <span id="ha-resp-count" class="status-text"></span>
+            </div>
+            <div style="max-height:560px; overflow:auto">
+                <table class="ha-table" id="ha-resp-table">
+                    <thead>
+                        <tr>
+                            <th>状態</th><th>社員番号</th><th>氏名</th><th>在籍</th><th>申込</th>
+                            <th>健診機関</th><th>健診種別</th><th>追加検査</th><th>被扶養者</th><th>予定日</th>
+                            <th>受付番号</th><th>回答日時</th><th>備考</th><th>指摘</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ha-resp-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="ha-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 
     <div class="workflow-card mode-accent acc-expense" id="expense-card" style="display:none">

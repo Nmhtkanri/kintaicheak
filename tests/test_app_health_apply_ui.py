@@ -1,0 +1,87 @@
+# -*- coding: utf-8 -*-
+"""健康診断申込モードの画面配線（タブ・カード・script.js・CSS）。
+
+インライン script に ha- が混ざると全ボタンが死ぬ事故につながるので、ここで機械的に止める。
+"""
+
+import pathlib
+import re
+import shutil
+import subprocess
+
+import pytest
+
+import app as app_module
+
+STATIC = pathlib.Path(app_module.__file__).parent / "static"
+
+
+def _html():
+    return app_module.app.test_client().get("/").get_data(as_text=True)
+
+
+def _script_js():
+    return (STATIC / "script.js").read_text(encoding="utf-8")
+
+
+def _style_css():
+    return (STATIC / "style.css").read_text(encoding="utf-8")
+
+
+def test_index_has_health_apply_tab_and_card():
+    html = _html()
+    assert 'value="health_apply"' in html
+    assert "健診申込" in html
+    for el_id in ("ha-card", "ha-access-banner", "ha-year", "ha-reload-btn", "ha-status-line",
+                  "ha-responses-btn", "ha-responses-area", "ha-cnt-targets", "ha-cnt-error",
+                  "ha-workbook-issues", "ha-resp-filter", "ha-resp-search", "ha-resp-body", "ha-error-area"):
+        assert f'id="{el_id}"' in html, el_id
+    assert 'class="workflow-card mode-accent acc-happly" id="ha-card" style="display:none"' in html
+
+
+def test_card_promises_no_jinjer_write_and_no_local_copy():
+    html = _html()
+    start = html.index('id="ha-card"')
+    end = html.index('id="expense-card"')
+    card = html[start:end]
+    assert "jinjer には書きません" in card
+    assert "保存しません" in card
+    assert "本人が見た証拠にはしません" in card
+
+
+def test_script_js_wires_mode_and_routes():
+    js = _script_js()
+    assert "health_apply: '" in js                       # MODE_HINTS
+    assert "const isHealthApply = mode === 'health_apply';" in js
+    assert "&& !isHealthApply" in js                     # isMatch から除外
+    assert "healthApplyCard.style.display = isHealthApply ? '' : 'none';" in js
+    assert "if (isHealthApply) haLoadStatus();" in js
+    for fn in ("function haLoadStatus", "function haRenderStatus", "function haLoadResponses",
+               "function haPaintResponseTable", "function haSetForbidden", "function haShowError"):
+        assert fn in js, fn
+    assert "'/health_apply_status'" in js
+    assert "'/health_apply_responses'" in js
+
+
+def test_ha_state_is_declared_before_first_apply_mode_ui():
+    """let 変数は applyModeUI の初回実行より前に宣言しないと TDZ で全ボタンが死ぬ。"""
+    js = _script_js()
+    assert js.index("let haState = {") < js.index("function applyModeUI(mode)")
+
+
+def test_no_ha_code_in_inline_scripts():
+    html = _html()
+    inline = "".join(m.group(1) for m in re.finditer(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S))
+    assert "ha-" not in inline
+    assert "haLoadStatus" not in inline
+
+
+def test_style_has_accent_and_table_classes():
+    css = _style_css()
+    assert ".acc-happly" in css and ".icon-happly" in css
+    assert ".ha-table" in css and ".ha-issue-error" in css
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node が無い環境では構文検査を飛ばす")
+def test_script_js_parses():
+    subprocess.run(["node", "--check", str(STATIC / "script.js")], check=True, capture_output=True)
