@@ -237,3 +237,192 @@ def test_responses_default_year_when_param_missing(client, env):
     assert res.status_code == 200
     assert res.get_json()["year"] == "2027"
     assert res.get_json()["counts"]["targets"] == 0
+
+
+# =============================================================================
+# 対象者登録（preview → commit）
+# =============================================================================
+
+from services.health_apply.jinjer_source import EmployeeProfile, PreviousRaw  # noqa: E402
+from services.jinjer_api_client import JinjerAPIError  # noqa: E402
+
+JINJER = {
+    "2099001": (EmployeeProfile("2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "在籍"),
+                PreviousRaw("履歴", "2026", "医療法人社団 同友会 春日クリニック", ["基本健診"], "2026-07-01")),
+    "2099002": (EmployeeProfile("2099002", "二 号", "n2@nmht.co.jp", "0", "在籍"),
+                PreviousRaw("履歴", "2026", "医療法人徳洲会 生駒市立病院", ["1日人間ドック・胃カメラ", "婦人病検査"], "2026-07-02")),
+    "2099003": (EmployeeProfile("2099003", "三 号", "", "1", "退職", "2026-03-31"), PreviousRaw()),
+}
+
+
+def jinjer_stub(employee_ids, previous_year):
+    assert previous_year == 2026
+    profiles = {i: JINJER[i][0] for i in employee_ids if i in JINJER}
+    previous = {i: JINJER[i][1] for i in employee_ids if i in JINJER}
+    return profiles, previous, {}
+
+
+@pytest.fixture
+def jinjer(monkeypatch):
+    monkeypatch.setattr(app_module, "fetch_health_apply_sources", jinjer_stub)
+
+
+def preview(client, text, year="2027"):
+    return client.post("/health_apply_targets_preview", data=json.dumps({"year": year, "employee_ids_text": text}),
+                       content_type="application/json")
+
+
+def commit(client, session_id, confirm):
+    return client.post("/health_apply_targets_commit", data=json.dumps({"session_id": session_id, "confirm": confirm}),
+                       content_type="application/json")
+
+
+def local_previews(env):
+    return sorted(p.name for p in env["local"].glob("happly_*.json")) if env["local"].exists() else []
+
+
+@pytest.mark.parametrize("path", ["/health_apply_targets_preview", "/health_apply_targets_commit"])
+def test_post_routes_are_403_without_allow_list(client, env, monkeypatch, path):
+    monkeypatch.setattr(Config, "HEALTH_APPLY_ALLOWED_USERS_CSV", str(env["tmp"] / "none.csv"))
+    res = client.post(path, data=json.dumps({}), content_type="application/json")
+    assert res.status_code == 403 and res.get_json()["forbidden"] is True
+
+
+def test_preview_requires_employee_ids(client, env, jinjer):
+    res = preview(client, "abc\n")
+    body = res.get_json()
+    assert res.status_code == 400
+    assert "1件以上" in body["errors"][0] and "abc" in body["errors"][1]
+    assert local_previews(env) == []
+
+
+def test_preview_returns_plan_and_saves_locally_only(client, env, jinjer):
+    res = preview(client, "2099001\n2099002\n2099003\n2099009\n2099001")
+    body = res.get_json()
+    assert res.status_code == 200, body
+    assert body["success"] is True and body["year"] == "2027" and body["fiscal_year"] == 2027
+    assert body["session_id"].startswith("happly_")
+    assert body["confirm_phrase"] == "REGISTER 2027 2"
+    assert body["can_commit"] is False                      # 2099003（メール無し）と 2099009（jinjer無し）が blocked
+    assert body["counts"] == {"input": 4, "add": 2, "unchanged": 0, "conflict": 0, "blocked": 2,
+                              "warnings": 1, "input_errors": 0}
+    assert [i["code"] for i in body["input_issues"]] == ["duplicate_employee_id"]
+    by = {r["employee_id"]: r for r in body["rows"]}
+    assert by["2099001"]["action"] == "add"
+    assert by["2099001"]["previous"]["institution"]["code"] == "1310528885"
+    assert by["2099002"]["previous"]["exam_type"]["code"] == "13"
+    assert by["2099002"]["previous"]["extras"] == [{"code": "GYN", "name": "婦人科検診"}]
+    assert by["2099003"]["action"] == "blocked" and by["2099003"]["enrollment_label"] == "退職"
+    assert by["2099009"]["action"] == "blocked"
+    assert len(local_previews(env)) == 1
+    assert shared_files(env) == []
+    assert env["gateway"].appended == []
+
+
+def test_preview_jinjer_error_is_500(client, env, monkeypatch):
+    def boom(ids, year):
+        raise JinjerAPIError("HTTP 429")
+    monkeypatch.setattr(app_module, "fetch_health_apply_sources", boom)
+    res = preview(client, "2099001")
+    assert res.status_code == 500 and "jinjer API エラー" in res.get_json()["errors"][0]
+    assert local_previews(env) == []
+
+
+def test_commit_full_flow_then_idempotent_rerun(client, env, jinjer):
+    gw = env["gateway"]
+    body = preview(client, "2099001\n2099002").get_json()
+    assert body["can_commit"] is True and body["confirm_phrase"] == "REGISTER 2027 2"
+    sid = body["session_id"]
+
+    # 確認語違い → 何も書かない
+    res = commit(client, sid, "REGISTER 2027 3")
+    assert res.status_code == 400 and "REGISTER 2027 2" in res.get_json()["errors"][0]
+    assert gw.appended == []
+
+    res = commit(client, sid, " REGISTER 2027 2 ")
+    body = res.get_json()
+    assert res.status_code == 200, body
+    assert body["success"] is True
+    assert (body["added"], body["unchanged"], body["audit_rows"], body["verified"], body["missing"]) == (2, 0, 3, 2, [])
+    assert [s for s, _ in gw.appended] == [S.SHEET_TARGETS, S.SHEET_AUDIT]
+    target_rows = gw.appended[0][1]
+    assert [r[1] for r in target_rows] == ["2099001", "2099002"]
+    assert target_rows[0][:5] == ["2027", "2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0"]
+    assert target_rows[1][6:11] == ["0301619", "医療法人徳洲会 生駒市立病院", "13", "人間ドックC", "GYN"]
+    assert all(len(r) == S.TARGET_HUB_COLUMNS for r in target_rows)
+    audit = gw.appended[1][1]
+    assert audit[0][1] == "REGISTER_BATCH" and audit[1][5] == "2099001" and audit[2][5] == "2099002"
+    assert audit[0][3] == current_user()
+    # 回答・選択肢・設定は不変、プレビューは消え、共有側には何も無い
+    assert gw.sheets[S.SHEET_RESPONSES] == workbook()[S.SHEET_RESPONSES]
+    assert gw.sheets[S.SHEET_OPTIONS] == workbook()[S.SHEET_OPTIONS]
+    assert local_previews(env) == []
+    assert shared_files(env) == []
+
+    # 同じ貼り付けをもう一度 → 全員 unchanged・登録できない
+    again = preview(client, "2099001\n2099002").get_json()
+    assert again["counts"]["unchanged"] == 2 and again["counts"]["add"] == 0
+    assert again["can_commit"] is False
+    res = commit(client, again["session_id"], again["confirm_phrase"])
+    assert res.status_code == 409
+    assert len(gw.appended) == 2
+
+    # 追記した対象者は回答読込にも見える
+    rep = client.get("/health_apply_responses").get_json()
+    assert rep["counts"]["targets"] == 2 and rep["counts"]["unsent"] == 2
+
+
+def test_commit_rejects_unknown_expired_and_foreign_previews(client, env, jinjer):
+    body = preview(client, "2099001").get_json()
+    sid = body["session_id"]
+    assert commit(client, "happly_" + "0" * 32, body["confirm_phrase"]).status_code == 400
+    assert commit(client, "../x", body["confirm_phrase"]).status_code == 400
+
+    path = env["local"] / f"{sid}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["user"] = "someone_else"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    res = commit(client, sid, body["confirm_phrase"])
+    assert res.status_code == 403 and "別のユーザー" in res.get_json()["errors"][0]
+
+    data["user"] = current_user()
+    data["saved_at"] = "2020-01-01T00:00:00"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    res = commit(client, sid, body["confirm_phrase"])
+    assert res.status_code == 400 and "期限" in res.get_json()["errors"][0]
+    assert not path.exists()
+    assert env["gateway"].appended == []
+
+
+def test_commit_stops_when_sheet_changed_after_preview(client, env, jinjer):
+    gw = env["gateway"]
+    body = preview(client, "2099001\n2099002").get_json()
+    # Apps Script や別の人が同じ社員番号を先に入れた（内容が違う）
+    gw.sheets[S.SHEET_TARGETS].append(target_row(社員番号="2099002", 氏名="二 号", 社用メール="other@nmht.co.jp"))
+    res = commit(client, body["session_id"], body["confirm_phrase"])
+    assert res.status_code == 409
+    assert res.get_json()["counts"]["conflict"] == 1
+    assert gw.appended == []
+    assert local_previews(env) == [f"{body['session_id']}.json"]   # 期限内なので残す（作り直しは preview で）
+
+
+def test_commit_reports_when_audit_write_fails(client, env, jinjer):
+    gw = env["gateway"]
+    body = preview(client, "2099001").get_json()
+    gw.fail_append_on = S.SHEET_AUDIT
+    res = commit(client, body["session_id"], body["confirm_phrase"])
+    assert res.status_code == 500
+    assert "対象者は追記済み" in res.get_json()["errors"][0]
+    assert [s for s, _ in gw.appended] == [S.SHEET_TARGETS]
+    # 再実行すると変更なしになる（冪等）
+    gw.fail_append_on = None
+    again = preview(client, "2099001").get_json()
+    assert again["counts"] == {"input": 1, "add": 0, "unchanged": 1, "conflict": 0, "blocked": 0, "warnings": 0, "input_errors": 0}
+
+
+def test_commit_with_conflict_or_blocked_is_refused(client, env, jinjer):
+    body = preview(client, "2099001\n2099003").get_json()      # 2099003 は blocked
+    assert body["can_commit"] is False
+    res = commit(client, body["session_id"], body["confirm_phrase"])
+    assert res.status_code == 409
+    assert env["gateway"].appended == []

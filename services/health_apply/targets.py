@@ -346,3 +346,41 @@ def plan_fingerprint(plan: TargetPlan) -> str:
         h.update(b"\n")
         h.update(item.encode("utf-8"))
     return h.hexdigest()
+
+
+# ----------------------------------------------------------------------
+# プレビュー（JSON）からの復元。commit はここで戻した候補をシートと突き合わせ直す
+# ----------------------------------------------------------------------
+
+def previous_from_dict(d: dict | None) -> PreviousExam:
+    d = d or {}
+    inst = d.get("institution") or {}
+    exam = d.get("exam_type") or {}
+    extras = [e for e in (d.get("extras") or []) if isinstance(e, dict)]
+    return PreviousExam(
+        source=str(d.get("source", "") or S.SOURCE_NONE),
+        year=str(d.get("year", "")),
+        institution_code=str(inst.get("code", "")), institution_name=str(inst.get("name", "")),
+        institution_raw=str(inst.get("raw", "")),
+        exam_type_code=str(exam.get("code", "")), exam_type_name=str(exam.get("name", "")),
+        extra_codes=tuple(str(e.get("code", "")) for e in extras),
+        extra_names=tuple(str(e.get("name", "")) for e in extras),
+        content_labels=tuple(str(x) for x in (d.get("content_labels") or [])),
+        exam_date=str(d.get("exam_date", "")),
+        notes=[str(n) for n in (d.get("notes") or [])],
+    )
+
+
+def candidate_from_dict(d: dict) -> Candidate:
+    issues = [Issue(str(i.get("level", "warning")), str(i.get("code", "")), str(i.get("message", "")))
+              for i in (d.get("issues") or []) if isinstance(i, dict)]
+    return Candidate(
+        employee_id=str(d.get("employee_id", "")),
+        name=str(d.get("name", "")),
+        email=str(d.get("email", "")),
+        enrollment_id=str(d.get("enrollment", "")),
+        enrollment_name=str(d.get("enrollment_label", "")),
+        retirement_date=str(d.get("retirement_date", "")),
+        previous=previous_from_dict(d.get("previous")),
+        issues=issues,
+    )
