@@ -216,7 +216,7 @@ def test_rows_are_sorted_errors_first_then_bucket_then_id():
     rep = report([
         target_row(社員番号="2099009"),
         target_row(社員番号="2099002", 申込状態=S.STATUS_SENT, 送信日時="x"),
-        base_answered(社員番号="2099005"),
+        base_answered(社員番号="2099005", 受付番号="HC-2027-2099005-01"),
         base_answered(社員番号="2099001", 受付番号="HC-2027-2099001-01"),
     ], [
         response_row(社員番号="2099005", 受付番号="HC-2027-2099005-01"),
