@@ -113,6 +113,15 @@ class KeiriJinjerClient(JinjerClient):
             _time.sleep(0.3)
         return result
 
+    def get_custom_menus(self) -> list:
+        """カスタム項目のマスタ（メニュー→項目→選択肢）。選択肢IDを名前に戻すのに使う。
+
+        健診申込モードが「健康診断履歴」（menu 15）の健診内容IDを名前へ戻すために追加
+        （2026-09-02）。GET のみ。
+        """
+        data = self._get("/v1/master/custom-menus", {})
+        return data if isinstance(data, list) else []
+
 
 def get_client() -> KeiriJinjerClient:
     """認証済みクライアントを返す。"""
