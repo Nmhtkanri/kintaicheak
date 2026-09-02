@@ -672,6 +672,54 @@ def load_departments(employee_ids: Iterable[str], on_date: str, *,
     return out
 
 
+def load_employee_names(employee_ids: Iterable[str], *,
+                        cache_path: os.PathLike[str] | str | None = None,
+                        client: Any = None) -> dict[str, str]:
+    """jinjer の姓・名から {社員番号: "姓 名"} を作る。
+
+    freee の従業員は「姓 名」（半角スペース区切り）で登録されている。氏名の元に
+    している年度営業実績も補正マスタも「出澤信晃」と姓名が続けて書かれていて
+    区切りが無く、漢字氏名をこちらで割ることはできない。姓と名を別に持っている
+    jinjer 側を正とする（部門と同じ考え方・同じ元データ）。
+
+    キャッシュ（経理モードが作る raw/roster.json）があればそれを読み、載っていない
+    社員番号があるときだけ取り直す。引けなくても請求書CSVは作れるべきなので、
+    失敗しても例外にはせず引けた分だけ返す（画面で警告を出して人が直せる）。
+
+    Returns:
+        {社員番号: "姓 名"}。引けなかった人はキーごと入らない。
+    """
+    ids = [str(e).strip() for e in employee_ids if str(e or "").strip()]
+    if not ids:
+        return {}
+    try:
+        from services.keiri_api import load_or_fetch_roster, roster_index
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+    index: dict[str, dict[str, str]] = {}
+    if cache_path and Path(cache_path).exists():
+        try:
+            index = roster_index(load_or_fetch_roster(client, cache_path))
+        except Exception:                                      # noqa: BLE001
+            index = {}
+    if any(emp not in index for emp in ids):
+        # キャッシュが無い・入社したての人が載っていないときだけ jinjer を叩く。
+        # 失敗してもキャッシュ分はそのまま使う（index は成功時しか差し替えない）。
+        try:
+            index = roster_index(
+                load_or_fetch_roster(client, cache_path, refresh=True))
+        except Exception:                                      # noqa: BLE001
+            pass
+
+    out: dict[str, str] = {}
+    for emp in ids:
+        name = str((index.get(emp) or {}).get("name") or "").strip()
+        if name:
+            out[emp] = name
+    return out
+
+
 def _clamp_issue_date(issue_date: str, month_end: date) -> tuple[str, bool]:
     """発生日を対象月の末日に寄せる。
 
@@ -732,6 +780,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
                   master_csv: os.PathLike[str] | str | None = None,
                   default_department: str = "",
                   custom_items_cache: os.PathLike[str] | str | None = None,
+                  roster_cache: os.PathLike[str] | str | None = None,
                   partner_master_csv: os.PathLike[str] | str | None = None,
                   excluded_csv: os.PathLike[str] | str | None = None,
                   breakdown_csv: os.PathLike[str] | str | None = None) -> dict[str, Any]:
@@ -791,6 +840,16 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         from_jinjer = jinjer_departments.get(document.get("employee_no") or "")
         if from_jinjer:
             document["department"] = from_jinjer
+
+    # 従業員名も jinjer の姓・名を正とし、freee の登録名と同じ「姓 名」（半角スペース
+    # 区切り）で出す。売上簿・補正マスタの氏名は詰まっているので割れない。
+    # 引けなかった人は詰まったままにして、行に警告を出す（人が画面で直せる）。
+    jinjer_names = load_employee_names(
+        {doc.get("employee_no") for doc in documents}, cache_path=roster_cache)
+    for document in documents:
+        jinjer_name = jinjer_names.get(document.get("employee_no") or "")
+        if jinjer_name:
+            document["employee_name"] = jinjer_name
 
     def _base_key(document: dict[str, Any]) -> str:
         employee_key = (normalize_name(document.get("employee_name"))
@@ -852,10 +911,11 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
             main_amount = sum(int(doc["main_amount"]) for doc in main_documents)
         if main_documents and all(doc.get("main_tax") is not None for doc in main_documents):
             main_tax = sum(int(doc["main_tax"]) for doc in main_documents)
-        # 売上高は外税で出す（金額＝税抜、税額は別欄）。交通費だけ内税のまま。
-        # 2026-08 谷津さん指定。PDFから読むのは税込の総合計なので、ここで税抜へ戻す。
-        if isinstance(main_amount, int) and isinstance(main_tax, int):
-            main_amount = main_amount - main_tax
+        # 売上高も交通費も内税で出す（金額＝税込、税額は別欄）。
+        # 2026-08 は売上高だけ外税＋税抜で出していたが、freee は取込CSVのH列を
+        # 税込とみなして税額をもう一度差し引くため、税抜810,000が729,000で計上された
+        # （2026-08分の実績で判明）。2026-09-02 谷津さん指定で税抜へ戻す処理はやめ、
+        # PDFから読んだ税込の総合計をそのままH列に出す。
         group_id = f"invoice-{group_index}"
         # 備考・品目は空欄で出す（2026-08 谷津さん指示）。
         # Fieldglass(UAL)分の取込では備考に「総合計請求書：氏名」を入れていたが、
@@ -864,7 +924,7 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         main_row: dict[str, Any] = {
             "収支区分": "収入", "管理番号": employee_no, "発生日": issue_date,
             "支払期日": due_date, "取引先": partner, "勘定科目": "売上高",
-            "税区分": "課税売上10%", "金額": main_amount, "税計算区分": "外税",
+            "税区分": "課税売上10%", "金額": main_amount, "税計算区分": "内税",
             "税額": main_tax, "備考": remarks, "品目": "", "部門": department,
             "メモタグ（複数指定可、カンマ区切り）": "", "従業員": employee_name,
             "_row_type": "main", "_group_id": group_id,
@@ -885,6 +945,10 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         if due_from_rule:
             main_row["_warnings"].append(
                 f"PDFに入金期日が無いので、支払期日ルールから {due_from_rule} にしました")
+        if employee_no and employee_no not in jinjer_names:
+            main_row["_warnings"].append(
+                "jinjerから氏名を引けなかったので、姓と名の間に半角スペースが"
+                "入っていません。freeeの登録名に合わせて直してください")
         main_row["_errors"] = _validation_messages(main_row)
 
         # 1枚の請求書を複数人で計上する取引先（IXナレッジ様など）は、
@@ -893,8 +957,8 @@ def build_preview(month: str, *, roots: Sequence[os.PathLike[str] | str] | None 
         breakdown = breakdowns.get(_company_key(partner)) if partner else None
         if breakdown and isinstance(main_amount, int):
             total_note = (f"この請求書は{len(breakdown)}名分です。"
-                          f"税抜合計 {main_amount:,} 円／消費税 "
-                          f"{main_tax:,} 円を各行に振り分けてください"
+                          f"税込合計 {main_amount:,} 円（うち消費税 "
+                          f"{main_tax:,} 円）を各行に振り分けてください"
                           if isinstance(main_tax, int) else
                           f"この請求書は{len(breakdown)}名分です。金額を振り分けてください")
             for member in breakdown:
