@@ -1479,6 +1479,55 @@
             </div>
         </div>
 
+        <details class="more" id="ha-targets-section">
+            <summary>② 対象者を登録する（社員番号を貼る → jinjer から取得 → プレビュー → 確認語 → Google の「対象者」へ追記）</summary>
+            <div class="more-body">
+                <label class="field">
+                    <span class="field-label">社員番号（1行1件。Excel の列を貼り付けてもよい） <span class="tag tag-req">必須</span></span>
+                    <textarea id="ha-target-ids" rows="6" placeholder="2018013&#10;2019022"></textarea>
+                    <span class="field-sub">20始まり7桁だけを受け付けます。jinjer から氏名・社用メール・在籍区分・前年度の健診内容（「健康診断履歴」→「健康診断」の順）を取ります。退職・休職は警告だけで、自動では外しません。既に登録済みで同じ内容なら「変更なし」、内容が違う人や回答済みの人がいると「競合」になり、1件でもあれば登録できません。</span>
+                </label>
+                <div class="actions">
+                    <button type="button" class="btn btn-primary" id="ha-preview-btn">プレビュー（jinjer を読むだけ・まだ何も書きません）</button>
+                    <span id="ha-preview-status" class="status-text"></span>
+                </div>
+                <div id="ha-preview-area" style="display:none; margin-top:8px">
+                    <div class="summary-cards" style="margin-bottom:8px">
+                        <div class="summary-card"><div class="card-label">入力</div><div class="card-value" id="ha-pcnt-input">0</div></div>
+                        <div class="summary-card"><div class="card-label">追加</div><div class="card-value" id="ha-pcnt-add">0</div></div>
+                        <div class="summary-card"><div class="card-label">変更なし</div><div class="card-value" id="ha-pcnt-unchanged">0</div></div>
+                        <div class="summary-card card-ng"><div class="card-label">競合</div><div class="card-value" id="ha-pcnt-conflict">0</div></div>
+                        <div class="summary-card card-ng"><div class="card-label">登録不可</div><div class="card-value" id="ha-pcnt-blocked">0</div></div>
+                        <div class="summary-card card-caution"><div class="card-label">警告あり</div><div class="card-value" id="ha-pcnt-warnings">0</div></div>
+                    </div>
+                    <div id="ha-preview-input-issues"></div>
+                    <div style="max-height:420px; overflow:auto">
+                        <table class="ha-table" id="ha-preview-table">
+                            <thead>
+                                <tr>
+                                    <th>結果</th><th>社員番号</th><th>氏名</th><th>社用メール</th><th>在籍</th>
+                                    <th>前年度 情報元</th><th>前年度 健診機関</th><th>前年度 健診種別</th><th>前年度 追加検査</th><th>理由・指摘</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ha-preview-body"></tbody>
+                        </table>
+                    </div>
+                    <div id="ha-commit-block" style="margin-top:12px; padding:11px 13px; border:1px solid #d7dee5; border-radius:6px; background:#fafcfe">
+                        <div id="ha-commit-guide" class="hint" style="margin-bottom:6px"></div>
+                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap">
+                            <label class="field" style="margin:0; min-width:260px">
+                                <span class="field-label">確認語</span>
+                                <input type="text" id="ha-commit-confirm" placeholder="REGISTER 2027 12" autocomplete="off">
+                            </label>
+                            <button type="button" class="btn btn-danger" id="ha-commit-btn" disabled>③ Google の「対象者」シートへ登録</button>
+                            <span id="ha-commit-status" class="status-text"></span>
+                        </div>
+                        <div id="ha-commit-result" style="display:none; margin-top:8px; font-size:13px"></div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
         <div id="ha-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 

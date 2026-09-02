@@ -5280,6 +5280,7 @@ function haSetForbidden(reason) {
         const el = document.getElementById(id);
         if (el) el.disabled = !!reason;
     });
+    haCommitRefresh();   // 登録ボタンは確認語・プレビュー・権限の3つが揃ったときだけ有効
 }
 
 function haYear() {
@@ -5488,4 +5489,171 @@ async function haLoadResponses() {
     if (haFilter) haFilter.addEventListener('change', () => { haState.filter = haFilter.value; haPaintResponseTable(); });
     const haSearch = document.getElementById('ha-resp-search');
     if (haSearch) haSearch.addEventListener('input', () => { haState.search = haSearch.value; haPaintResponseTable(); });
+}
+
+// --- ② 対象者登録（プレビュー → 確認語 → 登録） ---------------------------------
+function haPreviewPayload() {
+    const ta = document.getElementById('ha-target-ids');
+    return { year: haYear(), employee_ids_text: ta ? ta.value : '' };
+}
+
+function haRenderPreview(data) {
+    haState.preview = data;
+    const c = data.counts || {};
+    const map = {
+        input: 'ha-pcnt-input', add: 'ha-pcnt-add', unchanged: 'ha-pcnt-unchanged',
+        conflict: 'ha-pcnt-conflict', blocked: 'ha-pcnt-blocked', warnings: 'ha-pcnt-warnings',
+    };
+    Object.keys(map).forEach(k => {
+        const el = document.getElementById(map[k]);
+        if (el) el.textContent = c[k] != null ? c[k] : 0;
+    });
+    const inputIssues = document.getElementById('ha-preview-input-issues');
+    if (inputIssues) {
+        const items = data.input_issues || [];
+        inputIssues.innerHTML = items.length
+            ? `<div class="alert alert-warning" style="margin:6px 0"><b>貼り付けの指摘</b>`
+              + `<ul style="margin:4px 0 0; padding-left:20px">${items.map(i => `<li>${haEsc(i.message)}</li>`).join('')}</ul></div>`
+            : '';
+    }
+    const body = document.getElementById('ha-preview-body');
+    if (body) {
+        body.innerHTML = (data.rows || []).map(row => {
+            const p = row.previous || {};
+            const inst = p.institution || {};
+            const reasonClass = row.action === 'unchanged' ? 'info' : 'error';
+            const notes = (row.reasons || []).map(r => `<span class="ha-issue ha-issue-${reasonClass}">${haEsc(r)}</span>`).join('')
+                + haIssuesHtml(row.issues);
+            const raw = (inst.raw && inst.raw !== inst.name) ? `<br><small>原文: ${haEsc(inst.raw)}</small>` : '';
+            return `<tr class="ha-row-${haEsc(row.action)}">`
+                + `<td>${haEsc(row.action_label || row.action)}</td>`
+                + `<td>${haEsc(row.employee_id)}</td>`
+                + `<td>${haEsc(row.name)}</td>`
+                + `<td>${haEsc(row.email)}</td>`
+                + `<td>${haEsc(row.enrollment_label || row.enrollment || '')}</td>`
+                + `<td>${haEsc(p.source || '')}</td>`
+                + `<td>${haOptionText(inst)}${raw}</td>`
+                + `<td>${haOptionText(p.exam_type)}</td>`
+                + `<td>${(p.extras || []).map(haOptionText).join('、')}</td>`
+                + `<td>${notes}</td>`
+                + '</tr>';
+        }).join('');
+    }
+    const guide = document.getElementById('ha-commit-guide');
+    if (guide) {
+        if (data.can_commit) {
+            guide.innerHTML = `追加 ${haEsc(c.add)} 名を登録できます。確認語 <b>${haEsc(data.confirm_phrase)}</b> を入力してから登録を押してください`
+                + `（このプレビューは ${haEsc(data.ttl_hours)} 時間で無効になります）。`;
+        } else if ((c.conflict || 0) + (c.blocked || 0) > 0) {
+            guide.textContent = '競合または登録不可の行があるため登録できません。行を直すか、貼り付けから外してもう一度プレビューしてください。';
+        } else {
+            guide.textContent = '追加する人がいません（全員登録済み）。';
+        }
+    }
+    const confirm = document.getElementById('ha-commit-confirm');
+    if (confirm) {
+        confirm.value = '';
+        confirm.placeholder = data.confirm_phrase || '';
+    }
+    const result = document.getElementById('ha-commit-result');
+    if (result) {
+        result.style.display = 'none';
+        result.innerHTML = '';
+    }
+    haCommitRefresh();
+    const area = document.getElementById('ha-preview-area');
+    if (area) area.style.display = '';
+}
+
+function haCommitRefresh() {
+    const btn = document.getElementById('ha-commit-btn');
+    const confirm = document.getElementById('ha-commit-confirm');
+    if (!btn) return;
+    const p = haState.preview;
+    const ok = !!(p && p.can_commit && confirm && confirm.value.trim() === p.confirm_phrase) && !haState.forbidden;
+    btn.disabled = !ok;
+}
+
+async function haPreviewTargets() {
+    if (haState.forbidden) return;
+    const btn = document.getElementById('ha-preview-btn');
+    const status = document.getElementById('ha-preview-status');
+    haShowError('');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'jinjer から取得しています…';
+    let done = false;
+    try {
+        const { data } = await haFetchJson('/health_apply_targets_preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(haPreviewPayload()),
+        });
+        if (data.forbidden) {
+            haSetForbidden((data.errors || []).join(' / '));
+            return;
+        }
+        if (!data.success) {
+            haShowError((data.errors || ['プレビューに失敗しました']).join(' / '));
+            return;
+        }
+        haRenderPreview(data);
+        if (status) status.textContent = `プレビュー済み（${(data.counts || {}).input || 0} 名）`;
+        done = true;
+    } catch (e) {
+        haShowError(`プレビューに失敗しました: ${e}`);
+    } finally {
+        if (btn && !haState.forbidden) btn.disabled = false;
+        if (status && !done) status.textContent = '';
+    }
+}
+
+async function haCommitTargets() {
+    const p = haState.preview;
+    if (!p || !p.can_commit || haState.forbidden) return;
+    const btn = document.getElementById('ha-commit-btn');
+    const status = document.getElementById('ha-commit-status');
+    const result = document.getElementById('ha-commit-result');
+    const confirm = document.getElementById('ha-commit-confirm');
+    haShowError('');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Google の「対象者」シートへ追記しています…';
+    try {
+        const { data } = await haFetchJson('/health_apply_targets_commit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: p.session_id, confirm: confirm ? confirm.value.trim() : '' }),
+        });
+        if (data.forbidden) {
+            haSetForbidden((data.errors || []).join(' / '));
+            return;
+        }
+        if (!data.success) {
+            haShowError((data.errors || ['登録に失敗しました']).join(' / '));
+            return;
+        }
+        if (result) {
+            const missing = (data.missing || []);
+            result.innerHTML = `<b>登録しました。</b> 追加 ${haEsc(data.added)} 名 ／ 変更なし ${haEsc(data.unchanged)} 名 ／ `
+                + `監査ログ ${haEsc(data.audit_rows)} 行 ／ 読み直しで確認 ${haEsc(data.verified)} 名（${haEsc(data.registered_at)}）`
+                + (missing.length ? `<br><span class="ha-issue ha-issue-error">読み直しで見つからない: ${missing.map(haEsc).join('、')}</span>` : '');
+            result.style.display = '';
+        }
+        haState.preview = null;
+        haState.responses = null;   // 回答一覧の対象者数が変わったので読み直してもらう
+        if (confirm) confirm.value = '';
+    } catch (e) {
+        haShowError(`登録に失敗しました: ${e}`);
+    } finally {
+        if (status) status.textContent = '';
+        haCommitRefresh();
+    }
+}
+
+{
+    const haPreviewBtn = document.getElementById('ha-preview-btn');
+    if (haPreviewBtn) haPreviewBtn.addEventListener('click', haPreviewTargets);
+    const haConfirm = document.getElementById('ha-commit-confirm');
+    if (haConfirm) haConfirm.addEventListener('input', haCommitRefresh);
+    const haCommitBtn = document.getElementById('ha-commit-btn');
+    if (haCommitBtn) haCommitBtn.addEventListener('click', haCommitTargets);
 }

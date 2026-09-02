@@ -1201,6 +1201,7 @@ body {
 .ha-issue { display: inline-block; margin: 1px 4px 1px 0; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
 .ha-issue-error { background: #fde2e2; color: #8a1f1f; }
 .ha-issue-warning { background: #fff1c7; color: #6b4d00; }
+.ha-issue-info { background: #e8f1fb; color: #1d4e89; }
 
 /* --- 健康診断HPMモード: 1人1ブロックの一覧 --- */
 .hh-person {
