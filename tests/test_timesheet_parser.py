@@ -560,6 +560,8 @@ def test_extract_fieldglass_name_from_filename_variants(tmp_path):
     # 氏名が付いていない元ファイル名・社員番号の無い名前は拾わない
     assert f(str(tmp_path / "timesheet_ERCSTS01200802.pdf")) is None
     assert f(str(tmp_path / "2026年8月分.pdf")) is None
+    # 末尾が年月(6桁)のファイル名を氏名と誤読しない（社員番号は7桁）
+    assert f(str(tmp_path / "作業報告書_今井 信吾様_202608.pdf")) is None
 
 
 def test_parse_fieldglass_pdf_name_id_filename_wins_over_romaji(monkeypatch, tmp_path):
