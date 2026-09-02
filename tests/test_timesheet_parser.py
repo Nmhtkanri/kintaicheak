@@ -543,6 +543,58 @@ def test_parse_fieldglass_pdf_katakana_filename_uses_romaji_worker_name(monkeypa
     assert df.iloc[0]["日付"] == date(2026, 5, 1)
 
 
+def test_extract_fieldglass_name_from_filename_variants(tmp_path):
+    """ファイル名からの氏名の取り方。
+
+    Fieldglassが出す元の名前（timesheet_ERCSTS…）と、谷津さんが付け替える
+    「氏名_社員番号」の両方を読む。社員番号が無い名前は氏名とみなさない
+    （PDF本文のローマ字氏名にフォールバックさせる）。
+    """
+    f = timesheet_parser._extract_fieldglass_name_from_filename
+    assert f(str(tmp_path / "太田 琢也_2025030.pdf")) == "太田 琢也"
+    assert f(str(tmp_path / "奈良 隆宏_2022013.pdf")) == "奈良 隆宏"
+    assert f(str(tmp_path / "MAHARJAN RAMITA_2022002.pdf")) == "MAHARJAN RAMITA"
+    # Fieldglassの元ファイル名は従来どおり
+    assert f(str(tmp_path / "timesheet_ERCSTS0ラミタさん.pdf")) == "ラミタ"
+    assert f(str(tmp_path / "timesheet_ERCSTS01199793奈良 隆宏.pdf")) == "奈良 隆宏"
+    # 氏名が付いていない元ファイル名・社員番号の無い名前は拾わない
+    assert f(str(tmp_path / "timesheet_ERCSTS01200802.pdf")) is None
+    assert f(str(tmp_path / "2026年8月分.pdf")) is None
+
+
+def test_parse_fieldglass_pdf_name_id_filename_wins_over_romaji(monkeypatch, tmp_path):
+    """★回帰: 「氏名_社員番号.pdf」に付け替えた勤務表は漢字氏名で突合する。
+
+    FieldglassのPDF本文は "Worker Ohta, Takuya" のローマ字しか持たず、jinjerは
+    「太田 琢也」の漢字で登録されている。本文由来のローマ字を採ると突合できず
+    「jinjer未提出者」に落ちていた（2026-09 実データ: 太田 琢也_2025030 /
+    奈良 隆宏_2022013。給与計算中に発覚）。
+    """
+    path = tmp_path / "太田 琢也_2025030.pdf"
+    pdf_text = "\n".join([
+        "Time Sheet",
+        "ID ERCSTS01200802 Worker Ohta, Takuya(ERCSWK00145993)",
+        "Period 2026-08-01 to 2026-08-31 Job Posting Automated Operations Engineer|JP",
+        "Time in/time out",
+        "Day 8-03 Mon 8-04 Tue Total",
+        "Time In 9:00 AM 9:00 AM",
+        "Time Out 6:00 PM 6:00 PM",
+        "Total 8h 0m 8h 0m 16h 0m",
+    ])
+    monkeypatch.setattr(
+        timesheet_parser,
+        "_pdf_to_text_or_bytes",
+        lambda filepath: (pdf_text, None),
+    )
+
+    result = parse_timesheet_smart(str(path))
+    df = result["df"]
+
+    assert result["mode"] == "direct"
+    assert df["氏名"].tolist() == ["太田 琢也", "太田 琢也"], "本文のTAKUYA OHTAではない"
+    assert df.iloc[0]["日付"] == date(2026, 8, 3)
+
+
 def test_image_only_pdf_is_sent_as_image_for_ai_fallback(tmp_path):
     path = tmp_path / "scanned_timesheet.pdf"
     image = Image.new("RGB", (480, 640), "white")
