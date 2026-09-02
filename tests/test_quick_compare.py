@@ -1391,8 +1391,14 @@ def test_compute_diffs_suppresses_legal_and_scheduled_holiday_when_billing_zero(
         assert rows == [], f"休日区分={code}・請求勤怠0の日は行を出さない"
 
 
-def test_compute_diffs_suppresses_holiday_jinjer_punch_when_billing_empty():
-    """法休/所休の日のjinjer打刻（請求勤怠なし）も行を出さない（谷津指定）。"""
+def test_compute_diffs_keeps_holiday_rows_when_jinjer_has_punch():
+    """★回帰: 法休/所休でも jinjer に実打刻がある日は行を出す（2026-09-02 谷津さん指定）。
+
+    2026-07-10 は「法休/所休で請求勤怠なしの日は jinjer 打刻があっても出さない」
+    としていたが、太田さんの 2026-08-28（所定休日・10:53〜12:28 の休日出勤）が
+    差異一覧から丸ごと消え、給与計算中まで気づけなかった。抑制したいのは
+    「両方とも勤務が無い休日」のSAPノイズだけなので、jinjer に打刻がある日は残す。
+    """
     kintai_df = pd.DataFrame([_kintai_row(**{
         "jinjer_出勤": "9:00", "jinjer_退勤": "17:45",
     })])
@@ -1406,7 +1412,29 @@ def test_compute_diffs_suppresses_holiday_jinjer_punch_when_billing_empty():
     rows = compute_diffs(
         kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
     )
-    assert rows == []
+    assert [r.kind for r in rows] == [DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT]
+    assert all(r.warn_reason == "請求勤怠なし / jinjer側に時刻あり" for r in rows)
+
+
+def test_compute_diffs_keeps_fullday_leave_rows_when_jinjer_has_punch():
+    """全日の年次有給でも jinjer に打刻があれば行を出す（2026-09-02 谷津さん指定）。
+
+    2026-09 実データでは山田さんの 8/17（年次有給なのに 9:00〜17:30 の打刻）が該当。
+    休暇と打刻が食い違っている本物の差異なので、消さずに人へ見せる。
+    """
+    kintai_df = pd.DataFrame([_kintai_row(**{
+        "jinjer_出勤": "9:00", "jinjer_退勤": "17:30",
+    })])
+    jrow = _jinjer_row(**{
+        JINJER_HEADERS["punch_in_1"]: "9:00", JINJER_HEADERS["punch_out_1"]: "17:30",
+        "休日休暇名1": "年次有給", "休日休暇名1：種別": "全日",
+    })
+    extra_cols = resolve_jinjer_extra_columns(list(jrow.keys()))
+    logs: list[LogEntry] = []
+    rows = compute_diffs(
+        kintai_df, {("2018057", "2026-04-01"): jrow}, _NAME_MAP, logs, extra_cols,
+    )
+    assert [r.kind for r in rows] == [DIFF_KIND_PUNCH_IN, DIFF_KIND_PUNCH_OUT]
 
 
 def test_compute_diffs_keeps_holiday_work_codes():

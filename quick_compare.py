@@ -918,7 +918,13 @@ def compute_diffs(
         #     （振替休出・時間外休出(2〜5)は働く日のため通常どおり突合する）
         #   ・振休/代休/年次有給の「全日」 → 休暇として整合しているため差異行を出さない
         # DANGER含め当日の全行を出さない（billing_empty かつ全日休暇/休日の日に限る）。
-        if jrow is not None and billing_empty:
+        #
+        # ただし jinjer 側に実打刻がある日は抑制しない（2026-09-02 追加）。
+        # 消したいのは「両方とも勤務が無い休日」のノイズであって、休日出勤や
+        # 有給日の打刻は「請求勤怠に無いのに jinjer にはある」本物の差異だから。
+        # 太田さんの 2026-08-28（所定休日・10:53〜12:28）が差異一覧から丸ごと
+        # 消えていたのが発端。9月実データでの該当は法休/所休19日・全日休暇1日。
+        if jrow is not None and billing_empty and not (j_in or j_out):
             if _extra_of(jrow, "休日区分") in SUPPRESS_HOLIDAY_CODES:
                 suppressed_holiday_days.add((emp_id, date_iso))
                 continue
