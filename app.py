@@ -5174,6 +5174,221 @@ def route_haken_verify():
     return jsonify({"success": True, **result})
 
 
+# ======================================================================
+# 健康診断申込モード — Google スプレッドシートの対象者登録・回答読込（jinjer には書かない）
+# ======================================================================
+# 個人情報（社員番号・氏名・メール・申込内容）はレスポンスにだけ載せ、サーバ側には
+# 保存しない。ログにも社員番号以外を出さない。許可CSV・年度JSON・シート構成は
+# 毎リクエスト読み直す（NASの反映遅れや権限剥奪を即時に効かせる）。
+# Google への書き込みは「対象者」「監査ログ」への追記だけ（sheets_gateway が構造で止める）。
+
+
+class _HealthApplyHalt(Exception):
+    """権限・設定・シート構成の不備で処理を止めるときの内部例外（HTTP status 付き）。"""
+
+    def __init__(self, status: int, errors: list[str], **extra):
+        super().__init__("; ".join(errors))
+        self.status = status
+        self.errors = list(errors)
+        self.extra = extra
+
+
+def _health_apply_halt_response(halt: _HealthApplyHalt, **base):
+    payload = {"success": False, "errors": halt.errors}
+    payload.update(base)
+    payload.update(halt.extra)
+    return jsonify(payload), halt.status
+
+
+def health_apply_gateway(year_settings):
+    """Sheets ゲートウェイ。テストは FakeSheetsGateway に差し替える（fetch_employees_for_health の流儀）。"""
+    from services.health_apply.sheets_gateway import GoogleSheetsGateway
+
+    return GoogleSheetsGateway(
+        year_settings.spreadsheet_id,
+        Config.HEALTH_APPLY_SERVICE_ACCOUNT_JSON,
+        timeout=Config.HEALTH_APPLY_HTTP_TIMEOUT_SEC,
+    )
+
+
+def _health_apply_require_access() -> str:
+    """利用許可CSVに載っていなければ 403 で止める。戻り値は Windows ユーザー名。"""
+    from services.health_apply.access import check_access
+    from services.sap_import_ledger import current_user
+
+    user = current_user()
+    ok, reason = check_access(Config.HEALTH_APPLY_ALLOWED_USERS_CSV, user)
+    if not ok:
+        raise _HealthApplyHalt(403, [reason], forbidden=True, user=user)
+    return user
+
+
+def _health_apply_load_config():
+    """年度設定JSON（NAS）を読む。無い・壊れているは 400。"""
+    from services.health_apply.settings import SettingsError, load_year_config
+
+    try:
+        return load_year_config(Config.HEALTH_APPLY_SETTINGS_JSON)
+    except SettingsError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+
+
+def _health_apply_pick_year(config, year_param):
+    """年度を選ぶ（未指定は default_year）。登録の無い年度は 400。"""
+    from services.health_apply.settings import SettingsError
+
+    try:
+        return config.pick(year_param)
+    except SettingsError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+
+
+def _health_apply_load_year(year_param):
+    """年度設定JSON → (YearConfig, YearSettings)。不備は 400。"""
+    config = _health_apply_load_config()
+    return config, _health_apply_pick_year(config, year_param)
+
+
+def _health_apply_open_workbook(year_settings) -> dict:
+    """スプレッドシートを開き、シート構成を検証してから設定と選択肢を読む。
+
+    対象者・回答（個人情報）はここでは読まない。検証に通った後、各ルートが必要な分だけ読む。
+    """
+    from services.health_apply import schema as ha_schema
+    from services.health_apply.options import OptionCatalog
+    from services.health_apply.sheets_gateway import GatewayConfigError, GatewayError, sheet_titles
+
+    try:
+        gateway = health_apply_gateway(year_settings)
+        metadata = gateway.get_metadata()
+        titles = sheet_titles(metadata)
+        headers: dict[str, list] = {}
+        full: dict[str, list] = {}
+        for name in ha_schema.ALL_SHEETS:
+            if name not in titles:
+                continue
+            if name in (ha_schema.SHEET_SETTINGS, ha_schema.SHEET_OPTIONS):
+                values = gateway.read_values(name)
+                full[name] = values
+                headers[name] = values[0] if values else []
+            else:
+                first = gateway.read_values(name, "1:1")
+                headers[name] = first[0] if first else []
+        _, setting_rows = ha_schema.split_header(full.get(ha_schema.SHEET_SETTINGS, []))
+        settings_kv = ha_schema.settings_to_kv(setting_rows)
+        errors = ha_schema.verify_workbook(titles, headers, settings_kv, year_settings.fiscal_year)
+        if errors:
+            raise _HealthApplyHalt(400, errors, workbook={"title": metadata.get("title", ""), "sheets": titles})
+        _, option_rows = ha_schema.split_header(full.get(ha_schema.SHEET_OPTIONS, []))
+        catalog = OptionCatalog.from_rows(ha_schema.rows_to_dicts(ha_schema.OPTION_HEADERS, option_rows))
+    except GatewayConfigError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+    except GatewayError as e:
+        raise _HealthApplyHalt(500, [str(e)]) from e
+    except ha_schema.SchemaError as e:
+        raise _HealthApplyHalt(400, [str(e)]) from e
+    return {
+        "year": year_settings,
+        "gateway": gateway,
+        "metadata": metadata,
+        "titles": titles,
+        "settings_kv": settings_kv,
+        "catalog": catalog,
+    }
+
+
+def _health_apply_open(year_param) -> dict:
+    """権限 → 年度設定 → シート構成 の順で検査し、通ったら ctx を返す（失敗は _HealthApplyHalt）。"""
+    user = _health_apply_require_access()
+    config, year_settings = _health_apply_load_year(year_param)
+    ctx = _health_apply_open_workbook(year_settings)
+    ctx["user"] = user
+    ctx["config"] = config
+    return ctx
+
+
+def _health_apply_settings_payload(year_settings, settings_kv: dict) -> dict:
+    return {
+        "fiscal_year": year_settings.fiscal_year,
+        "previous_year": year_settings.previous_year,
+        "label": year_settings.label,
+        "spreadsheet_id_tail": year_settings.spreadsheet_id_tail,
+        "webapp_url": year_settings.webapp_url or settings_kv.get("WebアプリURL", ""),
+        "accept_from": settings_kv.get("受付開始", ""),
+        "accept_to": settings_kv.get("受付終了", ""),
+        "exam_from": settings_kv.get("受診期間開始", ""),
+        "exam_to": settings_kv.get("受診期間終了", ""),
+        "accepting": settings_kv.get("回答受付", ""),
+    }
+
+
+@app.route("/health_apply_status", methods=["GET"])
+def route_health_apply_status():
+    """接続状態。権限→年度設定→鍵→シート構成の順に見て、どこで止まったかを返す。"""
+    from services.health_apply.schema import SCHEMA_VERSION
+    from services.health_apply.settings import service_account_info
+
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "allowed_users_csv": Config.HEALTH_APPLY_ALLOWED_USERS_CSV,
+        "settings_file": {"path": Config.HEALTH_APPLY_SETTINGS_JSON, "mtime": ""},
+        "service_account": service_account_info(Config.HEALTH_APPLY_SERVICE_ACCOUNT_JSON),
+    }
+    try:
+        base["user"] = _health_apply_require_access()
+        config = _health_apply_load_config()
+        base["settings_file"]["mtime"] = config.mtime
+        base["years"] = config.year_keys()
+        year_settings = _health_apply_pick_year(config, request.args.get("year"))
+        base["year"] = year_settings.key
+        base["settings"] = _health_apply_settings_payload(year_settings, {})
+        ctx = _health_apply_open_workbook(year_settings)
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt, **base)
+    base["settings"] = _health_apply_settings_payload(year_settings, ctx["settings_kv"])
+    return jsonify({
+        "success": True,
+        **base,
+        "workbook": {
+            "title": ctx["metadata"].get("title", ""),
+            "schema_version": ctx["settings_kv"].get("スキーマ版", ""),
+            "sheets": ctx["titles"],
+        },
+        "catalog": ctx["catalog"].counts(),
+    })
+
+
+@app.route("/health_apply_responses", methods=["GET"])
+def route_health_apply_responses():
+    """対象者×回答を突き合わせて集計・一覧を返す。Google から毎回取り、サーバ側に保存しない。"""
+    from services.health_apply import schema as ha_schema
+    from services.health_apply.responses import build_report
+    from services.health_apply.sheets_gateway import GatewayError
+
+    try:
+        ctx = _health_apply_open(request.args.get("year"))
+        gateway = ctx["gateway"]
+        _, target_rows = ha_schema.split_header(gateway.read_values(ha_schema.SHEET_TARGETS))
+        _, response_rows = ha_schema.split_header(gateway.read_values(ha_schema.SHEET_RESPONSES))
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt)
+    except GatewayError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 500
+
+    targets = ha_schema.rows_to_dicts(ha_schema.TARGET_HEADERS, target_rows)
+    responses = ha_schema.rows_to_dicts(ha_schema.RESPONSE_HEADERS, response_rows)
+    report = build_report(targets, responses, ctx["catalog"], ctx["year"].fiscal_year)
+    logger.info("health_apply_responses: year=%s targets=%d responses=%d",
+                ctx["year"].key, len(targets), len(responses))
+    return jsonify({
+        "success": True,
+        "year": ctx["year"].key,
+        "fetched_at": _now_iso(),
+        "settings": _health_apply_settings_payload(ctx["year"], ctx["settings_kv"]),
+        **report,
+    })
+
+
 def _sse_event(event_type, data):
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
