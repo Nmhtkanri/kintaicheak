@@ -162,5 +162,10 @@ Hub は `REGISTER_BATCH`・`REGISTER`。Apps Script は `SETUP SEND RESEND FIRST
   ルート 23件＋UI 9件（Google・jinjer は偽物に差し替え）。実接続は準備1〜5の後に、
   テスト用シートの写しへ **自分1人** を登録 → 再実行で「変更なし」 → シートで氏名を変えて再実行 → 409、
   の順で確かめる。ブラウザの実クリックは谷津さんに依頼（Claude 側からは開けない）。
-- 段階③（Apps Script v2）は未着手。`prototypes/health_check_application/apps_script_v2/` に新設し、
-  既存の試作テスト16件を壊さない形にする予定。
+- 2026-09-02 段階③（Apps Script v2）: `prototypes/health_check_application/apps_script_v2/`
+  （Code.gs / Index.html / appsscript.json / README.md）を新設。試作 v1 と16件のテストはそのまま残す
+  （v2 の実配備が済んだら別コミットで消す）。`tests/test_health_apply_apps_script.py`（27件）が node の
+  偽 GAS 環境（`tests/health_apply_gas_harness.js`）で、Hub の列定義との一致・SHA-256・受付期間・
+  回答の検証・回答行の組み立て・案内送信を検査する。**Google 上でのデプロイと実送信は未実施**（別承認）。
+- 未対応: ローカルの Flask 試作 `preview_server.py` は旧選択肢（MYメディカル6拠点＋健診オプション）のまま。
+  画面確認は Apps Script v2 のテストデプロイで行う。
