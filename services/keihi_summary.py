@@ -666,6 +666,134 @@ def evaluate_route_check(
 
 
 # ======================================================================
+# 顧客請求分と交通費申請の重複検出
+# ======================================================================
+
+DUP_VERDICT = "重複疑い（顧客請求分と交通費申請が同じ移動）"
+
+_DUP_COLS = ["社員番号", "氏名", "利用日", "乗車場所", "降車場所", "金額",
+             "顧客請求側", "顧客請求側行番号", "交通費申請側", "交通費申請側行番号", "往復", "判定"]
+
+
+def _amount_int(v) -> int:
+    try:
+        return int(float(str(parse_amount(v) or 0)))
+    except ValueError:
+        return 0
+
+
+def _dup_station_key(s: str) -> str:
+    """重複判定用の駅名キー。経路突合の正規化に加え、三ノ宮/三宮・御茶ノ水/御茶の水 の
+    「ノ／の」の有無を同一視する（e-staffing と jinjer で表記が違う実例があるため）。"""
+    return _norm_station(s).replace("ノ", "").replace("の", "")
+
+
+def _dup_station_eq(a: str, b: str) -> bool:
+    if not a and not b:
+        return True
+    if not a or not b:
+        return False
+    if _dup_station_key(a) == _dup_station_key(b):
+        return True
+    from services.kotsuhi_seisa import station_eq
+    return station_eq(_norm_station(a), _norm_station(b))
+
+
+def find_customer_bill_duplicates(integrated_rows: list[list[str]]) -> list[dict]:
+    """顧客請求分の行と、給与で払う交通費申請の行が同じ移動を指していないかを探す。
+
+    e-staffing の立替金は客先へ請求したうえで本人へ「立替金（顧客請求分）」として戻る。
+    同じ移動が jinjer の交通費申請にもあると、通勤費／立替金としても払われて二重払いになる。
+    e-staffing からダウンロードする前に精査は済んでいる（2026-09-04 谷津さん）ので、
+    顧客請求側を直すのではなく「交通費申請側に同じ移動が無いか」を人に知らせる。
+
+    突き合わせのキーは 社員番号・利用日・乗車場所→降車場所・片道額。
+    e-staffing は片道1行、jinjer は往復1行（金額(交通費)は片道額）なので、
+    jinjer 側が往復なら逆方向も照合する。駅名は経路突合と同じ規則で表記ゆれを吸収する。
+    SAP・freee の行は乗降場所を持たないので対象外。
+    戻り値は (顧客請求側の行, 交通費申請側の行) の組ごとに1件。
+    """
+    customer: dict = {}
+    for idx, r in enumerate(integrated_rows):
+        board, alight = _cell(r, C_BOARD), _cell(r, C_ALIGHT)
+        if not (board or alight):
+            continue
+        amt = _amount_int(_cell(r, C_CUSTOMER_BILL))
+        if amt == 0:
+            continue
+        who = _cell(r, C_EMP) or normkey(_cell(r, C_NAME))
+        key = (who, norm_date_slash(_cell(r, C_USEDATE)), amt)
+        customer.setdefault(key, []).append((idx + 2, r))
+    if not customer:
+        return []
+
+    out: list[dict] = []
+    for idx, r in enumerate(integrated_rows):
+        if _amount_int(_cell(r, C_CUSTOMER_BILL)) != 0:
+            continue
+        board, alight = _cell(r, C_BOARD), _cell(r, C_ALIGHT)
+        if not (board or alight):
+            continue
+        fare = _amount_int(_cell(r, C_FARE)) or _amount_int(_cell(r, C_AMOUNT))             or _amount_int(_cell(r, C_TOTAL))
+        if fare == 0:
+            continue
+        who = _cell(r, C_EMP) or normkey(_cell(r, C_NAME))
+        date = norm_date_slash(_cell(r, C_USEDATE))
+        legs = [(board, alight)]
+        if "往復" in _cell(r, C_ROUNDTRIP) and not _dup_station_eq(board, alight):
+            legs.append((alight, board))
+        for c_row_no, c in customer.get((who, date, fare), []):
+            c_board, c_alight = _cell(c, C_BOARD), _cell(c, C_ALIGHT)
+            if not any(_dup_station_eq(b, c_board) and _dup_station_eq(a, c_alight) for b, a in legs):
+                continue
+            c_src = "jinjer（顧客請求）" if _cell(c, C_BILLTYPE) == "顧客請求" else "e-staffing 立替金"
+            c_label = c_src + ("／" + _cell(c, C_TRANS) if _cell(c, C_TRANS) else "")
+            t_label = " ".join(x for x in (_cell(r, C_TRANS), _cell(r, C_DETAIL)) if x)
+            out.append({
+                "社員番号": _cell(r, C_EMP) or _cell(c, C_EMP),
+                "氏名": _cell(r, C_NAME) or _cell(c, C_NAME),
+                "利用日": date,
+                "乗車場所": c_board, "降車場所": c_alight,
+                "金額": fare,
+                "顧客請求側": c_label, "顧客請求側行番号": c_row_no,
+                "交通費申請側": t_label or "（交通機関なし）", "交通費申請側行番号": idx + 2,
+                "往復": _cell(r, C_ROUNDTRIP),
+                "判定": DUP_VERDICT,
+            })
+    out.sort(key=lambda d: (str(d["社員番号"]), str(d["利用日"]), d["交通費申請側行番号"], d["顧客請求側行番号"]))
+    return out
+
+
+def summarize_duplicates(dup_rows: list[dict]) -> dict:
+    return {
+        "rows": len(dup_rows),
+        "emps": len({(d["社員番号"], d["氏名"]) for d in dup_rows}),
+        "amount": sum(int(d.get("金額") or 0) for d in dup_rows),
+    }
+
+
+def add_duplicate_sheet(wb: Workbook, dup_rows: list[dict], index: "int | None" = None):
+    """「要確認(顧客請求重複)」シートを追加する。行が無ければ何もしない。"""
+    if not dup_rows:
+        return None
+    ws = wb.create_sheet("要確認(顧客請求重複)") if index is None         else wb.create_sheet("要確認(顧客請求重複)", index)
+    ws.append(_DUP_COLS)
+    for c in ws[1]:
+        c.font = Font(name=FONT, bold=True)
+    fill = PatternFill("solid", fgColor="FFC7CE")
+    for d in dup_rows:
+        ws.append([d.get(c, "") for c in _DUP_COLS])
+        for c in ws[ws.max_row]:
+            c.fill = fill
+    widths = [9, 12, 10, 14, 14, 8, 26, 10, 26, 10, 6, 40]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    return ws
+
+
+# ======================================================================
 # 経路突合レビュー（人間が行ごとに 通勤費 / 移動交通費 を選ぶ二段階実行）
 # ======================================================================
 
@@ -947,6 +1075,8 @@ class KeihiResult:
     unmatched_emp: int = 0                                  # 社員番号が引けなかった行数
     route_summary: dict = field(default_factory=dict)
     classify_summary: dict = field(default_factory=dict)   # 分類・集計の統計（P1b）
+    duplicate_summary: dict = field(default_factory=dict)  # 顧客請求分と交通費申請の重複疑い
+    duplicate_rows: list = field(default_factory=list)
     import_preview: list = field(default_factory=list)     # インポート行プレビュー（人間チェック用）
     import_warnings: list = field(default_factory=list)
     commute_cuts: list = field(default_factory=list)        # 通勤費の上限カット明細（投入前確認用）
@@ -1035,6 +1165,7 @@ def build_integrated_rows(
 class RoutePreviewResult:
     ok: bool
     review_rows: list = field(default_factory=list)
+    duplicate_rows: list = field(default_factory=list)   # 顧客請求分と交通費申請の重複疑い
     summary: dict = field(default_factory=dict)
     error: str = ""
     logs: list = field(default_factory=list)
@@ -1142,9 +1273,15 @@ def run_keihi_route_preview(
     def _mark_count(mark: str) -> int:
         return sum(1 for x in review if str(x["判定"]).startswith(mark))
 
+    # 顧客請求分（e-staffing 立替金など）と同じ移動が交通費申請にもある行。選ばせる
+    # ものではなく、二重払いにならないよう生成前に人へ知らせる（2026-09-04 谷津さん要望）
+    dup_rows = find_customer_bill_duplicates(rows)
+
     result.review_rows = review
+    result.duplicate_rows = dup_rows
     result.summary = {
         "review_rows": len(review),
+        "duplicate_rows": len(dup_rows),
         "flagged_rows": _mark_count("★"),
         "rev_rows": _mark_count("△"),
         "side_rows": _mark_count("▲"),
@@ -1155,6 +1292,8 @@ def run_keihi_route_preview(
     log_func(f"[info] 経路突合レビュー対象: {len(review)}行"
              f"（★{result.summary['flagged_rows']} / △{result.summary['rev_rows']}"
              f" / ▲{result.summary['side_rows']}）")
+    if dup_rows:
+        log_func(f"[warn] 顧客請求分と交通費申請の重複疑い: {len(dup_rows)}件")
     result.ok = True
     return result
 
@@ -1356,6 +1495,24 @@ def run_keihi_integration(
     # 経路突合シートは「人間判定」を書くため分類の後で作る。並び順は従来どおりにしたいので
     # この位置（統合一覧表・SAPシートの直後）を覚えておいて、後から index 指定で差し込む。
     route_sheet_anchor = len(wb.sheetnames)
+
+    # 顧客請求分と交通費申請の重複疑い。経路突合の有無によらず出す（通勤経路は不要）。
+    # シートは anchor の位置に先に置き、経路突合シートはその手前へ差し込まれる。
+    try:
+        dup_rows = find_customer_bill_duplicates(rows)
+    except Exception as e:  # noqa: BLE001 — 重複検出が失敗しても統合一覧表は出す
+        dup_rows = []
+        log_func(f"[warn] 顧客請求分の重複検出に失敗（スキップ）: {e}")
+    result.duplicate_rows = dup_rows
+    result.duplicate_summary = summarize_duplicates(dup_rows)
+    if dup_rows:
+        add_duplicate_sheet(wb, dup_rows, route_sheet_anchor)
+        _msg = (f"顧客請求分と交通費申請の重複疑いが {len(dup_rows)}件"
+                f"（{result.duplicate_summary['emps']}名・計 {result.duplicate_summary['amount']:,}円）"
+                "あります。「要確認(顧客請求重複)」シートで交通費申請側を確認してください")
+        result.warnings.append(_msg)
+        log_func(f"[warn] {_msg}")
+
     route_results: list[dict] = []
     if route_check:
         try:

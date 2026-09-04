@@ -2347,6 +2347,7 @@ def route_expense_integration_preview():
     return jsonify({
         "success": True,
         "review_rows": result.review_rows,
+        "duplicate_rows": result.duplicate_rows,
         "summary": result.summary,
         "console": log_lines,
     })
@@ -2551,6 +2552,7 @@ def route_expense_integration():
             "source_counts": result.source_counts,
             "unmatched_emp": result.unmatched_emp,
             "route_summary": result.route_summary,
+            "duplicate_summary": result.duplicate_summary,
             "classify_summary": result.classify_summary,
             "sap_dedup": result.sap_dedup,
             "ledger_writable": ledger_writable,

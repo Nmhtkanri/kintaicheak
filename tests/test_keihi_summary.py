@@ -875,3 +875,121 @@ def test_run_keihi_integration_jinjer_only(tmp_path):
     wb = load_workbook(out)
     assert "経費統合一覧表" in wb.sheetnames
     wb.close()
+
+
+# ----------------------------------------------------------------------
+# 顧客請求分と交通費申請の重複疑い（2026-09-04 谷津さん要望）
+# ----------------------------------------------------------------------
+
+def _dup_rows(emp="2021001", name="衣笠 博陽"):
+    """e-staffing 立替金（片道1行×2）＋ jinjer 往復1行（片道額）＋ 無関係な行。"""
+    from services.keihi_summary import (
+        C_AMOUNT, C_BOARD, C_ALIGHT, C_CUSTOMER_BILL, C_FARE, C_ROUNDTRIP, _blank_row)
+    e1 = _blank_row()
+    e1[C_EMP], e1[C_NAME], e1[C_USEDATE], e1[C_TRANS] = emp, name, "2026/8/3", "JR西日本"
+    e1[C_BOARD], e1[C_ALIGHT] = "住吉", "三宮"
+    e1[C_FARE] = e1[C_AMOUNT] = e1[C_CUSTOMER_BILL] = "200"
+    e2 = [x for x in e1]
+    e2[C_BOARD], e2[C_ALIGHT] = "三宮", "住吉"
+    j = _blank_row()
+    j[C_EMP], j[C_NAME], j[C_USEDATE], j[C_TRANS] = emp, name, "2026/08/03", "交通費（電車・バス）"
+    j[C_TOTAL], j[C_FARE], j[C_ROUNDTRIP] = "400", "200", "往復"
+    j[C_BOARD], j[C_ALIGHT] = "三ノ宮", "住吉"          # 駅名ゆれ＋逆方向（往復なので一致）
+    other = _blank_row()
+    other[C_EMP], other[C_NAME], other[C_USEDATE], other[C_TRANS] = emp, name, "2026/8/4", "JR西日本"
+    other[C_TOTAL], other[C_FARE], other[C_BOARD], other[C_ALIGHT] = "200", "200", "住吉", "三宮"
+    return [e1, e2, j, other]
+
+
+def test_find_customer_bill_duplicates_matches_same_day_route_and_fare():
+    from services.keihi_summary import DUP_VERDICT, find_customer_bill_duplicates
+    rows = _dup_rows()
+    dups = find_customer_bill_duplicates(rows)
+    # jinjer の往復1行（3行目）が e-staffing の片道2行（1・2行目）と一致。8/4 の行は日付違いで出ない
+    assert [(d["顧客請求側行番号"], d["交通費申請側行番号"]) for d in dups] == [(2, 4), (3, 4)]
+    d = dups[0]
+    assert d["社員番号"] == "2021001" and d["金額"] == 200 and d["利用日"] == "2026/8/3"
+    assert d["顧客請求側"].startswith("e-staffing 立替金")
+    assert d["交通費申請側"] == "交通費（電車・バス）"
+    assert d["判定"] == DUP_VERDICT
+
+
+def test_find_customer_bill_duplicates_one_way_does_not_match_reverse():
+    from services.keihi_summary import C_ROUNDTRIP, find_customer_bill_duplicates
+    rows = _dup_rows()
+    rows[2][C_ROUNDTRIP] = "片道"
+    dups = find_customer_bill_duplicates(rows)
+    # 片道なら申請どおりの方向（三ノ宮→住吉）だけ。住吉→三宮 の e-staffing 行とは一致しない
+    assert [(d["顧客請求側行番号"], d["交通費申請側行番号"]) for d in dups] == [(3, 4)]
+
+
+def test_find_customer_bill_duplicates_ignores_other_people_and_amounts():
+    from services.keihi_summary import C_FARE, find_customer_bill_duplicates
+    rows = _dup_rows()
+    rows[2][C_EMP] = "2020001"
+    assert find_customer_bill_duplicates(rows) == []
+    rows = _dup_rows()
+    rows[2][C_FARE] = "210"
+    assert find_customer_bill_duplicates(rows) == []
+    # 顧客請求分の行が1つも無ければ空
+    assert find_customer_bill_duplicates([_dup_rows()[2]]) == []
+
+
+def test_find_customer_bill_duplicates_flags_jinjer_customer_bill_rows_too():
+    """jinjer の請求区分=顧客請求 の行（34列目へ寄せた行）も顧客請求側として突き合わせる。"""
+    from services.keihi_summary import find_customer_bill_duplicates
+    rows = transform_jinjer([], [
+        _jinjer_row(emp="2020001", billtype="顧客請求", total="500", detail="客先請求分（交通費）",
+                    use="2026/06/01"),
+        _jinjer_row(emp="2020001", total="500", use="2026/06/01"),
+    ])
+    for r in rows:
+        r[C_BOARD], r[C_ALIGHT], r[C_FARE] = "東京", "品川", "500"
+    dups = find_customer_bill_duplicates(rows)
+    assert len(dups) == 1
+    assert dups[0]["顧客請求側"].startswith("jinjer（顧客請求）")
+
+
+def test_summarize_duplicates_and_sheet(tmp_path):
+    from openpyxl import Workbook
+    from services.keihi_summary import (
+        add_duplicate_sheet, find_customer_bill_duplicates, summarize_duplicates)
+    dups = find_customer_bill_duplicates(_dup_rows())
+    assert summarize_duplicates(dups) == {"rows": 2, "emps": 1, "amount": 400}
+    assert summarize_duplicates([]) == {"rows": 0, "emps": 0, "amount": 0}
+    wb = Workbook()
+    assert add_duplicate_sheet(wb, []) is None          # 0件ならシートを作らない
+    ws = add_duplicate_sheet(wb, dups, 0)
+    assert wb.sheetnames[0] == "要確認(顧客請求重複)"
+    assert ws.max_row == 3 and ws["A1"].value == "社員番号"
+
+
+def test_route_preview_returns_duplicates_even_without_review_rows(tmp_path):
+    """要確認0件でも重複疑いは返す（画面はこれがあれば生成前に止まる）。"""
+    import csv
+    from services.keihi_summary import C_ROUNDTRIP, run_keihi_route_preview
+    jcsv = tmp_path / "jinjer.csv"
+    with open(jcsv, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["申請者社員番号", "申請者名"] + [f"c{i}" for i in range(31)])
+        r = _jinjer_row(emp="2021001", name="衣笠 博陽", trans="交通費（電車・バス）",
+                        total="400", use="2026/08/03")
+        r[C_FARE], r[C_ROUNDTRIP], r[C_BOARD], r[C_ALIGHT] = "200", "往復", "住吉", "三ノ宮"
+        w.writerow(r)
+    ecsv = tmp_path / "estaffing.csv"
+    with open(ecsv, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["タイムカード番号", "クライアントコード", "就業先企業名", "スタッフコード", "スタッフ名",
+                    "就業年月日", "契約No.", "通番", "出発地", "到着地", "交通手段",
+                    "その他立替金内容", "非課税立替金内容", "課税対象外内容", "金額"])
+        w.writerow(["1", "c", "会社", "KIN", "衣笠 博陽", "2026/08/03", "C1", "1",
+                    "住吉", "三宮", "JR西日本", "", "", "", "200"])
+    roster = {}
+    add_roster_entry(roster, "衣笠 博陽", "2021001")
+    # 通勤経路は登録なし＝★△▲は出ない（e-staffing は対象外・jinjer は経路外→OK）
+    res = run_keihi_route_preview(jinjer_csv=jcsv, estaffing_csv=ecsv, log_func=lambda m: None,
+                                  commute_rows=[], travel_members={}, roster=roster)
+    assert res.ok is True
+    assert res.summary["duplicate_rows"] == 1
+    assert res.duplicate_rows[0]["社員番号"] == "2021001"
+    assert res.duplicate_rows[0]["金額"] == 200
