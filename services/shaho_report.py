@@ -56,7 +56,7 @@ def build_workbook(check: dict) -> Workbook:
         ("算定", f"{check['year']}年4〜6月支給 → {check['year']}年9月適用予定"),
         ("突合月", f"{check['check_month']}（本人控除＝{check['cfg']['lag']}か月前の分）"),
         ("保険者", {"its": "関東IT健保", "kyokai_tokyo": "協会けんぽ東京"}[check["insurer"]]),
-        ("等級表", f"{master.path}（令和{master.year - 2018}年度・検証済み）"),
+        ("等級表", f"{master.path}（{master.description}）"),
         ("分類マスタ", f"{check['class_master']['path']}（{len(check['class_master']['rules'])}行）"),
         ("丸め", check["cfg"]["rounding"]), ("許容差", f"±{check['cfg']['tolerance']}円"),
         ("対象者", f"{len(results)}名"),

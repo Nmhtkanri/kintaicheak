@@ -17,6 +17,7 @@ from services.shaho_master import (GradeRow, ShahoMasterError, load_class_master
                                    load_grade_table, resolve_class)
 
 REAL_XLSX = r"Z:\API連携\標準月額資料\令和8年度_標準報酬月額表_関東IT健保_協会けんぽ東京比較.xlsx"
+OFFICIAL_XLSX = r"Z:\API連携\標準月額資料\標準報酬月額_2026_09.xlsx"
 
 # ミニ等級表: 健保3等級（最終は上限なし）・厚年2等級。料率は本物と同じ。
 RATES = {"kenpo": 0.04635, "kodomo": 0.00115, "kaigo": 0.009, "konen": 0.0915}
@@ -569,51 +570,252 @@ class ClosedMonthTests(unittest.TestCase):
         self.assertEqual(st["open"], 1)
 
 
-class NewerTableTests(unittest.TestCase):
-    """Codexが毎月1日に置く公式資料（標準報酬月額_YYYY_MM.xlsx）の検知。
+class SelectTableTests(unittest.TestCase):
+    """Codexが毎月1日に置く公式資料（標準報酬月額_YYYY_MM.xlsx）から、対象年月に合うものを選ぶ。
 
-    計算に使うのは設定の等級表1本だけで、Codexのファイルは自動では読まない
-    （作りが違うため）。新しいものが来たら画面で知らせるところまでを担う。
+    対象年月以前で最新 → 無ければ同じ年度で最も早いもの → それも無ければ設定の手作りブック。
     """
 
     def _folder(self, tmp, names, base_name="令和8年度_表.xlsx"):
-        import time
         base = os.path.join(tmp, base_name)
-        with open(base, "wb") as f:
-            f.write(b"x")
-        old = time.time() - 3600
-        os.utime(base, (old, old))
-        for name in names:
+        for name in [base_name] + list(names):
             with open(os.path.join(tmp, name), "wb") as f:
                 f.write(b"x")
         return base
 
-    def test_newer_official_table_is_detected(self):
-        from services.shaho_master import find_newer_tables
+    def test_latest_snapshot_on_or_before_target_month(self):
+        from services.shaho_master import select_grade_table
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._folder(tmp, ["標準報酬月額_2026_09.xlsx", "標準報酬月額_2026_10.xlsx",
+                                      "標準報酬月額_2026_12.xlsx"])
+            c = select_grade_table("2026-11", base)
+            self.assertEqual(os.path.basename(c.path), "標準報酬月額_2026_10.xlsx")
+            self.assertEqual(c.snapshot_ym, "2026-10")
+            c = select_grade_table("2026-09", base)
+            self.assertEqual(c.snapshot_ym, "2026-09")
+
+    def test_earliest_in_same_fiscal_year_when_none_before(self):
+        """9月の資料しか無いのに7月分を計算する: 同じ年度なので9月の資料を使う。"""
+        from services.shaho_master import select_grade_table
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._folder(tmp, ["標準報酬月額_2026_09.xlsx", "標準報酬月額_2026_10.xlsx"])
+            c = select_grade_table("2026-07", base)
+            self.assertEqual(c.snapshot_ym, "2026-09")
+
+    def test_falls_back_to_configured_when_no_snapshot_fits(self):
+        """前年度（2026-03 は令和7年度）には 2026_09 の資料は使えない → 設定のブック。"""
+        from services.shaho_master import select_grade_table
         with tempfile.TemporaryDirectory() as tmp:
             base = self._folder(tmp, ["標準報酬月額_2026_09.xlsx"])
-            self.assertEqual(find_newer_tables(base), ["標準報酬月額_2026_09.xlsx"])
+            c = select_grade_table("2026-03", base)
+            self.assertEqual(c.path, base)
+            self.assertIsNone(c.snapshot_ym)
 
     def test_other_filenames_are_ignored(self):
         """命名ルール（年4桁_月2桁）から外れるものは拾わない。"""
-        from services.shaho_master import find_newer_tables
+        from services.shaho_master import select_grade_table
         with tempfile.TemporaryDirectory() as tmp:
             base = self._folder(tmp, ["標準報酬月額_2026_9.xlsx", "メモ.xlsx",
-                                      "標準報酬月額表_2026_09.xlsx"])
-            self.assertEqual(find_newer_tables(base), [])
+                                      "標準報酬月額表_2026_09.xlsx", "標準報酬月額_2026_13.xlsx"])
+            self.assertEqual(select_grade_table("2026-09", base).path, base)
 
-    def test_older_file_is_not_reported(self):
-        import time
-        from services.shaho_master import find_newer_tables
-        with tempfile.TemporaryDirectory() as tmp:
-            base = self._folder(tmp, ["標準報酬月額_2026_08.xlsx"])
-            older = time.time() - 7200
-            os.utime(os.path.join(tmp, "標準報酬月額_2026_08.xlsx"), (older, older))
-            self.assertEqual(find_newer_tables(base), [])
+    def test_missing_folder_is_safe(self):
+        from services.shaho_master import select_grade_table
+        c = select_grade_table("2026-09", "Z:/ない/ない.xlsx")
+        self.assertEqual(c.path, "Z:/ない/ない.xlsx")
 
-    def test_missing_configured_file_is_safe(self):
-        from services.shaho_master import find_newer_tables
-        self.assertEqual(find_newer_tables("Z:/ない/ない.xlsx"), [])
+
+# ---------------------------------------------------------------------------
+# Codex 公式資料（協会けんぽの様式そのまま）のミニ版
+# ---------------------------------------------------------------------------
+OFFICIAL_RATES = {"kenpo": 0.0985, "kenpo_kaigo": 0.1147, "kodomo": 0.0023, "konen": 0.183}
+# (等級欄の表記, 健保標報, 下限, 上限, 厚年標報|None=厚年の額が空欄の行)
+# 実物と同じく、厚年の帯の端の等級は括弧も厚年の額も付かない
+OFFICIAL_ROWS = [
+    (1, 58000, None, 63000, None),
+    ("2(1)", 68000, 63000, 73000, 88000),
+    ("3(2)", 78000, 73000, None, 98000),
+]
+OFFICIAL_NAME = "標準報酬月額_2026_09.xlsx"
+
+
+def build_official_workbook(rows=None, konen_rows=None, rates=None, about_ym="2026年9月",
+                            year_text="令和8年度　都道府県別保険料率一覧", listed_override=None,
+                            premium_override=None, konen_sheet_pct=18.3):
+    """検証を通る最小の公式資料を組む。引数で壊し方を指定できる。"""
+    rows = OFFICIAL_ROWS if rows is None else rows
+    konen_rows = KONEN_ROWS if konen_rows is None else konen_rows
+    r_ = dict(OFFICIAL_RATES, **(rates or {}))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "東京"
+    ws["A1"] = "令和８年３月分（４月納付分）からの健康保険・厚生年金保険の保険料額表"
+    ws["A3"] = "　・健康保険料率：令和8年3月分～適用"
+    ws["E3"] = "　・厚生年金保険料率：平成29年9月分～適用"
+    ws["I3"] = "・子ども・子育て支援金率：令和8年4月分（5月納付分）～適用"
+    ws["A4"] = "　・介護保険料率：令和8年3月分～適用"
+    ws["A5"] = "（東京支部）"
+    ws["A6"] = "標  準  報  酬"
+    ws["C6"] = "報  酬  月  額"
+    ws["F6"] = "全国健康保険協会管掌健康保険料・介護保険料"
+    ws["J6"] = "子ども・子育て支援金"
+    ws["L6"] = "厚生年金保険料\n（厚生年金基金加入員を除く）"
+    ws["F7"] = "介護保険第２号被保険者\nに該当しない場合"
+    ws["H7"] = "介護保険第２号被保険者\nに該当する場合"
+    ws["A8"] = "等級"
+    ws["B8"] = "月  額"
+    ws["F8"], ws["H8"], ws["J8"], ws["L8"] = (r_["kenpo"], r_["kenpo_kaigo"],
+                                              r_["kodomo"], r_["konen"])
+    for c in ("F", "H", "J", "L"):
+        ws[f"{c}9"] = "全  額"
+    for c in ("G", "I", "K", "M"):
+        ws[f"{c}9"] = "折半額"
+    ws["C10"], ws["E10"] = "円以上", "円未満"
+    for i, (g, smr, lo, up, ksmr) in enumerate(rows):
+        r = 11 + i
+        prem = {"G": smr * r_["kenpo"] / 2, "I": smr * r_["kenpo_kaigo"] / 2,
+                "K": smr * r_["kodomo"] / 2,
+                "M": ksmr * r_["konen"] / 2 if ksmr is not None else None}
+        if premium_override and g in premium_override:
+            prem.update(premium_override[g])
+        ws[f"A{r}"], ws[f"B{r}"], ws[f"C{r}"], ws[f"D{r}"], ws[f"E{r}"] = g, smr, lo, "～", up
+        for col, v in prem.items():
+            ws[f"{col}{r}"] = v
+    ws[f"A{11 + len(rows) + 1}"] = "◆等級欄の（　）内の数字は、厚生年金保険の標準報酬月額等級です。"
+
+    ws2 = wb.create_sheet("厚生年金_公式表")
+    ws2["A1"] = "○令和2年9月分（10月納付分）からの厚生年金保険料額表（令和8年度版）"
+    ws2["E2"], ws2["F2"] = "全額保険料率", "折半保険料率"
+    ws2["E3"], ws2["F3"] = konen_sheet_pct, konen_sheet_pct / 2
+    for c, h in enumerate(["等級", "標準報酬月額", "報酬月額 下限", "報酬月額 上限",
+                           "保険料 全額", "保険料 折半額"], start=1):
+        ws2.cell(5, c).value = h
+    k_rate = konen_sheet_pct / 100          # このシートの額は自分の率で作る（率のズレ検知を試すため）
+    for i, (g, smr, lo, up) in enumerate(konen_rows):
+        for c, v in enumerate((g, smr, lo or None, up, smr * k_rate, smr * k_rate / 2), start=1):
+            ws2.cell(6 + i, c).value = v
+
+    ws3 = wb.create_sheet("都道府県料率一覧")
+    ws3["A1"] = year_text
+    for c, h in enumerate(["都道府県", "健康保険料率\n（介護非該当）", "健康＋介護保険料率\n（介護該当）",
+                           "子ども・子育て\n支援金率", "厚生年金\n保険料率", "参照シート"], start=1):
+        ws3.cell(3, c).value = h
+    listed = dict(r_, **(listed_override or {}))
+    for c, v in enumerate(["東京", listed["kenpo"], listed["kenpo_kaigo"], listed["kodomo"],
+                           listed["konen"], "東京"], start=1):
+        ws3.cell(4, c).value = v
+
+    ws4 = wb.create_sheet("概要・出典")
+    ws4["A1"] = "標準報酬月額・保険料額資料　2026年9月スナップショット"
+    ws4["A3"], ws4["B3"] = "対象年月", about_ym
+    ws4["A4"], ws4["B4"] = "確認日時（日本時間）", "2026/9/4 9:32:30"
+    ws4["A10"], ws4["B10"] = "機関", "公式ページ"
+    ws4["A11"], ws4["B11"] = "全国健康保険協会", "https://www.kyoukaikenpo.or.jp/x"
+    ws4["A12"], ws4["B12"] = "日本年金機構", "https://www.nenkin.go.jp/x"
+    return wb
+
+
+def load_official(wb, insurer="kyokai_tokyo", year=2026, name=OFFICIAL_NAME, its_wb=None):
+    """公式資料（と its 用の手作りブック）を一時フォルダに保存して読む。"""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, name)
+        wb.save(path)
+        its_path = os.path.join(d, "令和8年度_表.xlsx")
+        if its_wb is not None:
+            its_wb.save(its_path)
+        return load_grade_table(path, insurer, year, its_rates_xlsx=its_path)
+
+
+class OfficialFormatTests(unittest.TestCase):
+    """Codex の公式資料（協会けんぽ様式＋厚生年金_公式表）を直接読む。"""
+
+    def test_kyokai_tokyo_reads_everything_from_the_file(self):
+        m = load_official(build_official_workbook())
+        self.assertEqual(m.snapshot_ym, "2026-09")
+        self.assertEqual(m.year, 2026)
+        self.assertEqual([g.kenpo_smr for g in m.grades], [58000, 68000, 78000])
+        self.assertEqual([g.konen_grade for g in m.grades], [1, 1, 2])
+        self.assertEqual([g.konen_smr for g in m.grades], [88000, 88000, 98000])
+        self.assertIsNone(m.grades[-1].upper)
+        self.assertAlmostEqual(m.rates["kenpo"].total, 0.0985)
+        self.assertAlmostEqual(m.rates["kenpo"].employee, 0.04925)
+        self.assertAlmostEqual(m.rates["kaigo"].total, 0.0162)
+        self.assertAlmostEqual(m.rates["kodomo"].employee, 0.00115)
+        self.assertAlmostEqual(m.rates["konen"].employee, 0.0915)
+        self.assertEqual(m.rates["kenpo"].applies, "令和8年3月分~適用")
+        self.assertIn("kyoukaikenpo", m.rates["kenpo"].source_url)
+        self.assertIn("nenkin", m.rates["konen"].source_url)
+        self.assertIn("2026-09", m.description)
+
+    def test_its_takes_kenpo_and_kaigo_rates_from_handmade_workbook(self):
+        """関東IT健保の健康・介護は公式資料に無いので手作りブックから。支援金・厚年は公式資料。"""
+        m = load_official(build_official_workbook(), insurer="its", its_wb=build_workbook())
+        self.assertAlmostEqual(m.rates["kenpo"].employee, 0.04635)
+        self.assertAlmostEqual(m.rates["kaigo"].employee, 0.009)
+        self.assertAlmostEqual(m.rates["kodomo"].employee, 0.00115)
+        self.assertAlmostEqual(m.rates["konen"].employee, 0.0915)
+        self.assertIn("nenkin", m.rates["konen"].source_url)
+        self.assertTrue(m.its_rates_path.endswith("令和8年度_表.xlsx"))
+        self.assertIn("関東IT健保の料率は", m.description)
+
+    def test_its_without_handmade_workbook_stops(self):
+        with self.assertRaisesRegex(ShahoMasterError, "手作りブック"):
+            load_official(build_official_workbook(), insurer="its")
+
+    def test_its_stops_when_handmade_common_rate_is_stale(self):
+        """公式資料の支援金率が変わったのに手作りブックが古いまま → 止めて直す場所を示す。"""
+        with self.assertRaisesRegex(ShahoMasterError, "設定・出典.*子ども・子育て支援金"):
+            load_official(build_official_workbook(rates={"kodomo": 0.0025}),
+                          insurer="its", its_wb=build_workbook())
+
+    def test_its_stops_when_handmade_workbook_is_last_years(self):
+        old = build_workbook(year_text="令和7年度 標準報酬月額・本人負担額一覧")
+        with self.assertRaisesRegex(ShahoMasterError, "関東IT健保の料率の元"):
+            load_official(build_official_workbook(), insurer="its", its_wb=old)
+
+    def test_year_mismatch_stops(self):
+        with self.assertRaisesRegex(ShahoMasterError, "年度"):
+            load_official(build_official_workbook(), year=2027)
+
+    def test_filename_month_must_match_about_sheet(self):
+        with self.assertRaisesRegex(ShahoMasterError, "対象年月"):
+            load_official(build_official_workbook(about_ym="2026年10月"))
+
+    def test_stale_premium_column_stops(self):
+        with self.assertRaisesRegex(ShahoMasterError, "折半額"):
+            load_official(build_official_workbook(premium_override={"2(1)": {"G": 3300.0}}))
+
+    def test_missing_konen_premium_inside_band_stops(self):
+        """厚年の帯の内側なのに厚年の額が空欄 → 表が壊れている。
+
+        端の等級（実物の1〜3・36等級以上）は空欄が正しいので、厚年を3等級にして
+        真ん中の等級を空欄にして確かめる。
+        """
+        konen = [(1, 88000, 0, 63000), (2, 98000, 63000, 73000), (3, 104000, 73000, None)]
+        rows = [(1, 58000, None, 63000, None), ("2(2)", 68000, 63000, 73000, None),
+                ("3(3)", 78000, 73000, None, 104000)]
+        with self.assertRaisesRegex(ShahoMasterError, "空欄"):
+            load_official(build_official_workbook(rows=rows, konen_rows=konen))
+
+    def test_paren_grade_must_match_konen_table(self):
+        rows = [(1, 58000, None, 63000, None), ("2(2)", 68000, 63000, 73000, 88000),
+                ("3(2)", 78000, 73000, None, 98000)]
+        with self.assertRaisesRegex(ShahoMasterError, "括弧内"):
+            load_official(build_official_workbook(rows=rows))
+
+    def test_rate_list_sheet_must_agree(self):
+        with self.assertRaisesRegex(ShahoMasterError, "都道府県料率一覧"):
+            load_official(build_official_workbook(listed_override={"kenpo": 0.0990}))
+
+    def test_konen_rate_must_agree_between_sheets(self):
+        with self.assertRaisesRegex(ShahoMasterError, "厚生年金の料率"):
+            load_official(build_official_workbook(konen_sheet_pct=18.5))
+
+    def test_handmade_workbook_still_loads_as_before(self):
+        """作りの見分け: 手作りブックは従来どおり読める。"""
+        m = load_from_workbook(build_workbook())
+        self.assertIsNone(m.snapshot_ym)
+        self.assertIn("手作り", m.description)
 
 
 class RealFileTests(unittest.TestCase):
@@ -652,6 +854,40 @@ class RealFileTests(unittest.TestCase):
     def test_wrong_year_stops(self):
         with self.assertRaises(ShahoMasterError):
             load_grade_table(REAL_XLSX, "its", 2027)
+
+
+class RealOfficialFileTests(unittest.TestCase):
+    """Codex が置いた実在の公式資料（2026年9月）を読む（無ければスキップ）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        if not (os.path.exists(OFFICIAL_XLSX) and os.path.exists(REAL_XLSX)):
+            raise unittest.SkipTest(f"見つかりません: {OFFICIAL_XLSX}")
+        cls.master = load_grade_table(OFFICIAL_XLSX, "its", 2026, its_rates_xlsx=REAL_XLSX)
+
+    def test_shape_matches_handmade_workbook(self):
+        hand = load_grade_table(REAL_XLSX, "its", 2026)
+        self.assertEqual(self.master.snapshot_ym, "2026-09")
+        self.assertEqual(self.master.grades, hand.grades)
+        self.assertEqual(self.master.konen_bands, hand.konen_bands)
+        for key in ("kenpo", "kodomo", "kaigo", "konen"):
+            self.assertAlmostEqual(self.master.rates[key].employee, hand.rates[key].employee)
+
+    def test_known_premium_reproduces(self):
+        row = self.master.find_grade(620000)
+        self.assertEqual(round(row.kenpo_smr * self.master.rates["kenpo"].employee), 28737)
+        self.assertEqual(round(row.konen_smr * self.master.rates["konen"].employee), 56730)
+
+    def test_kyokai_tokyo_from_official_only(self):
+        m = load_grade_table(OFFICIAL_XLSX, "kyokai_tokyo", 2026)
+        self.assertAlmostEqual(m.rates["kenpo"].employee, 0.04925)
+        self.assertAlmostEqual(m.rates["kaigo"].employee, 0.0081)
+        self.assertEqual(m.find_grade(620000).kenpo_smr, 620000)
+
+    def test_select_picks_the_september_snapshot(self):
+        from services.shaho_master import select_grade_table
+        c = select_grade_table("2026-09", REAL_XLSX)
+        self.assertEqual(os.path.abspath(c.path), os.path.abspath(OFFICIAL_XLSX))
 
 
 if __name__ == "__main__":

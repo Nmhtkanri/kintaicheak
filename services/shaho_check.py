@@ -19,7 +19,8 @@ from services.keiri_engine import is_shaho_menjo_prev, ym_add, ym_compact
 from services.shaho_engine import (BI_KENPO_SMR, BI_KONEN_SMR, MONTHLY_SYSTEMS,  # noqa: F401
                                    assess_month, calc_teiji_kettei, load_statements_full,
                                    registered_smr, salary_system_name)
-from services.shaho_master import ShahoMasterError, load_class_master, load_grade_table
+from services.shaho_master import (ShahoMasterError, load_class_master, load_grade_table,
+                                   select_grade_table)
 
 # 判定ステータス（強い順。総合は2系統の強い方）
 STATUS_PRIORITY = ["INSUFFICIENT_DATA", "EXEMPTION_REVIEW", "TWO_MONTH_COLLECTION_REVIEW",
@@ -338,7 +339,12 @@ def run_check(year: int, check_month: str, insurer: str = None, out_base: str = 
               grade_xlsx: str = None, class_csv: str = None) -> dict:
     insurer = insurer or Config.SHAHO_INSURER
     out_base = out_base or Config.SHAHO_OUTPUT_DIR
-    master = load_grade_table(grade_xlsx or Config.SHAHO_GRADE_TABLE_XLSX, insurer, year)
+    if grade_xlsx is None:
+        # 控除を突き合わせる保険料の月（支給月 − 徴収ラグ）に合う等級表を選ぶ。
+        # Codex の公式資料（標準報酬月額_YYYY_MM.xlsx）があればそれ、無ければ設定の手作りブック
+        premium_ym = ym_add(check_month, -Config.SHAHO_DEDUCTION_LAG_MONTHS)
+        grade_xlsx = select_grade_table(premium_ym, Config.SHAHO_GRADE_TABLE_XLSX).path
+    master = load_grade_table(grade_xlsx, insurer, year)
     class_master = load_class_master(class_csv or Config.SHAHO_CLASS_MASTER_CSV)
     cfg = {"threshold": Config.SHAHO_BASE_DAYS_THRESHOLD,
            "rounding": Config.SHAHO_ROUNDING,

@@ -272,14 +272,17 @@ def load_calc_context(target_ym: str, *, stmt=None, cache_dir: str = None,
     A（PDF）と B（jinjer）の突合は続けられるようにするため。
     """
     from services.shaho_engine import load_statements_full
-    from services.shaho_master import ShahoMasterError, load_class_master, load_grade_table
+    from services.shaho_master import (ShahoMasterError, load_class_master, load_grade_table,
+                                       select_grade_table)
 
     cache_dir = cache_dir or Config.KEIRI_OUTPUT_DIR
     ctx = CalcContext(threshold=threshold if threshold is not None
                       else Config.SHAHO_BASE_DAYS_THRESHOLD)
     try:
-        ctx.master = load_grade_table(grade_xlsx or Config.SHAHO_GRADE_TABLE_XLSX,
-                                      insurer or Config.SHAHO_INSURER,
+        if grade_xlsx is None:
+            # 対象年月に合う等級表を選ぶ（Codex の公式資料があればそれ、無ければ設定の手作りブック）
+            grade_xlsx = select_grade_table(target_ym, Config.SHAHO_GRADE_TABLE_XLSX).path
+        ctx.master = load_grade_table(grade_xlsx, insurer or Config.SHAHO_INSURER,
                                       _fiscal_year(target_ym))
         ctx.class_master = load_class_master(class_csv or Config.SHAHO_CLASS_MASTER_CSV)
     except ShahoMasterError as e:
