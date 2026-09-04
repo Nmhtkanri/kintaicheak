@@ -840,6 +840,7 @@ def test_run_keihi_integration_stops_when_choices_do_not_match(tmp_path, monkeyp
         log_func=lambda m: None)
     assert res.ok is False
     assert "プレビュー" in res.error
+    assert res.route_choices_stale is True      # 画面はこのときだけレビュー表を閉じる
     assert not out.exists()
     assert not list(tmp_path.glob("*インポート.csv"))
 
@@ -852,6 +853,24 @@ def test_run_keihi_integration_requires_classify_for_choices(tmp_path, monkeypat
         classify=False, route_choices=[{"key": "a", "choice": "通勤費"}],
         log_func=lambda m: None)
     assert res.ok is False and "分類・集計" in res.error
+    assert res.route_choices_stale is False     # 選択自体は古くない＝表は残す
+
+
+def test_run_keihi_integration_sap_ledger_error_keeps_choices(tmp_path, monkeypatch):
+    """SAP台帳の突合で落ちても「選択が古い」印は付けない（画面は表と選択を残す）。"""
+    jcsv, commute = _route_choice_csv(tmp_path)
+    _offline_route_check(monkeypatch, commute)
+    bad_sap = tmp_path / "経費チェック2026年8月.xlsx"
+    bad_sap.write_bytes(b"\x00\xff\xfe not a csv")
+    ledger = tmp_path / "ledger.csv"
+    ledger.write_text("", encoding="utf-8")
+    res = run_keihi_integration(
+        output_path=tmp_path / "x.xlsx", jinjer_csv=jcsv, sap_csv=bad_sap,
+        sap_ledger_csv=ledger, route_check=True, classify=True,
+        route_choices=[], log_func=lambda m: None)
+    assert res.ok is False
+    assert "SAP台帳との突合に失敗" in res.error
+    assert res.route_choices_stale is False
 
 
 def test_run_keihi_integration_jinjer_only(tmp_path):

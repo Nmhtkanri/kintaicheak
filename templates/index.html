@@ -3277,8 +3277,15 @@
             if (!data.success){
                 showError('ki-error-area', data.errors || ['処理に失敗しました']);
                 document.getElementById('ki-status').textContent = '';
-                // 選択が食い違って落ちた場合は、古い表のまま押し直せないよう閉じる
-                if (routeChoices) kiHideRouteReview();
+                // 選択がプレビュー時と食い違って落ちた場合だけ、古い表のまま押し直せないよう閉じる。
+                // SAP台帳の突合失敗など別のエラーでは表と選択を残す。以前はどのエラーでも閉じていて、
+                // 行ごとに選んだ内容が全部消えていた（2026-09-04 谷津さん）
+                if (routeChoices && data.route_choices_stale) {
+                    kiHideRouteReview();
+                } else if (routeChoices) {
+                    document.getElementById('ki-route-review-status').textContent =
+                        'エラーで生成できませんでした。選択はそのまま残っています。原因を直して「選択を反映して生成」を押し直してください。';
+                }
                 return;
             }
             const st = data.stats || {};
@@ -3619,8 +3626,10 @@
             document.getElementById('ki-status').textContent = '';
         });
     }
-    // 入力を変えたら選択は無効。古い表のまま確定させない（最後の砦はサーバ側のキー突合）
-    ['ki-jinjer', 'ki-estaffing', 'ki-sap', 'ki-freee', 'ki-keywords',
+    // 入力を変えたら選択は無効。古い表のまま確定させない（最後の砦はサーバ側のキー突合）。
+    // ③SAP・④freee は経路突合の行（キー）に関係しないので、直しても表は残す
+    // （SAPのパス違いで落ちたあと、直して押し直せるように。2026-09-04 谷津さん）
+    ['ki-jinjer', 'ki-estaffing', 'ki-keywords',
      'ki-route-check', 'ki-classify'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', kiHideRouteReview);

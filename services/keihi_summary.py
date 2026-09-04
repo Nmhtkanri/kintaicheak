@@ -1085,6 +1085,9 @@ class KeihiResult:
     sap_dedup: dict = field(default_factory=dict)           # SAP台帳突合の統計（未実施なら空）
     warnings: list = field(default_factory=list)            # 実行はできたが人に伝えるべきこと
     error: str = ""
+    # レビューの選択がプレビュー時と食い違って止めたとき True。画面はこのときだけ
+    # レビュー表を閉じる（SAP台帳などの別エラーでは表と選択を残して押し直せるようにする）
+    route_choices_stale: bool = False
     logs: list[str] = field(default_factory=list)
 
 
@@ -1538,6 +1541,7 @@ def run_keihi_integration(
                             "（入力CSVが変わった可能性があります）。"
                             "もう一度実行してプレビューからやり直してください。\n"
                             + "\n".join(choice_errors))
+            result.route_choices_stale = True
             log_func(f"[error] {result.error}")
             return result
 

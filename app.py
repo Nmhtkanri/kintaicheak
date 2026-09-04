@@ -2562,6 +2562,7 @@ def route_expense_integration():
     }
     if not result.ok:
         payload["errors"] = [result.error] if result.error else ["統合一覧表の生成に失敗しました"]
+        payload["route_choices_stale"] = bool(result.route_choices_stale)
         return jsonify(payload), 500
     return jsonify(payload)
 
