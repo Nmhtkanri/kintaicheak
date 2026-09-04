@@ -3621,7 +3621,7 @@ def route_shaho_import_preview():
       - expected_ym : 対象年月 YYYY-MM（入れるとPDFと違う月なら止める）
       - refresh     : "1" で従業員一覧をAPIから取り直す
     """
-    from services import shaho_its, shaho_master, shaho_pdf, shaho_writer
+    from services import shaho_its, shaho_pdf, shaho_writer
     from services.jinjer_api_client import JinjerAPIError
     from services.keiri_api import load_or_fetch_roster, roster_index
 
@@ -3735,15 +3735,11 @@ def route_shaho_import_preview():
             "通知の値が当方の算定と食い違っていても気づけません"
             "（投入できる" + str(len(selectable_rows)) + "名は全員この状態です）。"
             "経理モードを実行している端末で動かすと3点で確認できます")
-    # Codex が毎月1日に置く公式資料（標準報酬月額_YYYY_MM.xlsx）が、いま計算に
-    # 使っている等級表より新しければ知らせる。自動では読まない（作りが違うため）。
-    newer = shaho_master.find_newer_tables(Config.SHAHO_GRADE_TABLE_XLSX)
-    if newer:
-        notes.append(
-            "⚠ 新しい標準報酬月額表が届いています（" + "、".join(newer) + "）。"
-            "いま計算に使っているのは "
-            + os.path.basename(Config.SHAHO_GRADE_TABLE_XLSX)
-            + " です。料率が変わっていないか確認し、変わっていれば等級表を差し替えてください")
+    # どの等級表で計算したかを残す。Codex が毎月置く公式資料（標準報酬月額_YYYY_MM.xlsx）は
+    # 対象年月に合うものを shaho_master.select_grade_table が自動で選ぶ
+    if ctx.master is not None:
+        notes.append("等級表: " + os.path.basename(ctx.master.path)
+                     + "（" + ctx.master.description + "）")
     # 基準年月の意味を実データで確かめる（PDFは「7月分＝8月給与控除」と書いてある）
     collections = {shaho_writer.record_ym(r): str(r.get("collection_month") or "")
                    for recs in current.values() for r in recs
