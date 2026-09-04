@@ -1910,6 +1910,8 @@
         <div id="ki-route-review-area" style="display:none; margin:8px 14px; border:2px solid #b8860b; border-radius:6px; padding:10px 14px">
             <div style="font-weight:bold; margin-bottom:4px">🔀 経路突合の確認（生成前に計上先を選んでください）</div>
             <div id="ki-route-review-note" class="field-sub" style="margin-bottom:8px"></div>
+            <!-- 顧客請求分（e-staffing 立替金など）と同じ移動が交通費申請にもある行。選ぶものではなく知らせるだけ -->
+            <div id="ki-route-dup-area" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #d9534f; background:#fdecea; color:#6d1b16; font-size:12.5px"></div>
             <!-- カード型リスト。id は選択収集（kiCollectRouteChoices）が参照するため変えない -->
             <div style="max-height:480px; overflow:auto; border:1px solid #ddd; padding:0 10px 6px; background:#fbfcfd">
                 <div id="ki-route-review-table"></div>
@@ -1984,6 +1986,7 @@
                 <div class="summary-card"><div class="card-label">★要確認(経路突合)</div><div class="card-value" id="ki-cnt-flagged">—</div></div>
                 <div class="summary-card"><div class="card-label">△逆要確認</div><div class="card-value" id="ki-cnt-rev">—</div></div>
                 <div class="summary-card"><div class="card-label">▲片側一致</div><div class="card-value" id="ki-cnt-side">—</div></div>
+                <div class="summary-card"><div class="card-label">顧客請求分との重複疑い</div><div class="card-value" id="ki-cnt-dup">—</div></div>
                 <div class="summary-card"><div class="card-label">集計 社員数</div><div class="card-value" id="ki-cnt-summary">—</div></div>
                 <div class="summary-card"><div class="card-label">判定「差分あり」</div><div class="card-value" id="ki-cnt-diffng">—</div></div>
             </div>
@@ -3274,8 +3277,15 @@
             if (!data.success){
                 showError('ki-error-area', data.errors || ['処理に失敗しました']);
                 document.getElementById('ki-status').textContent = '';
-                // 選択が食い違って落ちた場合は、古い表のまま押し直せないよう閉じる
-                if (routeChoices) kiHideRouteReview();
+                // 選択がプレビュー時と食い違って落ちた場合だけ、古い表のまま押し直せないよう閉じる。
+                // SAP台帳の突合失敗など別のエラーでは表と選択を残す。以前はどのエラーでも閉じていて、
+                // 行ごとに選んだ内容が全部消えていた（2026-09-04 谷津さん）
+                if (routeChoices && data.route_choices_stale) {
+                    kiHideRouteReview();
+                } else if (routeChoices) {
+                    document.getElementById('ki-route-review-status').textContent =
+                        'エラーで生成できませんでした。選択はそのまま残っています。原因を直して「選択を反映して生成」を押し直してください。';
+                }
                 return;
             }
             const st = data.stats || {};
@@ -3330,6 +3340,12 @@
                 (rs.side_rows !== undefined)
                     ? (rs.side_rows + '行 / ' + rs.side_emps + '名')
                     : '—';
+            const ds = st.duplicate_summary || {};
+            const dupEl = document.getElementById('ki-cnt-dup');
+            dupEl.textContent = (ds.rows !== undefined)
+                ? (ds.rows ? (ds.rows + '件 / ' + ds.emps + '名') : '0件')
+                : '—';
+            dupEl.style.color = ds.rows ? '#b22222' : '';
             const cs = st.classify_summary || {};
             document.getElementById('ki-cnt-summary').textContent =
                 (cs.summary_employees !== undefined) ? (cs.summary_employees + '名') : '—';
@@ -3367,6 +3383,37 @@
         const area = document.getElementById('ki-route-review-area');
         if (area) area.style.display = 'none';
         document.getElementById('ki-route-review-status').textContent = '';
+        kiRenderRouteDuplicates([]);
+    }
+
+    // 顧客請求分（e-staffing 立替金・jinjer の顧客請求）と同じ移動が交通費申請にもある行。
+    // e-staffing 側はダウンロード前に精査済みなので、直すなら jinjer の交通費申請側
+    // （2026-09-04 谷津さん）。選ばせず、生成前に知らせるだけ。
+    function kiRenderRouteDuplicates(dups) {
+        const el = document.getElementById('ki-route-dup-area');
+        if (!el) return;
+        if (!dups || !dups.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        const esc = (v) => escapeHtml(String(v === undefined || v === null ? '' : v));
+        const total = dups.reduce((s, d) => s + (Number(d['金額']) || 0), 0);
+        const emps = new Set(dups.map(d => d['社員番号'] + '|' + d['氏名'])).size;
+        const lines = dups.map(d =>
+            '<div style="display:grid; grid-template-columns:minmax(0,260px) 90px minmax(0,1fr); gap:2px 12px;'
+            + ' padding:3px 0; border-top:1px solid #f3c7c3">'
+            + '<span><b>' + esc(d['氏名']) + '</b><span style="color:#9a6b68; margin-left:6px">' + esc(d['社員番号']) + '</span>'
+            + '<span style="margin-left:10px">' + esc(d['利用日']) + '</span></span>'
+            + '<span style="text-align:right; white-space:nowrap"><b>' + (Number(d['金額']) || 0).toLocaleString() + '円</b></span>'
+            + '<span>' + esc(d['乗車場所'] || '—') + ' → ' + esc(d['降車場所'] || '—')
+            + '<span style="color:#9a6b68; margin-left:10px">顧客請求側: ' + esc(d['顧客請求側'])
+            + '（' + esc(d['顧客請求側行番号']) + '行目）／ 交通費申請側: ' + esc(d['交通費申請側'])
+            + (d['往復'] ? '・' + esc(d['往復']) : '') + '（' + esc(d['交通費申請側行番号']) + '行目）</span></span>'
+            + '</div>').join('');
+        el.innerHTML = '<div style="font-weight:bold; margin-bottom:4px">⚠ 顧客請求分と交通費申請の重複疑い: '
+            + dups.length + '件 / ' + emps + '名 / 計 ' + total.toLocaleString() + '円</div>'
+            + '<div class="hint" style="margin-bottom:4px">同じ日・同じ区間・同じ片道額の申請が、顧客請求分（e-staffing 立替金など）と'
+            + '交通費申請の両方にあります。e-staffing 側は精査済みなので、<b>jinjer の交通費申請側</b>を確認してください。'
+            + '行番号は統合一覧表のものです。</div>'
+            + lines;
+        el.style.display = '';
     }
 
     function kiRenderRouteMoves(moves) {
@@ -3496,11 +3543,12 @@
 
         const movable = (summary.movable_rows !== undefined) ? summary.movable_rows
                       : rows.filter(r => r['付替可']).length;
-        document.getElementById('ki-route-review-note').innerHTML =
-            '要確認 ' + rows.length + '行のうち、計上先を選べるのは ' + movable + '行です。'
-            + '初期値は各行に入っているので、<b>違うと思う行だけ変えてください</b>。'
-            + '畳んだグループの選択もそのまま反映されます。'
-            + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金になるため、ここには出ません。';
+        document.getElementById('ki-route-review-note').innerHTML = rows.length
+            ? ('要確認 ' + rows.length + '行のうち、計上先を選べるのは ' + movable + '行です。'
+               + '初期値は各行に入っているので、<b>違うと思う行だけ変えてください</b>。'
+               + '畳んだグループの選択もそのまま反映されます。'
+               + '移動交通費（立替精算）対象者の通勤系申請は自動で立替金になるため、ここには出ません。')
+            : '経路突合の要確認は0件です。下の重複疑いを確認してから生成してください。';
         document.getElementById('ki-route-review-area').style.display = '';
     }
 
@@ -3542,7 +3590,8 @@
                     return;
                 }
                 const rows = data.review_rows || [];
-                if (!rows.length){
+                const dups = data.duplicate_rows || [];
+                if (!rows.length && !dups.length){
                     document.getElementById('ki-status').textContent =
                         '経路突合の要確認は0件 → そのまま生成します';
                     kiRunBtn.disabled = false;
@@ -3550,8 +3599,11 @@
                     return;
                 }
                 kiRenderRouteReview(rows, data.summary || {});
-                document.getElementById('ki-status').textContent =
-                    '経路突合 ' + rows.length + '件の確認待ち（下の表で選んでください）';
+                kiRenderRouteDuplicates(dups);
+                document.getElementById('ki-status').textContent = rows.length
+                    ? ('経路突合 ' + rows.length + '件の確認待ち（下の表で選んでください）'
+                       + (dups.length ? '／重複疑い ' + dups.length + '件' : ''))
+                    : ('顧客請求分との重複疑い ' + dups.length + '件（確認してから生成してください）');
             } catch (e) {
                 showError('ki-error-area', ['通信エラー: ' + e.message]);
                 document.getElementById('ki-status').textContent = '';
@@ -3574,8 +3626,10 @@
             document.getElementById('ki-status').textContent = '';
         });
     }
-    // 入力を変えたら選択は無効。古い表のまま確定させない（最後の砦はサーバ側のキー突合）
-    ['ki-jinjer', 'ki-estaffing', 'ki-sap', 'ki-freee', 'ki-keywords',
+    // 入力を変えたら選択は無効。古い表のまま確定させない（最後の砦はサーバ側のキー突合）。
+    // ③SAP・④freee は経路突合の行（キー）に関係しないので、直しても表は残す
+    // （SAPのパス違いで落ちたあと、直して押し直せるように。2026-09-04 谷津さん）
+    ['ki-jinjer', 'ki-estaffing', 'ki-keywords',
      'ki-route-check', 'ki-classify'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', kiHideRouteReview);
