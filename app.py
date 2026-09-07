@@ -2030,6 +2030,83 @@ def route_expense_prereview():
     })
 
 
+@app.route("/no_commute_extract", methods=["POST"])
+def route_no_commute_extract():
+    """経費チェック ③: 通勤費の未申請者を抽出して単独のブックに出す。
+
+    フォーム（②と同じ欄を使う）:
+      - month        : YYYY-MM
+      - kotsuhi_csv  : jinjer「交通費申請」エクスポートCSV
+      - check_xlsx   : ①で出した経費チェックのブック
+
+    判定は②の「通勤費申請なし」シートと同じ。②は承認が進むたびに回すが、
+    こちらは精査が終わった（進行中0）あとに1回回して一覧を確定させる。
+    進行中の申請が残っていても出力は作り、注意を返す。
+    """
+    from services.no_commute_extract import run_no_commute_extract
+
+    month_label = (request.form.get("month") or "").strip()
+    csv_str = _clean_path_input(request.form.get("kotsuhi_csv"))
+    xlsx_str = _clean_path_input(request.form.get("check_xlsx"))
+
+    errors = []
+    if not re.fullmatch(r"\d{4}-\d{2}", month_label):
+        errors.append("対象月は YYYY-MM 形式で入力してください（例: 2026-07）")
+    if not csv_str:
+        errors.append("交通費申請CSVのパスを入力してください（②の欄）")
+    elif not _Path(csv_str).exists():
+        errors.append(f"交通費申請CSVが見つかりません: {csv_str}")
+    if not xlsx_str:
+        errors.append("①で出したブックのパスを入力してください（②の欄）")
+    elif not _Path(xlsx_str).exists():
+        errors.append(f"経費チェックのブックが見つかりません: {xlsx_str}")
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    y, m = month_label.split("-")
+    output_filename = f"通勤費申請なし_{y}年{int(m)}月.xlsx"
+    output_path = _Path(os.path.abspath(os.path.join(Config.OUTPUT_FOLDER, output_filename)))
+
+    log_lines: list[str] = []
+    def _log(msg: str) -> None:
+        log_lines.append(msg)
+        logger.info(msg)
+
+    target_csv, excluded_csv, _exempt = _teiki_shiwake_lists()
+    try:
+        result = run_no_commute_extract(
+            csv_path=_Path(csv_str), check_xlsx=_Path(xlsx_str),
+            output_path=output_path, month=month_label, log_func=_log,
+            target_list=target_csv, excluded_list=excluded_csv,
+        )
+    except Exception as e:
+        logger.exception("no_commute_extract failed")
+        return jsonify({"success": False, "errors": [str(e)], "console": log_lines}), 500
+
+    if not result.ok:
+        return jsonify({"success": False,
+                        "errors": [result.error or "未申請者の抽出に失敗しました"],
+                        "console": log_lines}), 500
+
+    return jsonify({
+        "success": True,
+        "download_url": f"/download/{output_filename}",
+        "output_filename": output_filename,
+        "output_path": str(result.output_path),
+        "rows": result.rows,
+        "stats": {
+            "total": result.total,
+            "need_check": result.need_check,
+            "by_judge": result.by_judge,
+            "approved_rows": result.approved_rows,
+            "pending_rows": result.pending_rows,
+            "booked_rows": result.booked_rows,
+            "warnings": result.warnings,
+        },
+        "console": log_lines,
+    })
+
+
 @app.route("/expense_month_status", methods=["GET"])
 def route_expense_month_status():
     """経費チェックタブの月次ステッパー用に、対象月の成果物の有無と進み具合を返す。
@@ -2081,11 +2158,14 @@ def route_expense_month_status():
                 wb.close()
         except Exception:  # noqa: BLE001 — 進み具合の表示なので読めなくても落とさない
             pending = None
+    # ③ 通勤費の未申請者の抽出（/no_commute_extract）。精査が終わったあとに1回回す
+    no_commute = _latest([f"通勤費申請なし_{y}年{mi}月.xlsx"])
     integrated = _latest([f"経費統合一覧表*{y}年{mi:02d}月*.xlsx",
                           f"経費統合一覧表*{y}年{mi}月*.xlsx",
                           "経費統合一覧表.xlsx"])
     return jsonify({"success": True, "check": check, "seisa": seisa,
-                    "seisa_pending": pending, "integrated": integrated})
+                    "seisa_pending": pending, "no_commute": no_commute,
+                    "integrated": integrated})
 
 
 def _teiki_shiwake_form():

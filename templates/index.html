@@ -1540,7 +1540,7 @@
             <span class="card-icon icon-expense">💴</span>
             <div>
                 <div class="card-title">① テレワーク・通勤費マスタを集計する</div>
-                <p class="card-lead">対象月のテレワーク日数・出社日数・通勤費マスタを jinjer API から集めて Excel にします（<b>数分かかります・月1回でOK</b>）。このブックが②③の入力です。</p>
+                <p class="card-lead">対象月のテレワーク日数・出社日数・通勤費マスタを jinjer API から集めて Excel にします（<b>数分かかります・月1回でOK</b>）。このブックが②〜④の入力です。</p>
             </div>
         </div>
 
@@ -1694,11 +1694,59 @@
             <div id="pr-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
         </div>
 
+        <!-- ==== 通勤費の未申請者の抽出（②の精査が終わったあとに1回）==== -->
+        <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
+            <h3 style="margin:0 0 4px; font-size:14px">③ 通勤費の未申請者を抽出する</h3>
+            <p class="card-lead" style="margin-top:0">
+                ②の精査が<b>進行中0＝見終わり</b>になったら実行します。当月に<b>通勤費（定期代・実費）の申請が無い人</b>を
+                一覧にし、通勤費マスタの支給額と区分（通勤定期代／通勤費／移動交通費）を添えて
+                <b>単独のブック（通勤費申請なし_20XX年X月.xlsx）</b>にします。
+                入力は上の②の欄（交通費申請CSV・①で出したブック）をそのまま使います。数秒で終わります。
+            </p>
+            <details class="hint-details">
+                <summary>誰が出るか／判定の意味／②④との関係</summary>
+                <div class="hint-body">
+                    <p><b>出る人</b>：当月の利用日で通勤定期代・通勤交通費（実費）の申請（承認完了・進行中・<b>計上仕訳済み</b>）が1件も無い人。
+                    取下げ・否認・差し戻しは申請なしと数えます。②と違い計上仕訳済みも申請ありに数えるので、仕訳計上のあとに回しても正しく出ます。
+                    実費申請日数＋テレワーク日数＝出勤日数で全日に説明が付く人は申請済みとみなして出しません。
+                    精査対象外リスト（docs\通勤費_精査対象外者.csv）の人も出しません。出勤0の人は落とさず「勤怠実績なし」で出します。</p>
+                    <p><b>判定</b>：<b>マスタから支給</b>＝申請は無いが通勤費マスタに登録があり、そこから支給する人（定期代の人は毎月申請しないのが正常）。
+                    <b>支給漏れの疑い</b>＝出社しているのにマスタに金額が無く申請も無い人（要確認）。
+                    <b>実費申請の日数不一致</b>＝テレワーク日と実費申請の日数が合わない人（要確認）。
+                    <b>勤怠実績なし</b>＝当月の出勤0の人（代表取締役・打刻申請の無い人・入社直後など。情報）。</p>
+                    <p><b>②との関係</b>：②の精査結果ブックにも同じ判定の「通勤費申請なし」シートが入りますが、②は承認が進むたびに何度も回すものです。
+                    こちらは精査が終わったあとに1回回して、その月の一覧を単独のブックとして確定させます（前回比は付けず、同じ名前で上書き）。
+                    進行中の申請が残っているときは注意が出ます（承認されると一覧から外れる人がいるため）。</p>
+                    <p><b>④との関係</b>：判定が「マスタから支給」で区分が「通勤定期代」の人が、④の仕訳追記の対象です。</p>
+                </div>
+            </details>
+            <div class="actions">
+                <button type="button" class="btn btn-primary" id="nc-run-btn">📋 未申請者を抽出</button>
+                <span id="nc-status" class="status-text"></span>
+            </div>
+            <div id="nc-result-area" style="display:none; margin-top:8px">
+                <div id="nc-warn" style="display:none; margin:0 0 10px; padding:9px 12px; border-radius:6px; border:1px solid #e0b84a; background:#fdf6e3; color:#7a5c00; font-size:13px; line-height:1.8"></div>
+                <div class="summary-cards" style="margin-bottom:8px">
+                    <div class="summary-card"><div class="card-label">未申請者</div><div class="card-value" id="nc-cnt-total">0</div></div>
+                    <div class="summary-card"><div class="card-label">要確認</div><div class="card-value" id="nc-cnt-check">0</div></div>
+                    <div class="summary-card"><div class="card-label">マスタから支給</div><div class="card-value" id="nc-cnt-master">0</div></div>
+                    <div class="summary-card"><div class="card-label">勤怠実績なし</div><div class="card-value" id="nc-cnt-noattend">0</div></div>
+                    <div class="summary-card"><div class="card-label">進行中(未承認)</div><div class="card-value" id="nc-cnt-pending">0</div></div>
+                </div>
+                <div style="max-height:420px; overflow:auto; border:1px solid #ddd">
+                    <table id="nc-table" style="border-collapse:collapse; font-size:12px; width:100%"></table>
+                </div>
+                <a id="nc-download-link" href="#" class="btn btn-download" style="display:none; margin-top:8px">📥 通勤費申請なしxlsxをダウンロード</a>
+                <pre id="nc-console" style="margin-top:8px; max-height:200px; overflow:auto; background:#f5f5f5; padding:8px; font-size:12px; display:none"></pre>
+            </div>
+            <div id="nc-error-area" class="alert alert-error" style="display:none; margin-top:8px"></div>
+        </div>
+
         <!-- ==== 仕訳データへの定期代追記（イレギュラー救済処置）==== -->
         <div style="border-top:1px solid #ddd; margin-top:10px; padding:12px 14px">
-            <h3 style="margin:0 0 4px; font-size:14px">③ 仕訳データへの定期代追記 <span class="tag tag-opt">イレギュラー救済</span></h3>
+            <h3 style="margin:0 0 4px; font-size:14px">④ 仕訳データへの定期代追記 <span class="tag tag-opt">イレギュラー救済</span></h3>
             <p class="card-lead" style="margin-top:0">
-                ②で<b>区分＝通勤定期代・判定＝マスタから支給</b>になった人（＝申請が無く支給漏れになる人）を、
+                ②③で<b>区分＝通勤定期代・判定＝マスタから支給</b>になった人（＝申請が無く支給漏れになる人）を、
                 <b>追記行だけの新しいCSV</b>にします。<b>毎月の定常作業ではありません</b>。元ファイルには触りません。
             </p>
             <div class="field-grid">
@@ -2116,7 +2164,7 @@
         el.addEventListener('compositionend', normalize);
     }
     attachMonthNormalizer('bc-month');   // 勤怠チェック（一括）
-    attachMonthNormalizer('ex-month');   // 経費チェック（①集計・②精査・③仕訳追記で共通の欄）
+    attachMonthNormalizer('ex-month');   // 経費チェック（①集計・②精査・③未申請者抽出・④仕訳追記で共通の欄）
 
     // ----- batch_compare（一括）-----
 
@@ -2429,6 +2477,8 @@
         else if (st.seisa_pending === 0) steps.push(chip('done', '②精査', '進行中0＝見終わり'));
         else if (st.seisa_pending > 0) steps.push(chip('part', '②精査', '進行中' + st.seisa_pending + '件'));
         else steps.push(chip('part', '②精査', st.seisa.mtime));
+        steps.push(st.no_commute ? chip('done', '③未申請者', st.no_commute.mtime)
+                                 : chip('todo', '③未申請者', '未検出'));
         steps.push(st.integrated ? chip('done', '統合一覧表', st.integrated.mtime)
                                  : chip('todo', '統合一覧表', '未検出'));
         const hit = ((ledger && ledger.months) || []).find(x => x.month === month);
@@ -2955,6 +3005,85 @@
             document.getElementById('ts-result-area').style.display = 'none';
         });
     });
+
+    // ----- ③ 通勤費の未申請者の抽出（②の精査が終わったあとに1回）-----
+    // 入力は②の欄をそのまま使う（同じCSV・同じブック）。判定は②の「通勤費申請なし」シートと
+    // 同じだが、こちらは前回比を持たず、単独のブックとして毎回上書きする。
+    const NC_COLUMNS = ['社員番号', '氏名', '出勤日数', '出社日数', '支給金額', '区分',
+                        '判定', '確認要否', '説明', '備考'];
+    function ncRender(data) {
+        const rows = data.rows || [];
+        const st = data.stats || {};
+        document.getElementById('nc-cnt-total').textContent = st.total || 0;
+        document.getElementById('nc-cnt-check').textContent = st.need_check || 0;
+        const byJudge = st.by_judge || {};
+        document.getElementById('nc-cnt-master').textContent = byJudge['マスタから支給'] || 0;
+        document.getElementById('nc-cnt-noattend').textContent = byJudge['勤怠実績なし'] || 0;
+        document.getElementById('nc-cnt-pending').textContent = st.pending_rows || 0;
+
+        const warn = document.getElementById('nc-warn');
+        const warnings = st.warnings || [];
+        warn.innerHTML = warnings.map(w => '⚠ ' + escapeHtml(w)).join('<br>');
+        warn.style.display = warnings.length ? 'block' : 'none';
+
+        const fillOf = (r) => r['確認要否'] === '要確認' ? '#fce4e4'
+                          : r['確認要否'] === '情報' ? '#f2f2f2' : '';
+        let html = '<thead><tr>' + NC_COLUMNS.map(c =>
+            '<th style="position:sticky; top:0; background:#1F4E78; color:#fff; padding:3px 6px; text-align:left; white-space:nowrap">'
+            + escapeHtml(c) + '</th>').join('') + '</tr></thead><tbody>';
+        rows.forEach(r => {
+            html += '<tr style="background:' + fillOf(r) + '">' + NC_COLUMNS.map(c => {
+                const isAmt = (c === '支給金額');
+                const v = isAmt ? Number(r[c] || 0).toLocaleString() : String(r[c] ?? '');
+                return '<td style="border:1px solid #ddd; padding:2px 6px;'
+                     + (isAmt ? 'text-align:right' : '') + '">' + escapeHtml(v) + '</td>';
+            }).join('') + '</tr>';
+        });
+        document.getElementById('nc-table').innerHTML = html + '</tbody>';
+
+        const dl = document.getElementById('nc-download-link');
+        dl.href = data.download_url;
+        dl.style.display = 'inline-block';
+        const consoleEl = document.getElementById('nc-console');
+        consoleEl.textContent = (data.console || []).join('\n');
+        consoleEl.style.display = consoleEl.textContent ? 'block' : 'none';
+        document.getElementById('nc-result-area').style.display = 'block';
+    }
+
+    const ncRunBtn = document.getElementById('nc-run-btn');
+    if (ncRunBtn) {
+        ncRunBtn.addEventListener('click', async () => {
+            hideError('nc-error-area');
+            document.getElementById('nc-result-area').style.display = 'none';
+            document.getElementById('nc-status').textContent = '抽出中...';
+            ncRunBtn.disabled = true;
+            try {
+                const fd = new FormData();
+                fd.append('month', document.getElementById('ex-month').value);
+                fd.append('kotsuhi_csv', document.getElementById('pr-csv').value);
+                fd.append('check_xlsx', document.getElementById('pr-xlsx').value);
+                const res = await fetch('/no_commute_extract', {method:'POST', body: fd});
+                const data = await res.json();
+                if (!data.success){
+                    showError('nc-error-area', data.errors || ['抽出に失敗しました']);
+                    document.getElementById('nc-status').textContent = '';
+                    return;
+                }
+                ncRender(data);
+                const st = data.stats || {};
+                document.getElementById('nc-status').textContent =
+                    (st.pending_rows > 0)
+                        ? '完了（進行中の申請が残っています。精査が終わったら抽出し直してください）'
+                        : '完了（' + (st.total || 0) + '名）';
+                exRenderStepper();
+            } catch (e) {
+                showError('nc-error-area', ['通信エラー: ' + e.message]);
+                document.getElementById('nc-status').textContent = '';
+            } finally {
+                ncRunBtn.disabled = false;
+            }
+        });
+    }
 
     // ----- 移動交通費（立替精算）対象者リストの表示・編集 -----
     // リストの実体は共有フォルダのCSV（保存すれば exe 再ビルドなしで次回実行から反映）。
