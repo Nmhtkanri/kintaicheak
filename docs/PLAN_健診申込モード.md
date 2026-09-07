@@ -190,5 +190,8 @@ Hub は `REGISTER_BATCH`・`REGISTER`。Apps Script は `SETUP SEND RESEND FIRST
   Drive 連携の share_file は権限エラーで使えなかった）。Flask の test_client で `/health_apply_status` と
   `/health_apply_responses` を実行し、success=true・workbook_issues なし・サンプル2名（回答済 / 未送信）を読めた。
   次: Hub 画面（exe ではなくローカル起動）でボタン操作の確認 → 対象者登録で自分1人を登録 → 冪等・409 の確認 → サンプル行削除。
+- 2026-09-07 UI統合をコミット（bcbe6a23、main 直接・push 済）し、`build_exe_safe.py` で dist_new へビルド → 起動確認
+  （新UI・`/health_apply_status` 200）→ 稼働ゼロを確認して dist 入替（旧 exe は `dist_old_20260907`）。
+  入替時の注意: Bash の作業ディレクトリが dist_new の中に残っていると Move-Item が「使用中」で失敗する。
 - 未対応: ローカルの Flask 試作 `preview_server.py` は旧選択肢（MYメディカル6拠点＋健診オプション）のまま。
   画面確認は Apps Script v2 のテストデプロイで行う。
