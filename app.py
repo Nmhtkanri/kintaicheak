@@ -2100,6 +2100,7 @@ def route_no_commute_extract():
             "by_judge": result.by_judge,
             "approved_rows": result.approved_rows,
             "pending_rows": result.pending_rows,
+            "booked_rows": result.booked_rows,
             "warnings": result.warnings,
         },
         "console": log_lines,

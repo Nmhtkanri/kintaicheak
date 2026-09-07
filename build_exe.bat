@@ -47,6 +47,7 @@ python -m PyInstaller ^
   --hidden-import services.sap_import_ledger ^
   --hidden-import services.keihi_import_ledger ^
   --hidden-import services.shiwake_teiki_append ^
+  --hidden-import services.no_commute_extract ^
   --hidden-import services.health_hpm_excel ^
   --hidden-import services.health_hpm_master ^
   --hidden-import services.health_hpm_match ^

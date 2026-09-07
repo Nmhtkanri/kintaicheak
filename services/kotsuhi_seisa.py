@@ -588,8 +588,13 @@ def year_month(value) -> str:
 
 
 def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
-                          target_ids: set[str], excluded: dict[str, str]) -> list[dict]:
+                          target_ids: set[str], excluded: dict[str, str],
+                          applied_status: tuple = ACTIVE_STATUS) -> list[dict]:
     """通勤費申請なしリストを自動抽出する（2026-08-05 谷津さん決定=C案）。
+
+    applied_status: 「申請あり」と数えるステータス。②承認前精査は既定の承認完了＋進行中。
+    ③未申請者抽出（no_commute_extract）は仕訳計上後に回すので計上仕訳済みも渡す
+    （計上されると承認完了ではなくなり、既定のままだとほぼ全員が未申請に見える）。
 
     条件は「当月の通勤費申請なし」。
     定期支給者は毎月申請しないのが正常で、この人たちの通勤費はマスタから支給する。
@@ -612,7 +617,7 @@ def build_no_commute_rows(details, idx, master: CommuteMaster, workdays: dict,
     applied_pass: set[str] = set()
     actual_days: dict[str, set[str]] = defaultdict(set)
     for r in details:
-        if r[idx["ステータス"]] not in ACTIVE_STATUS:
+        if r[idx["ステータス"]] not in applied_status:
             continue
         if r[idx["交通機関"]] == KIND_PASS:
             applied_pass.add(r[idx["社員番号"]])
@@ -1350,8 +1355,12 @@ class SeisaInputs:
 def load_seisa_inputs(csv_path: Path, check_path: Path, target_ym: str,
                       target_list: Path | None = None,
                       excluded_list: Path | None = None,
-                      limit_exempt_list: Path | None = None) -> SeisaInputs:
-    """交通費申請CSVと経費チェックブックを読み、精査に要る入力をまとめて返す。"""
+                      limit_exempt_list: Path | None = None,
+                      applied_status: tuple = ACTIVE_STATUS) -> SeisaInputs:
+    """交通費申請CSVと経費チェックブックを読み、精査に要る入力をまとめて返す。
+
+    applied_status は「有効な申請」と数えるステータス（out_of_month の集計に使う）。
+    """
     header, all_details = read_cp932_csv(csv_path)
     names = ["ステータス", "交通機関", "社員番号", "申請者", "所属グループ", "申請書No.",
              "明細No.", "利用日", "金額", "往復", "小計", "乗車場所", "降車場所", "経路", "目的地"]
@@ -1363,7 +1372,7 @@ def load_seisa_inputs(csv_path: Path, check_path: Path, target_ym: str,
     details = [r for r in all_details if year_month(r[idx["利用日"]]) == target_ym]
     out_of_month = sum(
         1 for r in all_details
-        if r[idx["ステータス"]] in ACTIVE_STATUS and year_month(r[idx["利用日"]]) != target_ym
+        if r[idx["ステータス"]] in applied_status and year_month(r[idx["利用日"]]) != target_ym
     )
 
     wb_src = openpyxl.load_workbook(check_path, data_only=True)

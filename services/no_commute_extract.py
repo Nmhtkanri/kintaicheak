@@ -32,6 +32,14 @@ from services.kotsuhi_seisa import (
     write_sheet,
 )
 
+# jinjer 経費の申請は 進行中 → 承認完了 → 仕訳計上（計上仕訳済み）と進み、計上されると
+# 「承認完了」ではなくなる。②は承認前に回すので承認完了＋進行中だけ見ればよいが、③は精査が
+# 終わって計上まで済んだあとに回すため、計上仕訳済みも「申請あり」に数えないとほぼ全員が
+# 未申請に見える（2026-09-07 に 9/4 出力の実CSVで 8月分 1,531 行が全部 計上仕訳済み・
+# 未申請者 202 名と出て発覚）。取下げ・否認・差し戻しは申請なしとして扱う。
+BOOKED_STATUS = "計上仕訳済み"
+APPLIED_STATUS = ACTIVE_STATUS + (BOOKED_STATUS,)
+
 SHEET_LIST = "通勤費申請なし"
 SHEET_INFO = "実行情報"
 # ②の同名シートから「前回比」だけ落とした列並び（こちらは1回で確定させる成果物なので差分は持たない）
@@ -52,6 +60,7 @@ class NoCommuteExtractResult:
     by_judge: dict = field(default_factory=dict)
     approved_rows: int = 0                   # 対象月の承認完了の明細行
     pending_rows: int = 0                    # 対象月の進行中（未承認）の明細行
+    booked_rows: int = 0                     # 対象月の計上仕訳済みの明細行（申請ありに数える）
     warnings: list[str] = field(default_factory=list)
 
 
@@ -139,9 +148,11 @@ def run_no_commute_extract(
 
     try:
         src = load_seisa_inputs(csv_path, check_xlsx, month,
-                                target_list=target_list, excluded_list=excluded_list)
+                                target_list=target_list, excluded_list=excluded_list,
+                                applied_status=APPLIED_STATUS)
         rows = build_no_commute_rows(src.details, src.idx, src.master, src.workdays,
-                                     src.target_ids, src.excluded)
+                                     src.target_ids, src.excluded,
+                                     applied_status=APPLIED_STATUS)
     except Exception as e:  # noqa: BLE001
         log_func(f"[error] 抽出に失敗しました: {e}")
         result.error = str(e)
@@ -150,7 +161,8 @@ def run_no_commute_extract(
     st = src.idx["ステータス"]
     result.approved_rows = sum(1 for r in src.details if r[st] == "承認完了")
     result.pending_rows = sum(1 for r in src.details if r[st] == "進行中")
-    target_rows = sum(1 for r in src.details if r[st] in ACTIVE_STATUS)
+    result.booked_rows = sum(1 for r in src.details if r[st] == BOOKED_STATUS)
+    target_rows = sum(1 for r in src.details if r[st] in APPLIED_STATUS)
 
     for w in (month_mismatch_warning(month, target_rows, src.out_of_month),
               pending_warning(result.pending_rows)):
@@ -166,10 +178,11 @@ def run_no_commute_extract(
     info = {
         "実行日時": _now_text(),
         "対象月": month_text,
-        "承認状況": f"承認完了 {result.approved_rows}行 / 進行中 {result.pending_rows}行",
+        "承認状況": (f"承認完了 {result.approved_rows}行 / 進行中 {result.pending_rows}行"
+                 f" / 計上仕訳済み {result.booked_rows}行"),
         "交通費申請CSV": csv_path.name,
         "経費チェックブック": check_xlsx.name,
-        "対象明細行(承認完了+進行中)": target_rows,
+        "対象明細行(承認完了+進行中+計上仕訳済み)": target_rows,
         "除外(対象月外の利用日)": src.out_of_month,
         "通勤費マスタ": f"{len(src.master.rows)}名 / {sum(len(v) for v in src.master.rows.values())}経路",
         "移動交通費（立替精算）対象者": f"{len(src.target_ids)}名" if src.target_ids else "なし",
@@ -190,7 +203,8 @@ def run_no_commute_extract(
         return result
 
     result.ok = True
-    log_func(f"[info] 承認状況: 承認完了 {result.approved_rows}行 / 進行中 {result.pending_rows}行")
+    log_func(f"[info] 承認状況: 承認完了 {result.approved_rows}行 / 進行中 {result.pending_rows}行"
+             f" / 計上仕訳済み {result.booked_rows}行（計上済みも申請ありに数えます）")
     log_func(f"[info] 通勤費の未申請者: {result.total}名（うち要確認 {result.need_check}名）")
     for k, v in result.by_judge.items():
         log_func(f"[info]   {k}: {v}名")

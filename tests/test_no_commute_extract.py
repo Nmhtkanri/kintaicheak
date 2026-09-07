@@ -91,7 +91,7 @@ def test_extract_writes_the_list_first_and_the_run_info_second(tmp_path):
     assert info["対象月"] == "2026年7月"
     assert info["抽出人数"] == 2
     assert info["うち要確認"] == 1
-    assert info["承認状況"] == "承認完了 1行 / 進行中 0行"
+    assert info["承認状況"] == "承認完了 1行 / 進行中 0行 / 計上仕訳済み 0行"
     assert info["判定: マスタから支給"] == "1名"
 
 
@@ -158,3 +158,53 @@ def test_judge_counts_puts_need_check_first():
     assert list(counts) == ["支給漏れの疑い", "マスタから支給", "新しい判定"]
     assert counts["マスタから支給"] == 2
     assert list(counts)[:2] == [k for k in JUDGE_ORDER if k in counts]
+
+
+# ----------------------------------------------------------------------
+# 計上仕訳済み（2026-09-07 発覚）: 仕訳計上のあとに回すと承認完了が消えて全員が未申請に見えた
+# ----------------------------------------------------------------------
+
+def test_extract_counts_booked_applications_as_applied(tmp_path):
+    summary = [_emp("2020001", "定期 太郎"), _emp("2020002", "計上 花子")]
+    commute = [_commute("2020001", "定期 太郎", 10000), _commute("2020002", "計上 花子", 8000)]
+    res = _run(tmp_path, [_app_row("2020002", status="計上仕訳済み")], summary, commute)
+    assert res.ok, res.error
+    assert [r["社員番号"] for r in res.rows] == ["2020001"]   # 計上済みの花子は申請あり
+    assert res.booked_rows == 1 and res.pending_rows == 0
+    assert res.warnings == []
+    info = {r[0]: r[1] for r in load_workbook(res.output_path)[SHEET_INFO]
+            .iter_rows(min_row=2, values_only=True)}
+    assert info["承認状況"] == "承認完了 0行 / 進行中 0行 / 計上仕訳済み 1行"
+
+
+def test_extract_still_treats_withdrawn_and_returned_as_not_applied(tmp_path):
+    summary = [_emp("2020002", "取下 花子"), _emp("2020003", "差戻 次郎")]
+    commute = [_commute("2020002", "取下 花子", 8000), _commute("2020003", "差戻 次郎", 8000)]
+    res = _run(tmp_path, [_app_row("2020002", status="取下げ"),
+                          _app_row("2020003", status="差し戻し")], summary, commute)
+    assert res.ok, res.error
+    assert sorted(r["社員番号"] for r in res.rows) == ["2020002", "2020003"]
+
+
+def test_review_step_keeps_its_pre_approval_default():
+    """②（承認前精査）の既定は変えない: 計上仕訳済みは従来どおり数えない。"""
+    from services.kotsuhi_seisa import ACTIVE_STATUS, CommuteMaster, build_no_commute_rows
+    from services.no_commute_extract import APPLIED_STATUS
+    assert "計上仕訳済み" not in ACTIVE_STATUS
+    assert "計上仕訳済み" in APPLIED_STATUS
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["社員番号"] * 16)
+    ws.append(["2020002", "計上 花子", 1, "自宅", "会社", "", "", "自宅→会社", "電車", "毎月", "",
+               8000, 8000, 0, "2026-04-01", ""])
+    master = CommuteMaster(ws)
+    idx = {"ステータス": 0, "交通機関": 1, "社員番号": 2, "利用日": 3}
+    details = [["計上仕訳済み", "通勤定期代", "2020002", "2026/07/01"]]
+    workdays = {"2020002": {"氏名": "計上 花子", "出勤日数": 20, "テレワーク日数": 0,
+                            "出社日数": 20, "テレワーク実施日": set()}}
+    by_default = build_no_commute_rows(details, idx, master, workdays, set(), {})
+    assert [r["社員番号"] for r in by_default] == ["2020002"]          # ②では未申請のまま
+    by_step3 = build_no_commute_rows(details, idx, master, workdays, set(), {},
+                                     applied_status=APPLIED_STATUS)
+    assert by_step3 == []                                              # ③では申請あり
