@@ -200,5 +200,14 @@ Hub は `REGISTER_BATCH`・`REGISTER`。Apps Script は `SETUP SEND RESEND FIRST
   年度は `2026` 表記で設定と一致。jinjer 表記「Myメディカルクリニック渋谷」は大文字小文字・空白を吸収して
   1311337070 に寄る（平良さんの実データで確認）。略称（例: 春日クリニック）は寄らないので、本番登録のプレビューで
   原文が残った機関だけ「別名」に足す。残り: 氏名書換→409 の確認（任意）、サンプル2行と谷津さんのテスト行の削除。
+- 2026-09-07 段階③（Apps Script v2）をテスト用ブックへ配備。clasp（`npx --no-install @google/clasp`、admin@nmht.co.jp で
+  login）で、テスト用ブックに紐づくスクリプト（scriptId `1VwXVif1JHmyv4uPAahe0B3OizEPViFK86WMomlGK6lFKFZ-qZLpRJObn`）を
+  作成 → Code.gs / Index.html / appsscript.json を push → deploy（@1、デプロイID `AKfycbwsCyr185owN_UDW4IaE-ySwKXvLjWiD2uW-crGXnSYuJ7suMZkPwH9N6mgk1fp0p6S`）。
+  作業ディレクトリは `%LOCALAPPDATA%\KintaiChecker\health_apply\gas_v2`（.clasp.json はここ。リポジトリには置かない）。
+  注意: `clasp create --type sheets --parentId …` は既存ブックに紐づかず**新しいブックを作る**（`--parentId` だけを渡す）。
+  また create/pull のたびに appsscript.json が既定に戻るので、push 前にリポジトリの版を上書きし直す。
+  設定シートに WebアプリURL（`…/exec`）と担当者連絡先を入れた。年度設定JSONの webapp_url は未記入（Hub は空でも動く）。
+  /exec への匿名アクセスは、実行ユーザーがスクリプトを一度承認するまで 403 になる → 谷津さんがシートのメニュー
+  「健康診断申込 → シートを初期化」を実行して承認する。その後: 対象者に谷津さんを再登録 → 案内メールを本人へ1通 → 回答 → Hub で回答済を確認。
 - 未対応: ローカルの Flask 試作 `preview_server.py` は旧選択肢（MYメディカル6拠点＋健診オプション）のまま。
   画面確認は Apps Script v2 のテストデプロイで行う。
