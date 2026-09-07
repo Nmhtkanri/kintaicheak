@@ -118,10 +118,13 @@ const MODE_HINTS = {
     shaho:      '標準報酬月額の検算と保険料突合（jinjerには書きません）',
     expense:    'テレワーク・出社日数と経費を集計する',
     mail:       '下書きを作り、確認してからまとめて送る',
-    health_hpm: '健診ExcelからHPM取込用CSVを作る（取込は手動）',
+    health_hpm: '健診結果からHPM取込用CSVを作る（取込は手動）／健診申込の対象者登録と回答集計（jinjer には書きません）',
     haken:      '四半期の派遣元管理台帳を作成し jinjer へ添付する',
-    health_apply: '健診申込の対象者を登録し、Google の回答を集計する（jinjer には書きません）',
 };
+
+// 健康診断HPMモードの中の項目（'hpm' = 健診結果→HPM取込CSV、'apply' = 健診申込）。
+// 健診申込は 2026-09-04 に専用タブ（health_apply）からこのモードの項目へ統合した。
+let healthSubMode = 'hpm';
 
 // 進捗バー／エラー表示がどのモードのものかを覚えておく。
 // タブでモードを切り替えても消さず、そのモードに戻ったときに再表示するため。
@@ -172,9 +175,8 @@ function applyModeUI(mode) {
     const isMail = mode === 'mail';
     const isHealthHpm = mode === 'health_hpm';
     const isHaken = mode === 'haken';
-    const isHealthApply = mode === 'health_apply';
     const isMatch = !isSchedule && !isExpense && !isKeiri && !isSharoushi
-        && !isInvoice && !isShaho && !isMail && !isHealthHpm && !isHaken && !isHealthApply;
+        && !isInvoice && !isShaho && !isMail && !isHealthHpm && !isHaken;
 
     // 突合アップロードフォーム本体は常に隠す（モード選択だけ残す。突合は⚡一括/手順2-3で行う）
     if (jinjerSection) jinjerSection.style.display = 'none';
@@ -230,17 +232,27 @@ function applyModeUI(mode) {
         mailCard.style.display = isMail ? '' : 'none';
         if (isMail) loadMailTemplates();
     }
-    // 健康診断HPMモード: 健診カードのみ表示
-    if (healthCard) healthCard.style.display = isHealthHpm ? '' : 'none';
+    // 健康診断HPMモード: 項目切替バーを出し、選んだ項目のカードだけ表示する
+    //   hpm   … 健診結果 → HPM取込用CSV（health-card）
+    //   apply … 健診申込の対象者登録・回答集計（ha-card。表示時に接続状態を読み込む）
+    const healthSubtabs = document.getElementById('health-subtabs');
+    if (healthSubtabs) {
+        healthSubtabs.style.display = isHealthHpm ? '' : 'none';
+        healthSubtabs.querySelectorAll('[data-health-sub]').forEach(btn => {
+            btn.classList.toggle('is-active', btn.dataset.healthSub === healthSubMode);
+        });
+    }
+    const showHealthHpm = isHealthHpm && healthSubMode === 'hpm';
+    const showHealthApply = isHealthHpm && healthSubMode === 'apply';
+    if (healthCard) healthCard.style.display = showHealthHpm ? '' : 'none';
+    if (healthApplyCard) {
+        healthApplyCard.style.display = showHealthApply ? '' : 'none';
+        if (showHealthApply) haLoadStatus();
+    }
     // 派遣台帳モード: 台帳カードのみ表示（初回表示時に四半期ステッパーを読み込む）
     if (hakenCard) {
         hakenCard.style.display = isHaken ? '' : 'none';
         if (isHaken) hakenLoadStatus();
-    }
-    // 健康診断申込モード: 申込カードのみ表示（初回表示時に接続状態を読み込む）
-    if (healthApplyCard) {
-        healthApplyCard.style.display = isHealthApply ? '' : 'none';
-        if (isHealthApply) haLoadStatus();
     }
 
     // アップロードフォーム（＝スケジュールモードの入力カード）はスケジュールモードのみ表示
@@ -268,6 +280,13 @@ document.querySelectorAll('input[name="mode"]').forEach(radio => {
         applyModeUI(getCurrentMode());
         // タブで切り替えたら、そのモードの先頭（入力カード）が見える位置へ戻す
         window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+});
+// 健康診断HPMモードの項目切替（hpm / apply）。カードの中身は消さないので行き来しても結果は残る
+document.querySelectorAll('#health-subtabs [data-health-sub]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        healthSubMode = btn.dataset.healthSub === 'apply' ? 'apply' : 'hpm';
+        applyModeUI(getCurrentMode());
     });
 });
 applyModeUI(getCurrentMode());

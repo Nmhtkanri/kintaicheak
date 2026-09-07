@@ -38,17 +38,13 @@
             <input type="radio" name="mode" value="csv_export">
             <span class="mode-tab-face">スケジュールアップロード</span>
         </label>
-        <label class="mode-tab" title="健診結果ExcelからHPM取込用CSVを作る（HPMへの取込は手動）">
+        <label class="mode-tab" title="健診結果からHPM取込用CSVを作る（取込は手動）／健診申込の対象者登録と回答集計（Google連携・jinjerには書きません）">
             <input type="radio" name="mode" value="health_hpm">
             <span class="mode-tab-face">健康診断HPM</span>
         </label>
         <label class="mode-tab" title="四半期の派遣元管理台帳を作り jinjer へ添付する">
             <input type="radio" name="mode" value="haken">
             <span class="mode-tab-face">派遣台帳</span>
-        </label>
-        <label class="mode-tab" title="健康診断申込の対象者登録と回答集計（Googleスプレッドシート連携・jinjerには書きません）">
-            <input type="radio" name="mode" value="health_apply">
-            <span class="mode-tab-face">健診申込</span>
         </label>
         <span class="mode-tabs-hint" id="mode-bar-hint"></span>
     </div>
@@ -1306,6 +1302,14 @@
     </div>
     {% endraw %}
 
+    <!-- 健康診断HPMモードの項目切替。健診申込（Google連携）は 2026-09-04 にこのモードへ統合し、
+         専用タブ（health_apply）は廃止した。項目の切替は script.js の healthSubMode（hpm / apply）が持つ。 -->
+    <div class="health-subtabs" id="health-subtabs" style="display:none">
+        <span class="health-subtabs-caption">項目</span>
+        <button type="button" class="health-subtab is-active" data-health-sub="hpm">🩺 健診結果 → HPM取込用CSV</button>
+        <button type="button" class="health-subtab" data-health-sub="apply">📝 健診申込（対象者登録・回答集計）</button>
+    </div>
+
     <div class="workflow-card mode-accent acc-health" id="health-card" style="display:none">
         <div class="card-head">
             <span class="card-icon icon-health">🩺</span>
@@ -1399,7 +1403,7 @@
             <span class="card-icon icon-happly">📝</span>
             <div>
                 <div class="card-title">
-                    健康診断申込（Google スプレッドシート連携）
+                    健診申込の対象者登録と回答集計（Google スプレッドシート連携）
                     <span class="tag tag-safe">jinjer には書きません・Google の対象者と監査ログにだけ書きます</span>
                 </div>
                 <p class="card-lead">年度別スプレッドシートの回答を読み込んで集計し、対象者を jinjer から取って登録します。</p>

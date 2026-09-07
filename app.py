@@ -5659,4 +5659,6 @@ def _ensure_extension(filename, extension):
 
 if __name__ == "__main__":
     cleanup_uploads_on_start()
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    # 開発起動のみ PORT 環境変数で変えられる（exe の launcher.py は 5000 固定のまま）。
+    # exe が 5000 を使っている最中に、ソースの画面を別ポートで確認するため。
+    app.run(debug=True, host="127.0.0.1", port=int(os.environ.get("PORT", "5000")))

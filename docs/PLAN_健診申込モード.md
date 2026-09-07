@@ -30,6 +30,9 @@ jinjer には書かない（jinjer 登録は次段階・別承認）。発端は
 - ルート: `app.py` 末尾の「健康診断申込モード」帯（`/health_apply_*`）。差替え点は
   `health_apply_gateway`（Sheets）と、②で足す jinjer 取得関数。
 - 画面: `templates/index.html` の `ha-card` 1枚（id は `ha-` 接頭辞）＋ `static/script.js` 末尾の `ha*` 関数。
+  **2026-09-04 に専用タブ（health_apply）を廃止し、健康診断HPMモード（health_hpm）の項目に統合**した。
+  モード内の項目切替バー `#health-subtabs`（hpm = 健診結果→HPM取込CSV／apply = 健診申込）を `healthSubMode` が持ち、
+  `applyModeUI` が選んだ項目のカードだけ出す。カードの中身と `ha*` の配線は変えていない。
   インライン script には書かない。
 - 設定（`config.py`）:
 
@@ -167,5 +170,25 @@ Hub は `REGISTER_BATCH`・`REGISTER`。Apps Script は `SETUP SEND RESEND FIRST
   （v2 の実配備が済んだら別コミットで消す）。`tests/test_health_apply_apps_script.py`（27件）が node の
   偽 GAS 環境（`tests/health_apply_gas_harness.js`）で、Hub の列定義との一致・SHA-256・受付期間・
   回答の検証・回答行の組み立て・案内送信を検査する。**Google 上でのデプロイと実送信は未実施**（別承認）。
+- 2026-09-04 準備（実接続前）に着手。hpm.txt（`C:\Users\谷津晴香\Downloads\hpm.txt`、機関50件＋種別6件）から
+  5シート入りのブック `Z:\API連携\docs\健診申込_2027年度_テスト用ブック_20260904.xlsx` を生成し、
+  `schema.verify_workbook` と `OptionCatalog.from_rows` を通した（機関51・種別6・追加検査1・続柄2）。
+  設定シートは受付開始=2026-09-04（テスト用の仮値）、WebアプリURL・案内メール・担当者連絡先は空。
+  同名2件（東京品川病院・さがみはら）は両方 `有効=1` のまま備考で注記。機関の「別名」は空（jinjer の
+  表記は対象者登録のプレビューで `前年度健診機関(原文)` を見てから足す）。対象者2行・回答1行のサンプル
+  （社員番号 2099001/2099002、確認後に削除）入り。Drive API からは多シートのブックを作れないため、
+  Google への取り込み（Drive にアップロード → Google スプレッドシートとして保存）は谷津さんの手作業。
+  同日、Chrome 拡張経由で Drive にアップロードし「Google スプレッドシートとして保存」で変換
+  （スプレッドシートID `1T-NExCIyx1CDU0oSXS528W-xQJ6ZHhF1UuVzzM2NwJc`、5シート・前ゼロのコードも文字列のまま）。
+  年度設定JSONの spreadsheet_id を差し替え（旧ファイルは `_backup/健診申込_年度設定_backup_20260904.json`）。
+  元の xlsx も Drive に残っている（同名 .xlsx、消してよい）。残り: 鍵JSON配置（準備1）→ 共有（3）→ 回答読込（5）。
+- 2026-09-04 実接続確認（準備1〜5）完了。Google Cloud はプロジェクト「My First Project」（unified-gist-482106-v5）、
+  サービスアカウント `health-apply@unified-gist-482106-v5.iam.gserviceaccount.com`。Sheets API は有効化済みだった。
+  組織ポリシー `iam.disableServiceAccountKeyCreation` が鍵作成を止めていたため、谷津さんが **このプロジェクトだけ**
+  オーバーライド（適用オフ）してから鍵を作成し、`%LOCALAPPDATA%\KintaiChecker\health_apply\service_account.json` に配置。
+  テスト用ブックはスプレッドシートの共有ダイアログからサービスアカウントへ編集者共有（外部ドメイン警告は「このまま共有」。
+  Drive 連携の share_file は権限エラーで使えなかった）。Flask の test_client で `/health_apply_status` と
+  `/health_apply_responses` を実行し、success=true・workbook_issues なし・サンプル2名（回答済 / 未送信）を読めた。
+  次: Hub 画面（exe ではなくローカル起動）でボタン操作の確認 → 対象者登録で自分1人を登録 → 冪等・409 の確認 → サンプル行削除。
 - 未対応: ローカルの Flask 試作 `preview_server.py` は旧選択肢（MYメディカル6拠点＋健診オプション）のまま。
   画面確認は Apps Script v2 のテストデプロイで行う。

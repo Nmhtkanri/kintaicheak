@@ -29,8 +29,13 @@ def _style_css():
 
 
 def test_index_has_health_apply_tab_and_card():
+    """健診申込は専用タブではなく、健康診断HPMモードの項目（サブタブ）として出す（2026-09-04 統合）。"""
     html = _html()
-    assert 'value="health_apply"' in html
+    assert 'value="health_apply"' not in html               # 専用タブは廃止
+    assert 'value="health_hpm"' in html
+    assert 'id="health-subtabs"' in html
+    assert 'data-health-sub="hpm"' in html
+    assert 'data-health-sub="apply"' in html
     assert "健診申込" in html
     for el_id in ("ha-card", "ha-access-banner", "ha-year", "ha-reload-btn", "ha-status-line",
                   "ha-responses-btn", "ha-responses-area", "ha-cnt-targets", "ha-cnt-error",
@@ -71,11 +76,15 @@ def test_card_promises_no_jinjer_write_and_no_local_copy():
 
 def test_script_js_wires_mode_and_routes():
     js = _script_js()
-    assert "health_apply: '" in js                       # MODE_HINTS
-    assert "const isHealthApply = mode === 'health_apply';" in js
-    assert "&& !isHealthApply" in js                     # isMatch から除外
-    assert "healthApplyCard.style.display = isHealthApply ? '' : 'none';" in js
-    assert "if (isHealthApply) haLoadStatus();" in js
+    assert "health_apply: '" not in js                   # MODE_HINTS から専用モードは消えている
+    assert "isHealthApply" not in js                     # 専用モードの分岐は残さない
+    assert "let healthSubMode = 'hpm';" in js            # 健康診断HPMモードの項目（hpm / apply）
+    assert js.index("let healthSubMode = 'hpm';") < js.index("function applyModeUI(mode)")
+    assert "const showHealthApply = isHealthHpm && healthSubMode === 'apply';" in js
+    assert "healthApplyCard.style.display = showHealthApply ? '' : 'none';" in js
+    assert "if (showHealthApply) haLoadStatus();" in js
+    assert "healthCard.style.display = showHealthHpm ? '' : 'none';" in js
+    assert "#health-subtabs [data-health-sub]" in js    # 項目切替ボタンの配線
     for fn in ("function haLoadStatus", "function haRenderStatus", "function haLoadResponses",
                "function haPaintResponseTable", "function haSetForbidden", "function haShowError"):
         assert fn in js, fn
