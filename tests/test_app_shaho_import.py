@@ -126,8 +126,14 @@ def install_preview_stubs(monkeypatch, *, current=None, calc=None, jinjer=None):
     monkeypatch.setattr(pdf_module, "verify_totals", lambda stmt: ["人数"])
     monkeypatch.setattr(pdf_module, "verify_person_premiums",
                         lambda stmt, master=None, **kw: {})
+    # 等級表のダミー。画面は「どの等級表で計算したか」を結果に添える（9f04fd39 で追加）ため、
+    # 中身の無い object() だと path/description を引けず AttributeError で落ちる
+    # （2026-09-07 に15件まとめて失敗しているのを発見。製品側の不具合ではなくスタブの古さ）。
+    from types import SimpleNamespace
+    fake_master = SimpleNamespace(path=r"Z:\試験\標準報酬月額_2026_07.xlsx",
+                                  description="試験用の等級表")
     monkeypatch.setattr(shaho_writer, "load_calc_context",
-                        lambda ym, **kw: shaho_writer.CalcContext(master=object()))
+                        lambda ym, **kw: shaho_writer.CalcContext(master=fake_master))
     monkeypatch.setattr(shaho_writer, "expected_smr",
                         lambda p, ym, ctx: calc or CalcResult(
                             kenpo=p.kenpo_smr, konen=p.konen_smr, source="随時改定"))
