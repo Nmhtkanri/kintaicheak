@@ -17,19 +17,21 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from config import Config
 from services.keiri_engine import is_shaho_menjo_prev, ym_add, ym_compact
 from services.shaho_engine import (BI_KENPO_SMR, BI_KONEN_SMR, MONTHLY_SYSTEMS,  # noqa: F401
-                                   assess_month, calc_teiji_kettei, load_statements_full,
-                                   registered_smr, salary_system_name)
+                                   assess_month, calc_teiji_kettei, collect_remuneration,
+                                   load_statements_full, registered_smr, salary_system_name)
 from services.shaho_master import (ShahoMasterError, load_class_master, load_grade_table,
                                    select_grade_table)
 
 # 判定ステータス（強い順。総合は2系統の強い方）
-STATUS_PRIORITY = ["INSUFFICIENT_DATA", "EXEMPTION_REVIEW", "TWO_MONTH_COLLECTION_REVIEW",
+STATUS_PRIORITY = ["INSUFFICIENT_DATA", "EXEMPTION_REVIEW", "LEAVE_REVIEW",
+                   "TWO_MONTH_COLLECTION_REVIEW",
                    "ADJUSTMENT_PRESENT", "MONTHLY_REVISION_CANDIDATE", "DIFFERENCE",
                    "PROVISIONAL_OK", "OK", "NOT_APPLICABLE"]
-REVIEW_STATUSES = set(STATUS_PRIORITY[:6])          # 要確認系（自動OKにしない）
+REVIEW_STATUSES = set(STATUS_PRIORITY[:7])          # 要確認系（自動OKにしない）
 STATUS_JA = {
     "OK": "OK", "PROVISIONAL_OK": "仮OK", "DIFFERENCE": "差異",
     "ADJUSTMENT_PRESENT": "社保調整あり", "EXEMPTION_REVIEW": "免除の確認",
+    "LEAVE_REVIEW": "休職の確認",
     "TWO_MONTH_COLLECTION_REVIEW": "2か月徴収の確認",
     "MONTHLY_REVISION_CANDIDATE": "随時改定の候補",
     "INSUFFICIENT_DATA": "情報不足", "NOT_APPLICABLE": "対象外",
@@ -99,6 +101,36 @@ def merge_status(*statuses: str) -> str:
 
 
 @dataclass
+class RevisionCalc:
+    """随時改定（月額変更）の候補1件。変動月からの3か月窓を assess_month / calc_teiji_kettei で評価する。
+
+    定時決定と同じ材料（支払基礎日数・報酬計・等級表）で計算するので、候補者の計算欄には
+    定時決定の値ではなくこちらを出す（7〜9月に随時改定される人は定時決定の対象外）。
+    """
+    change_month: str                       # 変動月（4〜6月）
+    apply_month: str                        # 改定月 = 変動月 + 3
+    trigger: str                            # きっかけ（固定的賃金の変動／給与体系の切替／資格取得の翌月）
+    window: list                            # 窓の3か月
+    kettei: object = None                   # TeijiKettei（窓の月ぶん。未完なら揃った月だけ）
+    grade_diff: int = 0                     # 計算健保等級 − 登録健保等級
+    pending: bool = False                   # 3か月窓が未完（様子見）
+    candidate: bool = False
+    reason: str = ""                        # 備考・画面に出す一文
+
+    def to_dict(self) -> dict:
+        tk = self.kettei
+        return {"change_month": self.change_month, "apply_month": self.apply_month,
+                "trigger": self.trigger, "window": list(self.window), "pending": self.pending,
+                "grade_diff": self.grade_diff, "reason": self.reason,
+                "average": tk.average if tk else None,
+                "kenpo_grade": tk.kenpo_grade if tk else None,
+                "kenpo_smr": tk.kenpo_smr if tk else None,
+                "konen_smr": tk.konen_smr if tk else None,
+                "months": [{"ym": a.ym, "days": a.base_days.days, "adopted": a.adopted,
+                            "total": a.rem.total} for a in (tk.months if tk else [])]}
+
+
+@dataclass
 class PersonResult:
     emp: str
     name: str = ""
@@ -112,6 +144,9 @@ class PersonResult:
     premiums: dict = field(default_factory=dict)      # 期待値（C−lag月分）
     actuals: dict = field(default_factory=dict)       # C月明細の控除実績
     chosei: float = 0.0
+    revision: object = None                 # RevisionCalc（随時改定の候補のときだけ）
+    leave_months: list = field(default_factory=list)  # 無給の月（休職の疑い）
+    calc_basis: str = ""                    # 計算欄の根拠: 定時決定／随時改定／保険者算定の可能性（休職）
 
     @property
     def total_status(self) -> str:
@@ -142,7 +177,8 @@ def month_closed_stats(month_map: dict) -> dict:
 
 
 def judge_person(emp, months_data, check_pair, year, master, class_master, cfg) -> PersonResult:
-    """1人分の判定。months_data={ym: rec}（4〜6月）、check_pair=(C−1月rec, C月rec)。"""
+    """1人分の判定。months_data={ym: rec}（キャッシュにある全月。4〜6月のほか、随時改定の
+    3か月窓と休職の検知に突合月までを使う）、check_pair=(C−1月rec, C月rec)。"""
     res = PersonResult(emp=emp)
     calc_months = [f"{year}-04", f"{year}-05", f"{year}-06"]
     recs = [months_data.get(m) for m in calc_months]
@@ -200,8 +236,20 @@ def judge_person(emp, months_data, check_pair, year, master, class_master, cfg) 
         elif menjo:
             res.teiji_status = "EXEMPTION_REVIEW"
             res.notes.append("算定月に社保免除（産休・育休）の月がある: " + "、".join(menjo))
-        elif _revision_candidate(res, months_data, master, class_master, cfg):
+        elif (leave := _leave_months(months_data, cfg["check_month"], class_master)):
+            # 休職（無給）の月は算定から除く。4〜6月とも除くなら従前額のまま（保険者算定）。
+            # 休職給は固定的賃金の変動ではないので随時改定にもならない（日本年金機構「随時改定」）
+            res.teiji_status = "LEAVE_REVIEW"
+            res.leave_months = leave
+            res.calc_basis = "保険者算定の可能性（休職）"
+            res.notes.append("無給の月がある（休職の疑い）: " + "、".join(leave)
+                             + "。休職の月は算定から除き、4〜6月とも除くなら従前額のまま（保険者算定）。"
+                             "定時決定の計算値は出さず、保険者の決定に従う")
+        elif (rc := _revision_candidate(res, months_data, master, class_master, cfg, joined)):
             res.teiji_status = "MONTHLY_REVISION_CANDIDATE"
+            res.revision = rc
+            res.calc_basis = "随時改定（様子見）" if rc.pending else "随時改定"
+            res.notes.append(rc.reason)
         elif tk.kenpo_smr != res.reg_kenpo or tk.konen_smr != res.reg_konen:
             res.teiji_status = "DIFFERENCE"
             res.notes.append("計算標報と登録標報が不一致（9月適用前は「改定予定」の意味）")
@@ -213,6 +261,8 @@ def judge_person(emp, months_data, check_pair, year, master, class_master, cfg) 
                 res.notes.append(f"採用月が{tk.adopted_n}か月")
         else:
             res.teiji_status = "OK"
+        if res.teiji_status in ("OK", "PROVISIONAL_OK", "DIFFERENCE"):
+            res.calc_basis = "定時決定"
 
     # ---------- 控除判定（C月明細 =（C−lag）月分） ----------
     prev_rec, c_rec = check_pair
@@ -280,37 +330,124 @@ def _menjo_months(calc_months, months_data):
 REVISION_IGNORE_KEYS = {"salary_items:allowance34", "salary_items:allowance35"}
 
 
-def _revision_candidate(res, months_data, master, class_master, cfg) -> bool:
-    """4〜6月に固定的賃金が変動し、変動月からの3か月平均が登録と2等級以上差 → 候補。
+def _fixed_wage(pi, class_master, ym) -> float:
+    """固定的賃金（分類マスタで fixed=1 の対象項目。通勤費は実費精算で毎月動くので除く）。"""
+    rem = collect_remuneration(pi, class_master, ym)
+    return sum(v for key, _lab, v, cls, fx in rem.breakdown
+               if cls == "対象" and fx == "1" and key not in REVISION_IGNORE_KEYS)
 
-    変動月を4〜6月に限るのは「7〜9月に随時改定される予定の人は定時決定を確定扱い
-    しない」ため（4月変動→7月改定 … 6月変動→9月改定）。
+
+def _leave_months(months_data, check_month, class_master) -> list:
+    """報酬がゼロなのに登録標報がある月（休職の疑い）。突合月までを見る。
+
+    産休・育休は社保免除で先に拾う（_menjo_months）ので、ここに残るのは私傷病休職など。
     """
-    from services.shaho_engine import collect_remuneration
-    months = sorted(m for m in months_data if months_data.get(m))
-    fixed, totals = {}, {}
-    for m in months:
-        rem = collect_remuneration(months_data[m]["payroll_info"], class_master, m)
-        core = sum(v for key, _lab, v, cls, fx in rem.breakdown
-                   if cls == "対象" and fx == "1" and key not in REVISION_IGNORE_KEYS)
-        fixed[m], totals[m] = core, rem.total
-    changes = [m for prev, m in zip(months, months[1:])
-               if abs(fixed[m] - fixed[prev]) > 0.5 and m in cfg["revision_window"]]
-    for change in changes:
-        window = [ym_add(change, i) for i in range(3)]
-        if not all(w in totals for w in window):
-            res.notes.append(f"固定的賃金が{change}に変動（3か月窓が未完＝随時改定の様子見）")
-            return True
-        avg = int(sum(totals[w] for w in window) / 3)
-        row = master.find_grade(avg)
-        reg_row = next((g for g in master.grades if g.kenpo_smr == res.reg_kenpo), None)
-        if reg_row and abs(row.kenpo_grade - reg_row.kenpo_grade) >= 2:
-            res.notes.append(f"固定的賃金が{change}に変動し3か月平均{avg:,}円は"
-                             f"登録と{abs(row.kenpo_grade - reg_row.kenpo_grade)}等級差"
-                             "（随時改定候補）")
-            return True
-    return False
+    out = []
+    for m in sorted(months_data):
+        rec = months_data.get(m)
+        if not rec or m > check_month:
+            continue
+        if registered_smr(rec["basic_info"])[0] <= 0:
+            continue
+        if collect_remuneration(rec["payroll_info"], class_master, m).total == 0:
+            out.append(m)
+    return out
 
+
+def _revision_triggers(months_data, class_master, cfg, joined) -> list:
+    """随時改定の「きっかけ」がある変動月 [(変動月, きっかけ文), ...]（4〜6月内・早い順）。
+
+    ① 固定的賃金の金額が前月から変わった
+    ② 給与体系が切り替わった（「〜暫定」からの切替は 2026-04 の全社的な体系移行なので除く。
+       テストや空も除く）
+    ③ 資格取得月の翌月（joined_on から。無ければ登録標報が 0→正 になった月の翌月）。
+       取得時決定は見込み額なので、実績と2等級以上ずれれば随時改定になる（2026004 で実例）
+    """
+    months = sorted(m for m in months_data if months_data.get(m))
+    fixed, systems, regs = {}, {}, {}
+    for m in months:
+        rec = months_data[m]
+        fixed[m] = _fixed_wage(rec["payroll_info"], class_master, m)
+        systems[m] = salary_system_name(rec["basic_info"])
+        regs[m] = registered_smr(rec["basic_info"])[0]
+    found = {}
+
+    def add(m, text):
+        if m in cfg["revision_window"]:
+            found.setdefault(m, []).append(text)
+
+    for prev, m in zip(months, months[1:]):
+        if abs(fixed[m] - fixed[prev]) > 0.5:
+            add(m, f"固定的賃金の変動（{fixed[prev]:,.0f}→{fixed[m]:,.0f}円）")
+        old, new = systems[prev], systems[m]
+        if (old and new and old != new and "テスト" not in (old, new)
+                and not old.endswith("暫定")):
+            add(m, f"給与体系の切替（{old}→{new}）")
+    joined_change = ym_add(f"{joined:%Y-%m}", 1) if joined else ""
+    if joined_change in cfg["revision_window"]:
+        add(joined_change, f"資格取得（{joined:%m/%d}入社）の翌月")
+    else:
+        for prev, m in zip(months, months[1:]):
+            if regs[prev] == 0 and regs[m] > 0:
+                add(ym_add(m, 1), f"登録標報が{m}に0→{regs[m]:,.0f}円（取得時決定）の翌月")
+    return [(m, "・".join(dict.fromkeys(found[m]))) for m in sorted(found)]
+
+
+def _evaluate_revision(res, change, trigger, months_data, master, class_master, cfg) -> RevisionCalc:
+    """変動月からの3か月窓を評価する。候補になる条件は
+
+    - 窓の3か月とも支払基礎日数が閾値（17日）以上（満たさない月があれば候補にせず理由を残す）
+    - 3か月平均の等級が登録標報と2等級以上差
+    窓が未完（突合月がまだ先）なら「様子見」の候補として返す。
+    """
+    window = [ym_add(change, i) for i in range(3)]
+    have = [w for w in window if months_data.get(w)]
+    assessments = [assess_month(w, months_data[w]["payroll_info"],
+                                salary_system_name(months_data[w]["basic_info"]),
+                                class_master, cfg["threshold"]) for w in have]
+    rc = RevisionCalc(change_month=change, apply_month=ym_add(change, 3),
+                      trigger=trigger, window=window)
+    ng = [a for a in assessments if not a.adopted]
+    if ng:
+        rc.reason = (f"{trigger}が{change}にあるが、"
+                     + "、".join(f"{a.ym}は{a.reason}" for a in ng)
+                     + f"のため随時改定の要件（3か月とも支払基礎日数{cfg['threshold']}日以上）を満たさない")
+        return rc
+    rc.kettei = calc_teiji_kettei(assessments, master) if assessments else None
+    if len(have) < 3:
+        rc.pending = True
+        rc.candidate = True
+        rc.reason = (f"{trigger}が{change}。3か月窓（{window[0]}〜{window[2]}）が未完のため"
+                     f"随時改定の様子見（{rc.apply_month}改定の可能性）")
+        return rc
+    tk = rc.kettei
+    reg_row = next((g for g in master.grades if g.kenpo_smr == res.reg_kenpo), None)
+    if reg_row is None or tk.kenpo_grade is None:
+        return rc
+    rc.grade_diff = tk.kenpo_grade - reg_row.kenpo_grade
+    if abs(rc.grade_diff) < 2:
+        return rc
+    rc.candidate = True
+    days = "/".join(f"{a.base_days.days:g}" for a in tk.months)
+    rc.reason = (f"随時改定の候補: {trigger}（{change}）→ {rc.apply_month}改定。"
+                 f"{window[0]}〜{window[2]}の平均 {tk.average:,}円（基礎日数 {days}日）→ "
+                 f"健保{tk.kenpo_grade}等級 {tk.kenpo_smr:,}円／厚年 {tk.konen_smr:,}円。"
+                 f"登録 {res.reg_kenpo:,}円と{abs(rc.grade_diff)}等級差。"
+                 "7〜9月に随時改定される人は定時決定の対象外")
+    if tk.gate_ng:
+        rc.reason += "（窓に検算不一致の月あり）"
+    return rc
+
+
+def _revision_candidate(res, months_data, master, class_master, cfg, joined=None):
+    """随時改定の候補なら RevisionCalc、無ければ None。候補にならなかった理由は備考に残す。"""
+    for change, trigger in _revision_triggers(months_data, class_master, cfg, joined):
+        rc = _evaluate_revision(res, change, trigger, months_data, master, class_master, cfg)
+        if rc.candidate:
+            return rc
+        if rc.reason:
+            res.notes.append(rc.reason)
+    return None
 
 def detect_revisions(months_all: dict) -> list:
     """月次スナップショット間で登録標報が変わった人（期中改定の検知）。"""

@@ -3578,6 +3578,9 @@ def route_shaho_run():
         "statuses": [{"status": st, "label": STATUS_JA[st], "count": counts[st],
                       "review": st in REVIEW_STATUSES}
                      for st in STATUS_JA if counts.get(st)],
+        # 随時改定の候補（7〜9月改定の見込み）と休職の確認（無給の月あり）は人の一覧で見せる
+        "revision_candidates": out.get("revision_candidates", []),
+        "leave_review": out.get("leave_review", []),
         "xlsx": os.path.basename(out["xlsx"]),
         "json": os.path.basename(out["json"]),
         "out_dir": os.path.abspath(os.path.dirname(out["xlsx"])),

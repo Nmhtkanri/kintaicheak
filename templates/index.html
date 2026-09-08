@@ -1094,6 +1094,7 @@
             <div class="hint">
                 給与明細は経理モードと共用のキャッシュ（このPCのもの）を読みます。4〜6月分が無いと言われたら、上にチェックを入れて実行し直してください（読み取りのみ。取得した月は経理モードでもそのまま使えます）。
                 改定が控除に反映されたかは、適用月の翌月支給（9月適用なら10月支給）が締まってから、その月を突合月にして確かめます。
+                随時改定の候補（7〜9月改定の見込み。定時決定の対象外）と休職の確認（無給の月あり）は結果の下に一覧で出ます。Excel では社員別判定の「計算根拠」列で見分けられます。
                 要確認が0にならないのは正常です — 「差異」は9月に改定されるべき人のリストです。
             </div>
         </div>
@@ -1108,6 +1109,8 @@
             </div>
             <div id="shaho-open-months" style="margin-bottom:10px"></div>
             <div id="shaho-statuses" style="margin-bottom:10px"></div>
+            <div id="shaho-revisions" style="margin-bottom:10px"></div>
+            <div id="shaho-leave" style="margin-bottom:10px"></div>
             <div id="shaho-files"></div>
         </div>
         <div id="shaho-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>

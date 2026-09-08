@@ -90,6 +90,12 @@ def main() -> int:
         if counts.get(st):
             mark = "⚠" if st in REVIEW_STATUSES else " "
             print(f" {mark} {STATUS_JA[st]:<12} {counts[st]:>4}名")
+    for c in out.get("revision_candidates", []):
+        val = "様子見（3か月窓が未完）" if c["pending"] else f"{c['calc_kenpo']:,}円（{c['grade_diff']:+d}等級）"
+        print(f"   随時改定の候補 {c['emp']} {c['name']}: {c['trigger']} "
+              f"{c['change_month']}→{c['apply_month']}改定 登録 {c['reg_kenpo']:,}円 → 計算 {val}")
+    for lv in out.get("leave_review", []):
+        print(f"   休職の確認 {lv['emp']} {lv['name']}: 無給の月 {'、'.join(lv['months'])}")
     print(f"Excel: {out['xlsx']}")
     print(f"JSON : {out['json']}")
     return 2 if out["review_n"] else 0
