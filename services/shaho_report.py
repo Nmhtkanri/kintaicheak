@@ -28,6 +28,75 @@ def _kubun(status: str) -> str:
     return ""
 
 
+EMPLOYEE_COLUMNS = ["社員番号", "氏名", "給与体系", "計算根拠", "採用月数", "平均報酬月額",
+                    "計算健保等級", "計算健保標報", "計算厚年標報", "登録健保標報", "登録厚年標報",
+                    "随時改定 きっかけ", "随時改定 変動月", "随時改定 改定月", "随時改定 基礎日数",
+                    "標報判定", "控除判定", "総合", "区分", "備考"]
+
+
+def calc_kettei(r):
+    """計算欄に出す算定結果。随時改定の候補は3か月窓の計算値、休職の確認は出さない、それ以外は定時決定。
+
+    7〜9月に随時改定される人は定時決定の対象外なので、定時決定の式で出した値を並べると
+    「320,000 のはずが 300,000 で通知が来た」のように読めてしまう（2026-09-08 に実際に混乱）。
+    """
+    if r.revision is not None:
+        return r.revision.kettei
+    if r.teiji_status == "LEAVE_REVIEW":
+        return None
+    return r.teiji
+
+
+def revision_days(rv) -> str:
+    """随時改定窓の支払基礎日数 "31/30/31"。"""
+    if not rv or not rv.kettei:
+        return ""
+    return "/".join(f"{a.base_days.days:g}" if a.base_days.days is not None else "—"
+                    for a in rv.kettei.months)
+
+
+def revision_candidates(results) -> list:
+    """画面・JSON 用の随時改定候補一覧（改定月・社員番号順）。"""
+    out = []
+    for r in results:
+        rv = r.revision
+        if not rv:
+            continue
+        tk = rv.kettei
+        settled = bool(tk) and not rv.pending
+        out.append({"emp": r.emp, "name": r.name, "trigger": rv.trigger,
+                    "change_month": rv.change_month, "apply_month": rv.apply_month,
+                    "pending": rv.pending, "reg_kenpo": r.reg_kenpo, "reg_konen": r.reg_konen,
+                    "calc_kenpo": tk.kenpo_smr if settled else None,
+                    "calc_konen": tk.konen_smr if settled else None,
+                    "average": tk.average if settled else None,
+                    "grade_diff": rv.grade_diff, "days": revision_days(rv), "reason": rv.reason})
+    return sorted(out, key=lambda c: (c["apply_month"], c["emp"]))
+
+
+def leave_review(results) -> list:
+    """画面・JSON 用の休職の確認一覧。"""
+    return [{"emp": r.emp, "name": r.name, "months": list(r.leave_months)}
+            for r in results if r.leave_months]
+
+
+def _employee_json(r) -> dict:
+    tk = calc_kettei(r)
+    return {
+        "emp": r.emp, "name": r.name, "system": r.system,
+        "teiji_status": r.teiji_status, "check_status": r.check_status,
+        "total_status": r.total_status, "notes": r.notes,
+        "calc_basis": r.calc_basis,
+        "average": tk.average if tk else None,
+        "calc_kenpo_smr": tk.kenpo_smr if tk else None,
+        "calc_konen_smr": tk.konen_smr if tk else None,
+        "reg_kenpo_smr": r.reg_kenpo, "reg_konen_smr": r.reg_konen,
+        "premiums": r.premiums, "actuals": r.actuals, "chosei": r.chosei,
+        "revision": r.revision.to_dict() if r.revision else None,
+        "leave_months": list(r.leave_months),
+    }
+
+
 def _sheet(wb, title, rows, columns):
     write_sheet(wb, title, rows, columns)
     ws = wb[title]
@@ -47,10 +116,14 @@ def build_workbook(check: dict) -> Workbook:
     counts = {}
     for r in results:
         counts[r.total_status] = counts.get(r.total_status, 0) + 1
-    up = sum(1 for r in results if r.teiji and r.teiji.kenpo_smr
+    # 定時決定の計算値を使う人だけ数える（随時改定の候補・休職の確認は定時決定の値を出さない）
+    teiji_used = [r for r in results if r.teiji_status in ("OK", "PROVISIONAL_OK", "DIFFERENCE")]
+    up = sum(1 for r in teiji_used if r.teiji and r.teiji.kenpo_smr
              and r.teiji.kenpo_smr > r.reg_kenpo > 0)
-    down = sum(1 for r in results if r.teiji and r.teiji.kenpo_smr
+    down = sum(1 for r in teiji_used if r.teiji and r.teiji.kenpo_smr
                and 0 < r.teiji.kenpo_smr < r.reg_kenpo)
+    n_revision = sum(1 for r in results if r.revision)
+    n_leave = sum(1 for r in results if r.leave_months)
     rows = [{"項目": k, "値": v} for k, v in [
         ("実行日時", datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
         ("算定", f"{check['year']}年4〜6月支給 → {check['year']}年9月適用予定"),
@@ -62,6 +135,8 @@ def build_workbook(check: dict) -> Workbook:
         ("対象者", f"{len(results)}名"),
         ("等級 上がる予定/下がる予定", f"{up}名 / {down}名"),
         ("期中改定の検知", f"{len(check['revisions'])}件"),
+        ("随時改定の候補（7〜9月改定の見込み・定時決定の対象外）", f"{n_revision}名"),
+        ("休職の確認（無給の月あり・保険者算定の可能性）", f"{n_leave}名"),
         ("", ""),
         ("⚠ このファイルは個人情報（氏名・給与・保険料）を含む",
          "共有フォルダに置かない。社労士へ渡すときは経路に注意"),
@@ -85,40 +160,46 @@ def build_workbook(check: dict) -> Workbook:
     # --- 社員別判定 ---
     rows = []
     for r in results:
-        tk = r.teiji
+        tk = calc_kettei(r)
+        rv = r.revision
         rows.append({
             "社員番号": r.emp, "氏名": r.name, "給与体系": r.system,
+            "計算根拠": r.calc_basis,
             "採用月数": tk.adopted_n if tk else "",
             "平均報酬月額": tk.average if tk and tk.average is not None else "",
             "計算健保等級": tk.kenpo_grade if tk else "", "計算健保標報": tk.kenpo_smr if tk else "",
             "計算厚年標報": tk.konen_smr if tk else "",
             "登録健保標報": r.reg_kenpo or "", "登録厚年標報": r.reg_konen or "",
+            "随時改定 きっかけ": rv.trigger if rv else "",
+            "随時改定 変動月": rv.change_month if rv else "",
+            "随時改定 改定月": rv.apply_month if rv else "",
+            "随時改定 基礎日数": revision_days(rv),
             "標報判定": STATUS_JA[r.teiji_status], "控除判定": STATUS_JA[r.check_status],
             "総合": STATUS_JA[r.total_status], "区分": _kubun(r.total_status),
             "備考": "／".join(r.notes),
         })
-    _sheet(wb, "社員別判定", rows,
-           ["社員番号", "氏名", "給与体系", "採用月数", "平均報酬月額",
-            "計算健保等級", "計算健保標報", "計算厚年標報", "登録健保標報", "登録厚年標報",
-            "標報判定", "控除判定", "総合", "区分", "備考"])
+    _sheet(wb, "社員別判定", rows, EMPLOYEE_COLUMNS)
 
-    # --- 算定明細（4〜6月） ---
+    # --- 算定明細（定時決定の4〜6月＋随時改定候補の3か月窓） ---
     rows = []
     for r in results:
-        if not r.teiji:
-            continue
-        for a in r.teiji.months:
-            rows.append({
-                "社員番号": r.emp, "氏名": r.name, "支給月": a.ym,
-                "基礎日数": a.base_days.days if a.base_days.days is not None else "",
-                "根拠": a.base_days.basis, "採用": "採用" if a.adopted else "除外",
-                "除外理由": a.reason, "報酬計": a.rem.total,
-                "通貨報酬": a.rem.cash_total, "現物報酬": a.rem.genbutsu_total,
-                "検算": "OK" if a.rem.gate_ok else f"差{a.rem.gate_diff:+,.0f}円",
-                "区分": "" if a.rem.gate_ok else "要確認",
-            })
+        blocks = [("定時決定", r.teiji.months)] if r.teiji else []
+        if r.revision and r.revision.kettei:
+            blocks.append((f"随時改定（{r.revision.change_month}変動→{r.revision.apply_month}改定）",
+                           r.revision.kettei.months))
+        for use, months in blocks:
+            for a in months:
+                rows.append({
+                    "社員番号": r.emp, "氏名": r.name, "用途": use, "支給月": a.ym,
+                    "基礎日数": a.base_days.days if a.base_days.days is not None else "",
+                    "根拠": a.base_days.basis, "採用": "採用" if a.adopted else "除外",
+                    "除外理由": a.reason, "報酬計": a.rem.total,
+                    "通貨報酬": a.rem.cash_total, "現物報酬": a.rem.genbutsu_total,
+                    "検算": "OK" if a.rem.gate_ok else f"差{a.rem.gate_diff:+,.0f}円",
+                    "区分": "" if a.rem.gate_ok else "要確認",
+                })
     _sheet(wb, "算定明細", rows,
-           ["社員番号", "氏名", "支給月", "基礎日数", "根拠", "採用", "除外理由",
+           ["社員番号", "氏名", "用途", "支給月", "基礎日数", "根拠", "採用", "除外理由",
             "報酬計", "通貨報酬", "現物報酬", "検算", "区分"])
 
     # --- 保険料突合 ---
@@ -143,9 +224,9 @@ def build_workbook(check: dict) -> Workbook:
 
     # --- 要確認 ---
     rows = [{"社員番号": r.emp, "氏名": r.name, "総合": STATUS_JA[r.total_status],
-             "理由": "／".join(r.notes), "区分": "要確認"}
+             "計算根拠": r.calc_basis, "理由": "／".join(r.notes), "区分": "要確認"}
             for r in results if r.total_status in REVIEW_STATUSES]
-    _sheet(wb, "要確認", rows, ["社員番号", "氏名", "総合", "理由", "区分"])
+    _sheet(wb, "要確認", rows, ["社員番号", "氏名", "総合", "計算根拠", "理由", "区分"])
 
     # --- 期中改定検知 ---
     _sheet(wb, "期中改定検知", check["revisions"],
@@ -173,17 +254,10 @@ def write_reports(check: dict) -> dict:
                  "grade_table": check["master"].path,
                  "class_master": check["class_master"]["path"],
                  "month_status": check.get("month_status", {})},
-        "employees": [{
-            "emp": r.emp, "name": r.name, "system": r.system,
-            "teiji_status": r.teiji_status, "check_status": r.check_status,
-            "total_status": r.total_status, "notes": r.notes,
-            "average": r.teiji.average if r.teiji else None,
-            "calc_kenpo_smr": r.teiji.kenpo_smr if r.teiji else None,
-            "calc_konen_smr": r.teiji.konen_smr if r.teiji else None,
-            "reg_kenpo_smr": r.reg_kenpo, "reg_konen_smr": r.reg_konen,
-            "premiums": r.premiums, "actuals": r.actuals, "chosei": r.chosei,
-        } for r in check["results"]],
+        "employees": [_employee_json(r) for r in check["results"]],
         "revisions": check["revisions"],
+        "revision_candidates": revision_candidates(check["results"]),
+        "leave_review": leave_review(check["results"]),
     }
     jsn = xlsx.replace(".xlsx", ".json")
     with open(jsn, "w", encoding="utf-8") as f:
@@ -192,4 +266,6 @@ def write_reports(check: dict) -> dict:
     open_months = {ym: st["open"] for ym, st in check.get("month_status", {}).items()
                    if st["open"]}
     return {"xlsx": xlsx, "json": jsn, "review_n": review_n,
-            "n": len(check["results"]), "open_months": open_months}
+            "n": len(check["results"]), "open_months": open_months,
+            "revision_candidates": payload["revision_candidates"],
+            "leave_review": payload["leave_review"]}

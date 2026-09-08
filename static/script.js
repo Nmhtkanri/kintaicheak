@@ -3559,6 +3559,35 @@ if (shahoRunBtn) {
                     + '><td>' + (s.review ? '⚠ ' : '') + escapeHtml(s.label) + '</td><td>'
                     + s.count + '名</td></tr>').join('')
                 + '</table>';
+            // 随時改定の候補: 7〜9月に随時改定される見込みの人。定時決定の対象外なので、
+            // 変動月からの3か月平均を別に計算して「登録→計算」で見せる
+            const yen = (v) => (v === null || v === undefined || v === '') ? '—' : Number(v).toLocaleString();
+            const revs = data.revision_candidates || [];
+            document.getElementById('shaho-revisions').innerHTML = revs.length
+                ? '<div style="margin-bottom:4px"><b>随時改定の候補 ' + revs.length + '名</b> '
+                    + '<span class="hint">7〜9月改定の見込み。定時決定の対象外。控除に効くのは改定月の翌月支給から</span></div>'
+                    + '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th><th>きっかけ</th>'
+                    + '<th>変動月→改定月</th><th>健保標報 登録→計算</th><th>厚年標報</th><th>基礎日数</th></tr>'
+                    + revs.map(c => {
+                        const diff = (c.grade_diff > 0 ? '+' : '') + c.grade_diff + '等級';
+                        const calc = c.pending ? '様子見（3か月窓が未完）' : yen(c.calc_kenpo) + '（' + diff + '）';
+                        return '<tr><td>' + escapeHtml(c.emp) + '</td><td>' + escapeHtml(c.name) + '</td><td>'
+                            + escapeHtml(c.trigger) + '</td><td>' + escapeHtml(c.change_month + '→' + c.apply_month)
+                            + '</td><td>' + yen(c.reg_kenpo) + ' → ' + calc + '</td><td>'
+                            + (c.pending ? '—' : yen(c.calc_konen)) + '</td><td>' + escapeHtml(c.days || '') + '</td></tr>';
+                    }).join('')
+                    + '</table>'
+                : '';
+            // 休職の確認: 無給の月がある人。休職の月は算定から除き、全部除くなら従前額のまま（保険者算定）
+            const leave = data.leave_review || [];
+            document.getElementById('shaho-leave').innerHTML = leave.length
+                ? '<div style="margin-bottom:4px"><b>休職の確認 ' + leave.length + '名</b> '
+                    + '<span class="hint">無給の月あり。休職の月は算定から除き、4〜6月とも除くなら従前額のまま（保険者算定）。定時決定の計算値は出しません</span></div>'
+                    + '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th><th>無給の月</th></tr>'
+                    + leave.map(l => '<tr><td>' + escapeHtml(l.emp) + '</td><td>' + escapeHtml(l.name) + '</td><td>'
+                        + escapeHtml((l.months || []).join('、')) + '</td></tr>').join('')
+                    + '</table>'
+                : '';
             const dl = (fn) => '/shaho_download/' + data.year + '/' + encodeURIComponent(fn);
             document.getElementById('shaho-files').innerHTML =
                 '<a class="btn btn-sm" href="' + dl(data.xlsx) + '">📊 Excelをダウンロード</a> '
