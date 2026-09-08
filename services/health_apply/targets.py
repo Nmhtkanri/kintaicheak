@@ -31,7 +31,8 @@ ACTION_BLOCKED = "blocked"
 ACTION_LABELS = {ACTION_ADD: "追加", ACTION_UNCHANGED: "変更なし", ACTION_CONFLICT: "競合", ACTION_BLOCKED: "登録不可"}
 
 # 既存行との比較に使う列（これが同値なら「変更なし」）
-KEY_COLUMNS = ("氏名", "社用メール", "前年度情報元", "前年度健診機関コード", "前年度健診種別コード", "前年度追加検査")
+KEY_COLUMNS = ("氏名", "社用メール", "前年度情報元", "前年度健診機関コード", "前年度健診種別コード", "前年度追加検査",
+               "年度末年齢")
 
 
 @dataclass
@@ -69,6 +70,7 @@ class Candidate:
     enrollment_id: str = ""
     enrollment_name: str = ""
     retirement_date: str = ""
+    age: int | None = None          # 年度末年齢（jinjer の生年月日から。無ければ None）
     previous: PreviousExam = field(default_factory=PreviousExam)
     issues: list[Issue] = field(default_factory=list)
 
@@ -76,12 +78,18 @@ class Candidate:
     def blocked(self) -> bool:
         return any(i.level == "error" for i in self.issues)
 
+    @property
+    def age_text(self) -> str:
+        return "" if self.age is None else str(self.age)
+
     def as_dict(self) -> dict:
         return {
             "employee_id": self.employee_id, "name": self.name, "email": self.email,
             "enrollment": self.enrollment_id,
             "enrollment_label": self.enrollment_name or ENROLLMENT_LABELS.get(self.enrollment_id, self.enrollment_id),
             "retirement_date": self.retirement_date,
+            "age": self.age,
+            "age_band": S.age_band_label(self.age),
             "previous": self.previous.as_dict(),
             "issues": [i.as_dict() for i in self.issues],
         }
@@ -224,7 +232,10 @@ def resolve_previous(raw: PreviousRaw | None, catalog: OptionCatalog) -> Previou
 # ----------------------------------------------------------------------
 
 def build_candidates(employee_ids: list[str], profiles: dict[str, EmployeeProfile],
-                     previous_raw: dict[str, PreviousRaw], catalog: OptionCatalog) -> list[Candidate]:
+                     previous_raw: dict[str, PreviousRaw], catalog: OptionCatalog,
+                     fiscal_year: int | None = None) -> list[Candidate]:
+    """fiscal_year を渡すと年度末年齢を計算する（None なら年齢は空＝制限なし）。"""
+    year_end = S.fiscal_year_end(fiscal_year) if fiscal_year else None
     out: list[Candidate] = []
     for emp in employee_ids:
         profile = profiles.get(emp)
@@ -232,6 +243,10 @@ def build_candidates(employee_ids: list[str], profiles: dict[str, EmployeeProfil
             out.append(Candidate(employee_id=emp, issues=[Issue("error", "not_in_jinjer", "jinjer にこの社員番号がありません")]))
             continue
         issues: list[Issue] = []
+        age = S.age_on(profile.birth_date, year_end) if year_end else None
+        if year_end and age is None:
+            issues.append(Issue("warning", "no_birth_date",
+                                "jinjer に生年月日が無い（または読めない）ので、年齢による健診種別の制限をかけません"))
         email = profile.email.strip()
         if not email:
             issues.append(Issue("error", "email_missing", "jinjer に社用メールがありません"))
@@ -248,7 +263,7 @@ def build_candidates(employee_ids: list[str], profiles: dict[str, EmployeeProfil
             issues.append(Issue("warning", "no_previous", "前年度情報が無いので、本人は「前年度と同じ」を選べません"))
         out.append(Candidate(employee_id=emp, name=profile.name, email=email,
                              enrollment_id=profile.enrollment_id, enrollment_name=profile.enrollment_name,
-                             retirement_date=profile.retirement_date, previous=prev, issues=issues))
+                             retirement_date=profile.retirement_date, age=age, previous=prev, issues=issues))
     return out
 
 
@@ -260,6 +275,7 @@ def candidate_key_values(c: Candidate) -> dict[str, str]:
         "前年度健診機関コード": c.previous.institution_code,
         "前年度健診種別コード": c.previous.exam_type_code,
         "前年度追加検査": ";".join(c.previous.extra_codes),
+        "年度末年齢": c.age_text,
     }
 
 
@@ -309,7 +325,7 @@ def confirm_phrase(fiscal_year: int, n_add: int) -> str:
 
 
 def build_target_rows(plan: TargetPlan, user: str, now_iso: str) -> list[list[str]]:
-    """追加分を対象者シートの列順（Hub 管轄の先頭14列）で返す。15列目以降は Apps Script が書く。"""
+    """追加分を対象者シートの列順（Hub 管轄の先頭15列）で返す。16列目以降は Apps Script が書く。"""
     rows: list[list[str]] = []
     for r in plan.by_action(ACTION_ADD):
         c = r.candidate
@@ -329,6 +345,7 @@ def build_target_rows(plan: TargetPlan, user: str, now_iso: str) -> list[list[st
             "前年度健診機関(原文)": p.institution_raw,
             "登録日時": now_iso,
             "登録者": user,
+            "年度末年齢": c.age_text,
         }
         rows.append([values.get(name, "") for name in S.TARGET_HEADERS[:S.TARGET_HUB_COLUMNS]])
     return rows
@@ -381,6 +398,7 @@ def candidate_from_dict(d: dict) -> Candidate:
         enrollment_id=str(d.get("enrollment", "")),
         enrollment_name=str(d.get("enrollment_label", "")),
         retirement_date=str(d.get("retirement_date", "")),
+        age=(int(d["age"]) if isinstance(d.get("age"), int) or str(d.get("age", "")).strip().isdigit() else None),
         previous=previous_from_dict(d.get("previous")),
         issues=issues,
     )

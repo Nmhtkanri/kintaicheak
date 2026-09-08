@@ -176,7 +176,7 @@ def test_build_target_rows_column_order_and_hub_columns_only():
     assert len(rows) == 2 and all(len(r) == S.TARGET_HUB_COLUMNS for r in rows)
     assert rows[0] == ["2027", "2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "履歴",
                        "1310528885", "医療法人社団 同友会 春日クリニック", "10", "定期健康診断", "",
-                       "医療法人社団 同友会 春日クリニック", "2027-01-10T09:00:00", "yatsu"]
+                       "医療法人社団 同友会 春日クリニック", "2027-01-10T09:00:00", "yatsu", ""]
     assert rows[1][1] == "2099002" and rows[1][10] == "GYN" and rows[1][6] == "0301619"
 
 
@@ -212,3 +212,41 @@ def test_audit_rows():
     assert rows[0] == ["2027-01-10T09:00:00", "REGISTER_BATCH", "Hub", "yatsu", "2027", "", "2名を対象者へ追記 fingerprint=abcdef012345"]
     assert rows[1][1] == "REGISTER" and rows[1][5] == "2099001"
     assert rows[2][6] == "前年度情報元=履歴 機関=0301619 種別=13 追加検査=GYN"
+
+
+# --- 年度末年齢（2027.2） ---------------------------------------------------------------
+
+def test_build_candidates_computes_age_at_fiscal_year_end():
+    profiles = {
+        "2099001": EmployeeProfile("2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "在籍", "", "1993-03-31"),   # 2028-03-31 に 35歳
+        "2099002": EmployeeProfile("2099002", "二 号", "n2@nmht.co.jp", "0", "在籍", "", "1993-04-01"),           # 前日生まれ → 34歳
+        "2099003": EmployeeProfile("2099003", "三 号", "n3@nmht.co.jp", "0", "在籍", "", ""),                     # 生年月日なし
+    }
+    cands = T.build_candidates(["2099001", "2099002", "2099003"], profiles, {}, catalog(), fiscal_year=2027)
+    assert [c.age for c in cands] == [35, 34, None]
+    assert [c.age_text for c in cands] == ["35", "34", ""]
+    assert cands[0].as_dict()["age_band"].startswith("35歳以上") and cands[1].as_dict()["age_band"].startswith("34歳以下")
+    assert [i.code for i in cands[2].issues] == ["no_previous", "no_birth_date"] or "no_birth_date" in [i.code for i in cands[2].issues]
+    # fiscal_year を渡さなければ年齢は空（制限なし）で警告も出ない
+    cands = T.build_candidates(["2099003"], profiles, {}, catalog())
+    assert cands[0].age is None and "no_birth_date" not in [i.code for i in cands[0].issues]
+    rows = T.build_target_rows(T.plan_targets(T.build_candidates(["2099001"], profiles, {}, catalog(), 2027), [], [], 2027),
+                               "yatsu", "2027-01-10T09:00:00")
+    assert rows[0][S.TARGET_HEADERS.index("年度末年齢")] == "35"
+
+
+def test_age_helpers():
+    assert S.fiscal_year_end(2027).isoformat() == "2028-03-31"
+    assert S.age_on("2000-01-01", S.fiscal_year_end(2027)) == 28
+    assert S.age_on("2000/01/01", S.fiscal_year_end(2027)) == 28
+    assert S.age_on("", S.fiscal_year_end(2027)) is None and S.age_on("junk", S.fiscal_year_end(2027)) is None
+    assert S.allowed_exam_types("34") == ("10",) and S.allowed_exam_types("35") == ("11", "12", "13")
+    assert S.allowed_exam_types("") is None and S.allowed_exam_types(None) is None
+
+
+def test_candidate_dict_roundtrip_keeps_age():
+    profiles = {"2099001": EmployeeProfile("2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "在籍", "", "1990-05-01")}
+    c = T.build_candidates(["2099001"], profiles, {}, catalog(), fiscal_year=2027)[0]
+    back = T.candidate_from_dict(c.as_dict())
+    assert back.age == c.age == 37 and T.candidate_key_values(back) == T.candidate_key_values(c)
+    assert T.candidate_from_dict({"employee_id": "2099001"}).age is None

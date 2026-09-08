@@ -148,6 +148,8 @@ def target_payload(row: dict, catalog: OptionCatalog) -> dict:
         },
         "registered_at": row.get("登録日時", ""),
         "registered_by": row.get("登録者", ""),
+        "age": str(row.get("年度末年齢", "") or "").strip(),
+        "age_band": S.age_band_label(row.get("年度末年齢", "")),
         "sent_at": row.get("送信日時", ""),
         "sent_count": row.get("送信回数", ""),
         "first_access_at": row.get("初回アクセス日時", ""),
@@ -321,6 +323,13 @@ def _build_view(emp: str, target: dict | None, items: list, catalog: OptionCatal
                                     f"対象者の回答版「{t_version or '空'}」と最新回答「{latest['version'] or '空'}」が一致しません"))
             if latest["kind"] == S.KIND_SAME and (target.get("前年度情報元", "") or S.SOURCE_NONE) == S.SOURCE_NONE:
                 issues.append(Issue("error", "same_without_previous", "「前年度と同じ」なのに対象者に前年度情報がありません"))
+            # 年齢による健診種別の制限（画面でも止めるが、シートを直接いじった場合の見張り）
+            allowed = S.allowed_exam_types(target.get("年度末年齢", ""))
+            type_code = latest["exam_type"]["code"]
+            if allowed is not None and type_code and type_code not in allowed:
+                issues.append(Issue("warning", "exam_type_age_mismatch",
+                                    f"年度末年齢 {str(target.get('年度末年齢', '')).strip()} 歳の区分（{S.age_band_label(target.get('年度末年齢', ''))}）"
+                                    f"では健診種別「{latest['exam_type']['name']}」は選べない種別です"))
         view.bucket = bucket_of(target, latest, issues)
     view.issues = issues
     return view
