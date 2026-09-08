@@ -275,3 +275,50 @@ def test_setup_workbook_creates_sheets_with_headers():
     assert settings[0]["キー"] == "スキーマ版" and settings[0]["値"] == S.SCHEMA_VERSION
     assert {s["キー"] for s in settings} >= set(S.REQUIRED_SETTING_KEYS)
     assert out["sheets"][S.SHEET_AUDIT][-1][1] == "SETUP"
+
+# --- 年齢による健診種別の制限（2027.2） ------------------------------------------------------
+
+def test_allowed_exam_types_by_fiscal_year_end_age():
+    out = run_gas(workbook(), "({a34: allowedExamTypeCodes_('34'), a35: allowedExamTypeCodes_('35'), a0: allowedExamTypeCodes_('0'),"
+                              " blank: allowedExamTypeCodes_(''), junk: allowedExamTypeCodes_('abc')})")
+    r = out["result"]
+    assert r["a34"] == [S.EXAM_TYPE_REGULAR] and r["a0"] == [S.EXAM_TYPE_REGULAR]
+    assert r["a35"] == list(S.EXAM_TYPES_DOCK)
+    assert r["blank"] is None and r["junk"] is None
+
+
+def test_validate_rejects_exam_type_outside_age_band():
+    assert "年齢区分" in validate({"年度末年齢": "34"}, change_payload(courseCode="13"))["error"]
+    assert "年齢区分" in validate({"年度末年齢": "35"}, change_payload(courseCode="10"))["error"]
+    assert validate({"年度末年齢": "34"}, change_payload(courseCode="10"))["error"] is None
+    assert validate({"年度末年齢": "35"}, change_payload(courseCode="13"))["error"] is None
+    assert validate({"年度末年齢": ""}, change_payload(courseCode="13"))["error"] is None      # 年齢不明は制限なし
+
+
+def test_validate_same_is_blocked_when_previous_type_no_longer_allowed():
+    # 前年度は定期健康診断(10)。年度末35歳になると「前年度と同じ」は選べない
+    out = validate({"年度末年齢": "35"}, {"applicationType": "same", "agreement": True})
+    assert "年齢区分" in out["error"]
+    out = validate({"年度末年齢": "34"}, {"applicationType": "same", "agreement": True})
+    assert out["error"] is None and out["result"]["course"] == "10"
+
+
+def test_doget_filters_exam_types_and_same_allowed_by_age():
+    scenario = ("(() => { const o = readOptions_(); const t = findTargetByHash_('%s');"
+                " const allowed = allowedExamTypeCodes_(t['年度末年齢']); const prev = previousOf_(t);"
+                " return {types: activeOptions_(o, KIND.examType).filter(x => allowed === null || allowed.includes(x.code)).map(x => x.code),"
+                " same: prev.hasPrevious && (allowed === null || allowed.includes(prev.examTypeCode)), note: ageBandNote_(t['年度末年齢'])}; })()" % HASH)
+    r = run_gas(workbook(targets=[sent_target(年度末年齢="35")]), scenario)["result"]
+    assert r["types"] == ["11", "12", "13"] and r["same"] is False and "35歳以上" in r["note"]
+    r = run_gas(workbook(targets=[sent_target(年度末年齢="34")]), scenario)["result"]
+    assert r["types"] == ["10"] and r["same"] is True and "34歳以下" in r["note"]
+    r = run_gas(workbook(targets=[sent_target(年度末年齢="")]), scenario)["result"]
+    assert r["types"] == ["10", "11", "12", "13", "14", "15"] and r["same"] is True and r["note"] == ""
+
+
+def test_writes_go_through_text_format_helpers():
+    """日時・コードが日時型に化けないよう、appendRow / 素の setValue を使わない。"""
+    src = CODE.read_text(encoding="utf-8")
+    assert "appendRow(" not in src.replace("appendTextRow_", "")
+    assert src.count(".setValue(") == 1          # setTextCell_ の中だけ
+    assert "function appendTextRow_" in src and "function setTextCell_" in src

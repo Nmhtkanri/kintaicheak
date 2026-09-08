@@ -247,9 +247,9 @@ from services.health_apply.jinjer_source import EmployeeProfile, PreviousRaw  # 
 from services.jinjer_api_client import JinjerAPIError  # noqa: E402
 
 JINJER = {
-    "2099001": (EmployeeProfile("2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "在籍"),
+    "2099001": (EmployeeProfile("2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "在籍", "", "1990-05-01"),
                 PreviousRaw("履歴", "2026", "医療法人社団 同友会 春日クリニック", ["基本健診"], "2026-07-01")),
-    "2099002": (EmployeeProfile("2099002", "二 号", "n2@nmht.co.jp", "0", "在籍"),
+    "2099002": (EmployeeProfile("2099002", "二 号", "n2@nmht.co.jp", "0", "在籍", "", "1995-01-01"),
                 PreviousRaw("履歴", "2026", "医療法人徳洲会 生駒市立病院", ["1日人間ドック・胃カメラ", "婦人病検査"], "2026-07-02")),
     "2099003": (EmployeeProfile("2099003", "三 号", "", "1", "退職", "2026-03-31"), PreviousRaw()),
 }

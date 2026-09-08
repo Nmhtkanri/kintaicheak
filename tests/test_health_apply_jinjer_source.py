@@ -4,10 +4,11 @@
 from services.health_apply import jinjer_source as J
 
 
-def emp(emp_id, last, first, email, enr_id="0", enr_name="在籍", retire=""):
+def emp(emp_id, last, first, email, enr_id="0", enr_name="在籍", retire="", birth="1993-12-20"):
     return {"id": emp_id, "company": {"last_name": last, "first_name": first, "email": email,
                                       "enrollment_classification": {"id": enr_id, "name": enr_name},
-                                      "retirement_date": retire}}
+                                      "retirement_date": retire},
+            "personal": {"date_of_birth": birth}}
 
 
 def history_menu(*records):
@@ -45,7 +46,8 @@ def test_profiles_from_employees_reads_company_fields():
         "junk", {"company": {}},
     ])
     assert profiles["2099001"].as_dict() == {"employee_id": "2099001", "name": "試験 太郎", "email": "t.shiken@nmht.co.jp",
-                                             "enrollment_id": "0", "enrollment_name": "在籍", "retirement_date": ""}
+                                             "enrollment_id": "0", "enrollment_name": "在籍", "retirement_date": "",
+                                             "birth_date": "1993-12-20"}
     assert profiles["2099002"].enrollment_id == "1" and profiles["2099002"].retirement_date == "2026-03-31"
     assert profiles["2099003"].name == "片方" and profiles["2099003"].email == ""
     assert set(profiles) == {"2099001", "2099002", "2099003"}

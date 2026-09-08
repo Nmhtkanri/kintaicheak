@@ -5,13 +5,16 @@
  * services/health_apply/schema.py と同じ。SCHEMA_VERSION が設定シートと違えば止まる。
  *
  * 役割分担:
- *   - Hub  … 対象者シートの 1〜14列（社員番号・氏名・メール・前年度情報）を追記する
- *   - GAS  … 案内メール送信（トークン生成・15列以降）、個別URLの表示、回答の追記
+ *   - Hub  … 対象者シートの 1〜15列（社員番号・氏名・メール・前年度情報・年度末年齢）を追記する
+ *   - GAS  … 案内メール送信（トークン生成・16列以降）、個別URLの表示、回答の追記
  * 生トークンはメールのURLにだけ載せ、シートには SHA-256 のハッシュだけを置く。
  * 回答は上書きせず追記（回答版を増やす）。訂正はメニュー「再回答を許可」で受け付ける。
+ * 日時・コードは必ず文字列で書く（セルを書式なしテキスト '@' にしてから書き、シートに日時型へ変換させない）。
+ * 年齢による健診種別の制限（年度末年齢 34歳以下＝定期健康診断のみ／35歳以上＝人間ドックA/B/C）は
+ * Hub の schema.py と同じ規則。年度末年齢が空なら制限しない。
  */
 
-const SCHEMA_VERSION = '2027.1';
+const SCHEMA_VERSION = '2027.2';
 
 const SHEETS = Object.freeze({
   settings: '設定', options: '選択肢', targets: '対象者', responses: '回答', audit: '監査ログ',
@@ -23,7 +26,7 @@ const TARGET_HEADERS = Object.freeze([
   '年度', '社員番号', '氏名', '社用メール', '在籍区分',
   '前年度情報元', '前年度健診機関コード', '前年度健診機関名',
   '前年度健診種別コード', '前年度健診種別名', '前年度追加検査', '前年度健診機関(原文)',
-  '登録日時', '登録者',
+  '登録日時', '登録者', '年度末年齢',
   'トークンハッシュ', '送信日時', '送信回数', '初回アクセス日時',
   '申込状態', '受付番号', '回答版', '回答日時', '備考',
 ]);
@@ -45,8 +48,47 @@ const SOURCE_NONE = 'なし';
 const STATUS = Object.freeze({ unsent: '未送信', sent: '送信済', answered: '回答済', reanswer: '再回答待ち', invalid: '無効' });
 const ACTOR = 'AppsScript';
 
+// 年齢による健診種別の制限（Hub の schema.py と同じ値）
+const EXAM_TYPE_REGULAR = '10';               // 定期健康診断（34歳以下はこれだけ）
+const EXAM_TYPES_DOCK = Object.freeze(['11', '12', '13']);   // 人間ドックA/B/C（35歳以上はこの中から必ず選ぶ）
+const DOCK_AGE_FROM = 35;
+
 /** 列名 → 1始まりの列番号 */
 const TARGET_COL = Object.freeze(TARGET_HEADERS.reduce((m, h, i) => { m[h] = i + 1; return m; }, {}));
+
+/** 対象者シートで日時を入れる列（書式なしテキストにしてから書く） */
+const TARGET_TEXT_COLUMNS = Object.freeze(['社員番号', '前年度健診機関コード', '前年度健診種別コード', '登録日時', '年度末年齢',
+  '送信日時', '送信回数', '初回アクセス日時', '受付番号', '回答版', '回答日時'].map((h) => TARGET_COL[h]));
+
+/** 年度末年齢で選べる健診種別コード。null は制限なし（年齢が空・読めない）。 */
+function allowedExamTypeCodes_(ageText) {
+  const s = cleanText_(ageText);
+  if (!/^\d{1,3}$/.test(s)) return null;
+  return Number(s) >= DOCK_AGE_FROM ? EXAM_TYPES_DOCK.slice() : [EXAM_TYPE_REGULAR];
+}
+
+function ageBandNote_(ageText) {
+  const allowed = allowedExamTypeCodes_(ageText);
+  if (allowed === null) return '';
+  return allowed.length === 1
+    ? `${DOCK_AGE_FROM - 1}歳以下（年度末時点）の方は「定期健康診断」になります。`
+    : `${DOCK_AGE_FROM}歳以上（年度末時点）の方は人間ドックA・B・Cのいずれかを必ずお選びください。`;
+}
+
+/** 行の全セルを書式なしテキストにしてから書く（appendRow は日付らしい文字列を日時型にしてしまう）。 */
+function appendTextRow_(sheet, values) {
+  const row = sheet.getLastRow() + 1;
+  const range = sheet.getRange(row, 1, 1, values.length);
+  range.setNumberFormat('@');
+  range.setValues([values.map((v) => (v === undefined || v === null ? '' : v))]);
+  return row;
+}
+
+function setTextCell_(sheet, row, col, value) {
+  const cell = sheet.getRange(row, col);
+  cell.setNumberFormat('@');
+  cell.setValue(value === undefined || value === null ? '' : value);
+}
 
 // ---------------------------------------------------------------------------
 // 共通
@@ -193,7 +235,7 @@ function updateTarget_(rowNumber, values) {
   Object.keys(values).forEach((header) => {
     const col = TARGET_COL[header];
     if (!col) throw new Error(`対象者シートに列がありません: ${header}`);
-    sheet.getRange(rowNumber, col).setValue(values[header]);
+    setTextCell_(sheet, rowNumber, col, values[header]);
   });
 }
 
@@ -215,9 +257,10 @@ function recordFirstAccess_(target) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const cell = sheet_(SHEETS.targets).getRange(target.rowNumber, TARGET_COL['初回アクセス日時']);
+    const sheet = sheet_(SHEETS.targets);
+    const cell = sheet.getRange(target.rowNumber, TARGET_COL['初回アクセス日時']);
     if (cleanText_(cell.getValue())) return;
-    cell.setValue(formatDateTime_(new Date()));
+    setTextCell_(sheet, target.rowNumber, TARGET_COL['初回アクセス日時'], formatDateTime_(new Date()));
     appendAudit_('FIRST_ACCESS', target['社員番号'], '有効な個別URLを初回表示（メール検査でも付くので本人閲覧の証拠にはしない）', target['年度']);
   } finally {
     lock.releaseLock();
@@ -255,11 +298,17 @@ function doGet(e) {
   template.employee = {
     employeeId: target['社員番号'], name: target['氏名'], email: target['社用メール'],
     status: target['申込状態'] || STATUS.unsent, receiptId: target['受付番号'],
+    age: cleanText_(target['年度末年齢']),
   };
-  template.previous = previousOf_(target);
+  const previous = previousOf_(target);
+  const allowedTypes = allowedExamTypeCodes_(target['年度末年齢']);
+  // 「前年度と同じ」は、前年度の健診種別が今年度の年齢区分で選べるときだけ
+  previous.sameAllowed = previous.hasPrevious && (allowedTypes === null || allowedTypes.includes(previous.examTypeCode));
+  template.previous = previous;
+  template.ageNote = ageBandNote_(target['年度末年齢']);
   template.options = {
     institutions: activeOptions_(options, KIND.institution),
-    examTypes: activeOptions_(options, KIND.examType),
+    examTypes: activeOptions_(options, KIND.examType).filter((o) => allowedTypes === null || allowedTypes.includes(o.code)),
     extras: activeOptions_(options, KIND.extra),
     relationships: activeOptions_(options, KIND.relationship),
   };
@@ -306,7 +355,7 @@ function submitApplication(token, payload) {
     const version = nextVersion_(target);
     const receiptId = receiptId_(kv['年度'], target['社員番号'], version);
     const row = buildResponseRow_(kv, target, normalized, version, receiptId, formatDateTime_(now));
-    sheet_(SHEETS.responses).appendRow(row);
+    appendTextRow_(sheet_(SHEETS.responses), row);
     updateTarget_(target.rowNumber, {
       '申込状態': STATUS.answered, '受付番号': receiptId, '回答版': String(version), '回答日時': formatDateTime_(now),
     });
@@ -331,6 +380,7 @@ function validatePayload_(target, payload, options, kv) {
     throw new Error('確認欄にチェックしてください。 / Please confirm the details.');
   }
   const previous = previousOf_(target);
+  const allowedTypes = allowedExamTypeCodes_(target['年度末年齢']);
   let institution;
   let examType;
   let extras = [];
@@ -340,6 +390,9 @@ function validatePayload_(target, payload, options, kv) {
   if (applicationType === 'same') {
     if (!previous.hasPrevious) {
       throw new Error('前年度の情報が無いため「前年度と同じ」は選べません。「変更する」を選択してください。');
+    }
+    if (allowedTypes !== null && !allowedTypes.includes(previous.examTypeCode)) {
+      throw new Error('年齢区分により前年度と同じ健診種別は選べません。「変更する」から健診種別を選び直してください。');
     }
     institution = optionByCode_(options, KIND.institution, previous.institutionCode, false)
       || { code: previous.institutionCode, name: previous.institutionName };
@@ -361,6 +414,9 @@ function validatePayload_(target, payload, options, kv) {
     }
     examType = optionByCode_(options, KIND.examType, payload.courseCode, true);
     if (!examType) throw new Error('健診種別を選択してください。 / Select a course.');
+    if (allowedTypes !== null && !allowedTypes.includes(examType.code)) {
+      throw new Error(`年齢区分では選べない健診種別です。${ageBandNote_(target['年度末年齢'])}`);
+    }
     const requested = Array.isArray(payload.extraCodes) ? payload.extraCodes : [];
     extras = requested.map((code) => {
       const opt = optionByCode_(options, KIND.extra, code, true);
@@ -441,14 +497,15 @@ function setupWorkbook() {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#116548').setFontColor('#ffffff');
   });
-  // コード列は書式なしテキスト（前ゼロ・英字入りの HPM コードを数値にさせない）
+  // コード列・日時列は書式なしテキスト（前ゼロ・英字入りの HPM コードを数値に、日時文字列を日時型にさせない）
   const opt = ss.getSheetByName(SHEETS.options);
   opt.getRange(1, 2, opt.getMaxRows(), 1).setNumberFormat('@');
   const tgt = ss.getSheetByName(SHEETS.targets);
-  [TARGET_COL['社員番号'], TARGET_COL['前年度健診機関コード'], TARGET_COL['前年度健診種別コード'], TARGET_COL['回答版']]
-    .forEach((col) => tgt.getRange(1, col, tgt.getMaxRows(), 1).setNumberFormat('@'));
+  TARGET_TEXT_COLUMNS.forEach((col) => tgt.getRange(1, col, tgt.getMaxRows(), 1).setNumberFormat('@'));
   const res = ss.getSheetByName(SHEETS.responses);
-  [4, 5, 9, 12].forEach((col) => res.getRange(1, col, res.getMaxRows(), 1).setNumberFormat('@'));
+  [1, 2, 4, 5, 9, 12, 15].forEach((col) => res.getRange(1, col, res.getMaxRows(), 1).setNumberFormat('@'));
+  const aud = ss.getSheetByName(SHEETS.audit);
+  aud.getRange(1, 1, aud.getMaxRows(), 1).setNumberFormat('@');
   const settings = ss.getSheetByName(SHEETS.settings);
   if (settings.getLastRow() < 2) {
     const rows = [['スキーマ版', SCHEMA_VERSION, '']].concat(
@@ -562,5 +619,5 @@ function appendAudit_(eventName, employeeId, detail, fiscalYear) {
   if (!sheet) return;
   let who = '';
   try { who = Session.getActiveUser().getEmail() || ''; } catch (e) { who = ''; }
-  sheet.appendRow([formatDateTime_(new Date()), eventName, ACTOR, who || 'web', fiscalYear || '', employeeId || '', detail || '']);
+  appendTextRow_(sheet, [formatDateTime_(new Date()), eventName, ACTOR, who || 'web', fiscalYear || '', employeeId || '', detail || '']);
 }

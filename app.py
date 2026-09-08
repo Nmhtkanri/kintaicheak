@@ -5545,7 +5545,7 @@ def route_health_apply_targets_preview():
     except GatewayError as e:
         return jsonify({"success": False, "errors": [str(e)]}), 500
 
-    candidates = ha_targets.build_candidates(ids, profiles, previous_raw, ctx["catalog"])
+    candidates = ha_targets.build_candidates(ids, profiles, previous_raw, ctx["catalog"], ctx["year"].fiscal_year)
     plan = ha_targets.plan_targets(candidates, target_rows, response_rows,
                                    ctx["year"].fiscal_year, input_issues)
     fingerprint = ha_targets.plan_fingerprint(plan)

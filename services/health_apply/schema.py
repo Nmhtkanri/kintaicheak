@@ -9,7 +9,10 @@ Hub はここに書いた列名でシートを検証してから読む。Apps Sc
 
 from __future__ import annotations
 
-SCHEMA_VERSION = "2027.1"
+import datetime as _dt
+
+# 2027.2: 対象者に「年度末年齢」（Hub が jinjer の生年月日から計算）を足し、年齢で健診種別を制限する
+SCHEMA_VERSION = "2027.2"
 
 SHEET_SETTINGS = "設定"
 SHEET_OPTIONS = "選択肢"
@@ -24,16 +27,55 @@ WRITABLE_SHEETS = frozenset({SHEET_TARGETS, SHEET_AUDIT})
 SETTINGS_HEADERS = ("キー", "値", "備考")
 OPTION_HEADERS = ("区分", "コード", "表示名", "有効", "並び順", "別名", "備考")
 TARGET_HEADERS = (
-    # 1〜14列: Hub が対象者登録で書く
+    # 1〜15列: Hub が対象者登録で書く
     "年度", "社員番号", "氏名", "社用メール", "在籍区分",
     "前年度情報元", "前年度健診機関コード", "前年度健診機関名",
     "前年度健診種別コード", "前年度健診種別名", "前年度追加検査", "前年度健診機関(原文)",
-    "登録日時", "登録者",
-    # 15列〜: Apps Script（案内送信・回答受付）が更新する
+    "登録日時", "登録者", "年度末年齢",
+    # 16列〜: Apps Script（案内送信・回答受付）が更新する
     "トークンハッシュ", "送信日時", "送信回数", "初回アクセス日時",
     "申込状態", "受付番号", "回答版", "回答日時", "備考",
 )
-TARGET_HUB_COLUMNS = 14
+TARGET_HUB_COLUMNS = 15
+
+# 年齢による健診種別の制限（Apps Script の画面と Hub の検証で同じ規則を使う）
+#   年度末（翌年3月31日）時点の満年齢で、34歳以下は定期健康診断だけ、35歳以上は人間ドックA/B/Cから必ず選ぶ。
+#   年度末年齢が空（jinjer に生年月日が無い）なら制限しない。
+EXAM_TYPE_REGULAR = "10"
+EXAM_TYPES_DOCK = ("11", "12", "13")
+DOCK_AGE_FROM = 35
+
+
+def fiscal_year_end(fiscal_year: int) -> _dt.date:
+    """年度末＝翌年3月31日。"""
+    return _dt.date(int(fiscal_year) + 1, 3, 31)
+
+
+def age_on(birth_date: str | None, on: _dt.date) -> int | None:
+    """生年月日（yyyy-mm-dd）から、その日時点の満年齢。読めなければ None。"""
+    s = str(birth_date or "").strip().replace("/", "-")
+    try:
+        b = _dt.date.fromisoformat(s[:10])
+    except ValueError:
+        return None
+    age = on.year - b.year - ((on.month, on.day) < (b.month, b.day))
+    return age if age >= 0 else None
+
+
+def allowed_exam_types(age) -> tuple[str, ...] | None:
+    """年度末年齢で選べる健診種別コード。None は制限なし（年齢不明）。"""
+    try:
+        n = int(str(age).strip())
+    except (TypeError, ValueError):
+        return None
+    return EXAM_TYPES_DOCK if n >= DOCK_AGE_FROM else (EXAM_TYPE_REGULAR,)
+
+
+def age_band_label(age) -> str:
+    allowed = allowed_exam_types(age)
+    if allowed is None:
+        return "年齢不明（制限なし）"
+    return f"{DOCK_AGE_FROM}歳以上（人間ドックA/B/C）" if allowed == EXAM_TYPES_DOCK else f"{DOCK_AGE_FROM - 1}歳以下（定期健康診断）"
 RESPONSE_HEADERS = (
     "回答日時", "受付番号", "年度", "社員番号", "回答版", "氏名", "社用メール",
     "申込区分", "健診機関コード", "健診機関名", "その他医療機関名",

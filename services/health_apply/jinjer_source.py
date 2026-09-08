@@ -55,6 +55,7 @@ class EmployeeProfile:
     enrollment_id: str
     enrollment_name: str
     retirement_date: str = ""
+    birth_date: str = ""        # personal.date_of_birth（yyyy-mm-dd）。年度末年齢の計算にだけ使い、シートには書かない
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -95,6 +96,7 @@ def profiles_from_employees(employees: list[dict]) -> dict[str, EmployeeProfile]
             enrollment_id=_text(_dig(emp, "company", "enrollment_classification", "id")),
             enrollment_name=_text(_dig(emp, "company", "enrollment_classification", "name")),
             retirement_date=_text(_dig(emp, "company", "retirement_date")),
+            birth_date=_text(_dig(emp, "personal", "date_of_birth")),
         )
     return out
 
