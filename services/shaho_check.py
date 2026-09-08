@@ -335,8 +335,42 @@ def detect_revisions(months_all: dict) -> list:
 # ---------------------------------------------------------------------------
 # 実行本体
 # ---------------------------------------------------------------------------
+def load_month_caches(months, fetch_missing: bool = False, client=None) -> dict:
+    """必要な月の給与明細を {YYYY-MM: {社員番号: ...}} で返す。
+
+    経理モードと共用のキャッシュ（KEIRI_OUTPUT_DIR/raw/）を読む。無い月は:
+      - fetch_missing=True なら jinjer から取得してキャッシュに保存する（置き場が経理モードと
+        同じなので、以後は経理モードでもそのまま使われる。読み取りのみで書き込みはしない）
+      - False なら **不足している月を全部まとめて** ShahoMasterError にする
+        （1か月ずつ知らせると「取っては落ちる」を繰り返すことになるため）
+
+    exe は起動時に作業フォルダを各PCのローカル（%LOCALAPPDATA% 配下の KintaiChecker）へ
+    切り替えるので、開発フォルダにキャッシュがあっても exe からは見えない（2026-09-08 に
+    実機で発生）。4〜6月分は経理モードの月次運用では取らないので、この取得が無いと詰まる。
+    """
+    cache_dir = Config.KEIRI_OUTPUT_DIR
+    raw_dir = os.path.abspath(os.path.join(cache_dir, "raw"))
+    months = list(dict.fromkeys(months))
+    missing = [ym for ym in months
+               if not os.path.exists(os.path.join(raw_dir, f"salary_statements_{ym}.json"))]
+    if missing and not fetch_missing:
+        raise ShahoMasterError(
+            "給与明細のキャッシュが無い月があります: " + "、".join(missing)
+            + f"（場所: {raw_dir}）。"
+            "画面の「不足している月の給与明細を jinjer から取得する」にチェックを入れて"
+            "再実行するか、経理モードでその月を実行してください"
+            "（CLI なら shaho_check_run.py --fetch-missing）")
+    if missing and client is None:
+        from services.keiri_api import get_client
+        client = get_client()
+    # 1か月ずつ順に取る（レート制限は組織で共有しているので並列にはしない）。
+    # 有る月は fetch_statements がキャッシュを返すので API には触れない。
+    return {ym: load_statements_full(cache_dir, ym, client=client) for ym in months}
+
+
 def run_check(year: int, check_month: str, insurer: str = None, out_base: str = None,
-              grade_xlsx: str = None, class_csv: str = None) -> dict:
+              grade_xlsx: str = None, class_csv: str = None,
+              fetch_missing: bool = False, client=None) -> dict:
     insurer = insurer or Config.SHAHO_INSURER
     out_base = out_base or Config.SHAHO_OUTPUT_DIR
     if grade_xlsx is None:
@@ -356,14 +390,7 @@ def run_check(year: int, check_month: str, insurer: str = None, out_base: str = 
 
     need = [f"{year}-04", f"{year}-05", f"{year}-06",
             ym_add(check_month, -1), check_month]
-    months_all = {}
-    for ym in dict.fromkeys(need):
-        path = os.path.join(Config.KEIRI_OUTPUT_DIR, "raw", f"salary_statements_{ym}.json")
-        if not os.path.exists(path):
-            raise ShahoMasterError(
-                f"{ym} の給与明細キャッシュがありません: {path}\n"
-                "経理モードで取得するか shaho_check_run.py --fetch-missing を使ってください")
-        months_all[ym] = load_statements_full(Config.KEIRI_OUTPUT_DIR, ym)
+    months_all = load_month_caches(need, fetch_missing=fetch_missing, client=client)
 
     # 給与が未確定の月が混じっていないか（混じっているとスナップショットがまだ動く）
     month_status = {ym: month_closed_stats(m) for ym, m in months_all.items()}

@@ -1088,8 +1088,12 @@
                 <input type="text" id="shaho-check-month" placeholder="2026-07" style="width:130px">
                 <span class="field-sub">空欄ならキャッシュの最新月。この月の控除＝前月分の社保と比べます</span>
             </label>
+            <div class="check-row">
+                <label><input type="checkbox" id="shaho-fetch-missing"> 不足している月の給与明細を jinjer から取得する（4〜6月分など。1か月あたり1分弱）</label>
+            </div>
             <div class="hint">
-                給与明細は経理モードと共用のキャッシュを読みます（APIは叩きません）。
+                給与明細は経理モードと共用のキャッシュ（このPCのもの）を読みます。4〜6月分が無いと言われたら、上にチェックを入れて実行し直してください（読み取りのみ。取得した月は経理モードでもそのまま使えます）。
+                改定が控除に反映されたかは、適用月の翌月支給（9月適用なら10月支給）が締まってから、その月を突合月にして確かめます。
                 要確認が0にならないのは正常です — 「差異」は9月に改定されるべき人のリストです。
             </div>
         </div>

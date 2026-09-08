@@ -3538,6 +3538,9 @@ def route_shaho_run():
     if check_month and not re.fullmatch(r"\d{4}-\d{2}", check_month):
         return jsonify({"success": False,
                         "errors": ["突合月は YYYY-MM 形式で入力してください"]}), 400
+    # キャッシュに無い月（4〜6月分など）を jinjer から取得する。読み取りのみ。
+    # exe は各PCのローカルにキャッシュを持つので、開発PCで取った分は他のPCからは見えない
+    fetch_missing = (request.form.get("fetch_missing") or "") == "1"
     if not check_month:
         raw = os.path.join(Config.KEIRI_OUTPUT_DIR, "raw")
         cached = sorted(f[len("salary_statements_"):-len(".json")]
@@ -3545,15 +3548,20 @@ def route_shaho_run():
                         if f.startswith("salary_statements_")) if os.path.isdir(raw) else []
         if not cached:
             return jsonify({"success": False,
-                            "errors": ["給与明細のキャッシュがありません"
-                                       "（先に経理モードを実行してください）"]}), 400
+                            "errors": ["給与明細のキャッシュがありません。突合月を入力してください"
+                                       "（「不足している月の給与明細を jinjer から取得する」に"
+                                       "チェックを入れれば、必要な月を取得します）"]}), 400
         check_month = cached[-1]
 
     try:
-        check = run_check(year, check_month)
+        check = run_check(year, check_month, fetch_missing=fetch_missing)
         out = write_reports(check)
     except ShahoMasterError as e:
         return jsonify({"success": False, "errors": [str(e)]}), 400
+    except JinjerAPIError as e:
+        logger.exception("shaho_run: jinjer fetch failed")
+        return jsonify({"success": False,
+                        "errors": [f"jinjer API エラー（給与明細の取得に失敗）: {e}"]}), 500
     except Exception as e:
         logger.exception("shaho_run failed")
         return jsonify({"success": False, "errors": [f"実行に失敗しました: {e}"]}), 500
