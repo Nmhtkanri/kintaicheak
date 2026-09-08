@@ -253,6 +253,41 @@ function previousOf_(target) {
   };
 }
 
+/**
+ * 画面に出す前年度情報。previousOf_ に、
+ *   sameAllowed … 「前年度と同じ」を選べるか（前年度の健診種別が今年度の年齢区分で選べるとき）
+ *   bookable    … 前年度の機関が会社で予約できる（選択肢で有効な）機関か。違えば「ご自分で予約」の案内と入力欄を出す
+ *   extraNames  … 追加検査の表示名（コードのまま画面に出さない）
+ * を足す。
+ */
+function previousView_(target, options, allowedTypes) {
+  const previous = previousOf_(target);
+  previous.sameAllowed = previous.hasPrevious && (allowedTypes === null || allowedTypes.includes(previous.examTypeCode));
+  previous.bookable = isBookable_(options, previous.institutionCode);
+  previous.extraNames = previous.extraCodes.map((code) => {
+    const o = optionByCode_(options, KIND.extra, code, false);
+    return o ? o.name : code;
+  });
+  return previous;
+}
+
+/** 会社で予約できる機関＝選択肢シートで有効な機関（「その他」は含めない）。 */
+function isBookable_(options, institutionCode) {
+  const code = cleanText_(institutionCode);
+  return !!code && code !== OTHER_INSTITUTION_CODE && !!optionByCode_(options, KIND.institution, code, true);
+}
+
+/** 健診予定日（任意）。空なら ''、形式外・受診期間外はエラー。 */
+function plannedDate_(kv, value) {
+  const s = cleanText_(value, 10);
+  if (!s) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error('健診予定日の形式が正しくありません。');
+  if (s < kv['受診期間開始'] || s > kv['受診期間終了']) {
+    throw new Error(`健診予定日は受診期間（${kv['受診期間開始']}〜${kv['受診期間終了']}）内で入力してください。`);
+  }
+  return s;
+}
+
 function recordFirstAccess_(target) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
@@ -300,11 +335,8 @@ function doGet(e) {
     status: target['申込状態'] || STATUS.unsent, receiptId: target['受付番号'],
     age: cleanText_(target['年度末年齢']),
   };
-  const previous = previousOf_(target);
   const allowedTypes = allowedExamTypeCodes_(target['年度末年齢']);
-  // 「前年度と同じ」は、前年度の健診種別が今年度の年齢区分で選べるときだけ
-  previous.sameAllowed = previous.hasPrevious && (allowedTypes === null || allowedTypes.includes(previous.examTypeCode));
-  template.previous = previous;
+  template.previous = previousView_(target, options, allowedTypes);
   template.ageNote = ageBandNote_(target['年度末年齢']);
   template.options = {
     institutions: activeOptions_(options, KIND.institution),
@@ -399,18 +431,17 @@ function validatePayload_(target, payload, options, kv) {
     examType = optionByCode_(options, KIND.examType, previous.examTypeCode, false)
       || { code: previous.examTypeCode, name: previous.examTypeName };
     extras = previous.extraCodes.map((code) => optionByCode_(options, KIND.extra, code, false) || { code, name: code });
+    if (!isBookable_(options, previous.institutionCode)) {
+      // 会社で予約できない機関（その他扱い）: 本人が予約する。機関名（任意・既定は前年度の機関名）と予定日（任意）を預かる
+      otherInstitution = cleanText_(payload.sameClinicName, 100) || previous.institutionName;
+      otherPlannedDate = plannedDate_(kv, payload.samePlannedDate);
+    }
   } else {
     institution = optionByCode_(options, KIND.institution, payload.clinicCode, true);
     if (!institution) throw new Error('健診機関を選択してください。 / Select a clinic.');
     if (institution.code === OTHER_INSTITUTION_CODE) {
       otherInstitution = cleanText_(payload.customClinic, 100);
-      otherPlannedDate = cleanText_(payload.otherPlannedDate, 10);
-      if (otherPlannedDate) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(otherPlannedDate)) throw new Error('健診予定日の形式が正しくありません。');
-        if (otherPlannedDate < kv['受診期間開始'] || otherPlannedDate > kv['受診期間終了']) {
-          throw new Error(`健診予定日は受診期間（${kv['受診期間開始']}〜${kv['受診期間終了']}）内で入力してください。`);
-        }
-      }
+      otherPlannedDate = plannedDate_(kv, payload.otherPlannedDate);
     }
     examType = optionByCode_(options, KIND.examType, payload.courseCode, true);
     if (!examType) throw new Error('健診種別を選択してください。 / Select a course.');

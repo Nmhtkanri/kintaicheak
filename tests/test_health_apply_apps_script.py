@@ -322,3 +322,38 @@ def test_writes_go_through_text_format_helpers():
     assert "appendRow(" not in src.replace("appendTextRow_", "")
     assert src.count(".setValue(") == 1          # setTextCell_ の中だけ
     assert "function appendTextRow_" in src and "function setTextCell_" in src
+
+
+# --- 会社で予約できる機関の限定・その他は自己予約（2026-09-08） ------------------------------
+
+def test_previous_view_marks_bookable_and_extra_names():
+    scenario = ("(() => { const o = readOptions_(); const t = findTargetByHash_('%s');"
+                " const p = previousView_(t, o, allowedExamTypeCodes_(t['年度末年齢']));"
+                " return {bookable: p.bookable, names: p.extraNames, same: p.sameAllowed}; })()" % HASH)
+    r = run_gas(workbook(targets=[sent_target(前年度追加検査="GYN")]), scenario)["result"]
+    assert r == {"bookable": True, "names": ["婦人科検診"], "same": True}          # 春日クリニックは有効＝予約できる
+    r = run_gas(workbook(targets=[sent_target(前年度健診機関コード="130192", 前年度健診機関名="東京品川病院 総合健診センター")]), scenario)["result"]
+    assert r["bookable"] is False and r["same"] is True                          # 無効化された機関＝ご自分で予約
+    r = run_gas(workbook(targets=[sent_target(前年度健診機関コード="OTHER", 前年度健診機関名="その他")]), scenario)["result"]
+    assert r["bookable"] is False
+
+
+def test_validate_same_with_unbookable_previous_keeps_code_and_captures_self_booking():
+    t = {"前年度健診機関コード": "130192", "前年度健診機関名": "東京品川病院 総合健診センター"}
+    out = validate(t, {"applicationType": "same", "agreement": True})
+    assert out["error"] is None
+    assert (out["result"]["inst"], out["result"]["other"], out["result"]["date"]) == ("130192", "東京品川病院 総合健診センター", "")
+    out = validate(t, {"applicationType": "same", "agreement": True, "sameClinicName": "品川の別のクリニック", "samePlannedDate": "2027-06-01"})
+    assert (out["result"]["other"], out["result"]["date"]) == ("品川の別のクリニック", "2027-06-01")
+    assert "受診期間" in validate(t, {"applicationType": "same", "agreement": True, "samePlannedDate": "2028-04-01"})["error"]
+    # 予約できる機関（春日）が前年度なら、その他欄は空のまま
+    out = validate({}, {"applicationType": "same", "agreement": True, "sameClinicName": "無視される"})
+    assert (out["result"]["inst"], out["result"]["other"]) == ("1310528885", "")
+
+
+def test_index_has_no_clinic_filter_and_shows_self_booking_notice():
+    html = (CODE.parent / "Index.html").read_text(encoding="utf-8")
+    assert "clinicFilter" not in html
+    assert html.count("ご自分で予約をお願いします") >= 3       # 前年度ブロック・前年度と同じ・その他
+    assert "previous.extraNames" in html and "previous.extraCodes.join" not in html
+    assert 'name="sameClinicName"' in html and 'name="samePlannedDate"' in html
