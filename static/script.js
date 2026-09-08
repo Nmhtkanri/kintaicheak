@@ -3528,8 +3528,12 @@ if (shahoRunBtn) {
         const fd = new FormData();
         fd.append('year', document.getElementById('shaho-year').value.trim());
         fd.append('check_month', document.getElementById('shaho-check-month').value.trim());
+        const fetchMissing = document.getElementById('shaho-fetch-missing').checked;
+        fd.append('fetch_missing', fetchMissing ? '1' : '0');
         shahoRunBtn.disabled = true;
-        status.textContent = '検算中…（30秒ほどかかります）';
+        status.textContent = fetchMissing
+            ? '検算中…（無い月を jinjer から取得するので、数分かかることがあります）'
+            : '検算中…（30秒ほどかかります）';
         document.getElementById('shaho-result-area').style.display = 'none';
         try {
             const res = await fetch('/shaho_run', { method: 'POST', body: fd });

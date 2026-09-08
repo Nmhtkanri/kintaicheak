@@ -4,10 +4,12 @@ r"""標準報酬月額チェック（定時決定・保険料突合）のCLI。j
     python shaho_check_run.py                       # 算定年は自動（7月以降=当年）
     python shaho_check_run.py --year 2026 --check-month 2026-07
     python shaho_check_run.py --insurer kyokai_tokyo
+    python shaho_check_run.py --fetch-missing   # 無い月（4〜6月分など）を jinjer から取る
 
 4〜6月支給の報酬から9月適用予定の標準報酬月額を計算し、jinjer の登録値・控除実績と
 突合して Excel＋JSON を outputs/shaho/{年}/ に出す。給与明細は経理モードと共用の
-キャッシュ（outputs/keiri/raw/）を読むだけで、API は叩かない。
+キャッシュ（outputs/keiri/raw/）を読む。--fetch-missing を付けたときだけ、無い月を
+jinjer から取得してキャッシュに保存する（読み取りのみ。書き込みはしない）。
 登録標準報酬月額は給与が確定した月の値で凍結されるので、過去月を取り直しても
 結果は変わらない（2026-06 の再取得で実社員232名の一致を実測）。
 
@@ -27,6 +29,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 from config import Config                                             # noqa: E402
+from services.jinjer_api_client import JinjerAPIError                 # noqa: E402
 from services.shaho_check import REVIEW_STATUSES, STATUS_JA, run_check  # noqa: E402
 from services.shaho_master import ShahoMasterError                    # noqa: E402
 from services.shaho_report import write_reports                       # noqa: E402
@@ -47,25 +50,32 @@ def main() -> int:
                    help="保険者 (default: %(default)s)")
     p.add_argument("--output-dir", default=Config.SHAHO_OUTPUT_DIR,
                    help="出力先 (default: %(default)s)")
+    p.add_argument("--fetch-missing", action="store_true",
+                   help="キャッシュに無い月の給与明細を jinjer から取得する（読み取りのみ）")
     args = p.parse_args()
 
     check_month = args.check_month
     if not check_month:
         raw = os.path.join(Config.KEIRI_OUTPUT_DIR, "raw")
         cached = sorted(f[len("salary_statements_"):-len(".json")]
-                        for f in os.listdir(raw) if f.startswith("salary_statements_"))
+                        for f in (os.listdir(raw) if os.path.isdir(raw) else [])
+                        if f.startswith("salary_statements_"))
         if not cached:
-            print("給与明細のキャッシュがありません（経理モードで取得してください）")
+            print("給与明細のキャッシュがありません。--check-month で突合月を指定してください"
+                  "（--fetch-missing を併用すれば必要な月を jinjer から取得します）")
             return 1
         check_month = cached[-1]
         print(f"突合月: {check_month}（キャッシュの最新月）")
 
     try:
         check = run_check(args.year, check_month, insurer=args.insurer,
-                          out_base=args.output_dir)
+                          out_base=args.output_dir, fetch_missing=args.fetch_missing)
         out = write_reports(check)
     except ShahoMasterError as e:
         print(f"[NG] {e}")
+        return 1
+    except JinjerAPIError as e:
+        print(f"[NG] jinjer API エラー（給与明細の取得に失敗）: {e}")
         return 1
 
     if out["open_months"]:
