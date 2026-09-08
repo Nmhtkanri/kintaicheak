@@ -511,7 +511,7 @@ function setupWorkbook() {
     const rows = [['スキーマ版', SCHEMA_VERSION, '']].concat(
       REQUIRED_SETTING_KEYS.filter((k) => k !== 'スキーマ版').map((k) => [k, '', '']),
       [['WebアプリURL', '', 'デプロイ後の /exec のURL'], ['案内メール件名', '', ''],
-       ['案内メール本文', '', '{氏名} {URL} {受付終了} を置換'], ['担当者連絡先', '', '']]
+       ['案内メール本文', '', '{氏名} {URL} {年度} {受付開始} {受付終了} {受診期間開始} {受診期間終了} {担当者連絡先} を置換'], ['担当者連絡先', '', '']]
     );
     settings.getRange(2, 1, rows.length, 3).setValues(rows);
   }
@@ -529,6 +529,9 @@ function buildInvitationEmail_(kv, target, url) {
     .replace(/\{URL\}/g, url)
     .replace(/\{受付終了\}/g, kv['受付終了'] || '')
     .replace(/\{受付開始\}/g, kv['受付開始'] || '')
+    .replace(/\{受診期間開始\}/g, kv['受診期間開始'] || '')
+    .replace(/\{受診期間終了\}/g, kv['受診期間終了'] || '')
+    .replace(/\{担当者連絡先\}/g, kv['担当者連絡先'] || '')
     .replace(/\{年度\}/g, kv['年度'] || '');
   return {
     to: target['社用メール'],
