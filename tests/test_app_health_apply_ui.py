@@ -46,7 +46,7 @@ def test_index_has_health_apply_tab_and_card():
 
 def test_index_has_target_registration_section():
     html = _html()
-    for el_id in ("ha-targets-section", "ha-target-ids", "ha-preview-btn", "ha-preview-status", "ha-preview-area",
+    for el_id in ("ha-targets-section", "ha-target-ids", "ha-preview-btn", "ha-active-btn", "ha-active-status", "ha-preview-status", "ha-preview-area",
                   "ha-pcnt-add", "ha-pcnt-conflict", "ha-pcnt-blocked", "ha-preview-input-issues", "ha-preview-body",
                   "ha-commit-guide", "ha-commit-confirm", "ha-commit-btn", "ha-commit-status", "ha-commit-result"):
         assert f'id="{el_id}"' in html, el_id
@@ -57,10 +57,11 @@ def test_index_has_target_registration_section():
 def test_script_js_wires_target_registration():
     js = _script_js()
     for fn in ("function haPreviewTargets", "function haRenderPreview", "function haCommitRefresh",
-               "function haCommitTargets"):
+               "function haCommitTargets", "function haLoadActiveIds"):
         assert fn in js, fn
     assert "'/health_apply_targets_preview'" in js
     assert "'/health_apply_targets_commit'" in js
+    assert "'/health_apply_active_employees'" in js
     assert "confirm.value.trim() === p.confirm_phrase" in js
 
 
