@@ -5328,7 +5328,7 @@ function haSetForbidden(reason) {
         banner.textContent = reason || '';
         banner.style.display = reason ? '' : 'none';
     }
-    ['ha-responses-btn', 'ha-preview-btn'].forEach(id => {
+    ['ha-responses-btn', 'ha-preview-btn', 'ha-active-btn'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = !!reason;
     });
@@ -5628,6 +5628,36 @@ function haCommitRefresh() {
     btn.disabled = !ok;
 }
 
+async function haLoadActiveIds() {
+    // jinjer の在籍者全員の社員番号を貼り付け欄に入れる（読むだけ）。既存の入力は置き換える
+    const btn = document.getElementById('ha-active-btn');
+    const status = document.getElementById('ha-active-status');
+    const ta = document.getElementById('ha-target-ids');
+    if (!ta) return;
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'jinjer の在籍者一覧を取得しています…';
+    haShowError('');
+    try {
+        const { data } = await haFetchJson('/health_apply_active_employees');
+        if (data.forbidden) { haSetForbidden((data.errors || []).join(' / ')); return; }
+        if (!data.success) {
+            if (status) status.textContent = '';
+            haShowError((data.errors || ['在籍者一覧を取得できませんでした']).join(' / '));
+            return;
+        }
+        ta.value = (data.employee_ids || []).join('\n');
+        const skipped = (data.skipped || []).length;
+        if (status) status.textContent = `在籍者 ${data.count} 名を入れました`
+            + (skipped ? `（20始まり7桁でない ${skipped} 件は除外: ${(data.skipped || []).slice(0, 5).join('、')}${skipped > 5 ? '…' : ''}）` : '')
+            + '。続けて「プレビュー」を押してください';
+    } catch (e) {
+        if (status) status.textContent = '';
+        haShowError(`在籍者一覧を取得できませんでした: ${e}`);
+    } finally {
+        if (btn && !haState.forbidden) btn.disabled = false;
+    }
+}
+
 async function haPreviewTargets() {
     if (haState.forbidden) return;
     const btn = document.getElementById('ha-preview-btn');
@@ -5706,6 +5736,8 @@ async function haCommitTargets() {
 {
     const haPreviewBtn = document.getElementById('ha-preview-btn');
     if (haPreviewBtn) haPreviewBtn.addEventListener('click', haPreviewTargets);
+    const haActiveBtn = document.getElementById('ha-active-btn');
+    if (haActiveBtn) haActiveBtn.addEventListener('click', haLoadActiveIds);
     const haConfirm = document.getElementById('ha-commit-confirm');
     if (haConfirm) haConfirm.addEventListener('input', haCommitRefresh);
     const haCommitBtn = document.getElementById('ha-commit-btn');

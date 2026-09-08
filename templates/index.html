@@ -1498,6 +1498,10 @@
                     <textarea id="ha-target-ids" rows="6" placeholder="2018013&#10;2019022"></textarea>
                     <span class="field-sub">20始まり7桁だけを受け付けます。jinjer から氏名・社用メール・在籍区分・前年度の健診内容（「健康診断履歴」→「健康診断」の順）を取ります。退職・休職は警告だけで、自動では外しません。既に登録済みで同じ内容なら「変更なし」、内容が違う人や回答済みの人がいると「競合」になり、1件でもあれば登録できません。</span>
                 </label>
+                <div class="actions" style="margin-bottom:6px">
+                    <button type="button" class="btn btn-secondary" id="ha-active-btn" title="jinjer の在籍者一覧から 20始まり7桁の社員番号を取って上の欄に入れます。登録済みの人は「変更なし」になるので、入社のたびに押して新しい人だけ足せます">👥 在籍者全員の社員番号を jinjer から取る</button>
+                    <span id="ha-active-status" class="status-text"></span>
+                </div>
                 <div class="actions">
                     <button type="button" class="btn btn-primary" id="ha-preview-btn">プレビュー（jinjer を読むだけ・まだ何も書きません）</button>
                     <span id="ha-preview-status" class="status-text"></span>

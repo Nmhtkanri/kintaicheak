@@ -426,3 +426,34 @@ def test_commit_with_conflict_or_blocked_is_refused(client, env, jinjer):
     res = commit(client, body["session_id"], body["confirm_phrase"])
     assert res.status_code == 409
     assert env["gateway"].appended == []
+
+
+# --- 在籍者全員の社員番号（jinjer を読むだけ） ------------------------------------------------
+
+def test_active_employees_returns_ids_and_skips_test_accounts(client, env, monkeypatch):
+    monkeypatch.setattr(app_module, "fetch_health_apply_active_ids",
+                        lambda: (["2099001", "2099002"], ["3333003", "9999999"]))
+    res = client.get("/health_apply_active_employees")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["success"] is True and body["employee_ids"] == ["2099001", "2099002"] and body["count"] == 2
+    assert body["skipped"] == ["3333003", "9999999"]
+    assert env["gateway"].appended == []          # 何も書かない
+
+
+def test_active_employees_reports_jinjer_error(client, env, monkeypatch):
+    def boom():
+        raise JinjerAPIError("rate limited")
+    monkeypatch.setattr(app_module, "fetch_health_apply_active_ids", boom)
+    res = client.get("/health_apply_active_employees")
+    assert res.status_code == 500 and "jinjer API エラー" in res.get_json()["errors"][0]
+
+
+def test_fetch_health_apply_active_ids_filters_by_employee_id_shape(monkeypatch):
+    class Client:
+        def get_employees(self, only_active=True):
+            assert only_active is True
+            return [{"id": "2099002"}, {"id": "2099001"}, {"id": "3333003"}, {"employee_id": "2099001"}, {"id": ""}, None]
+    import services.keiri_api as keiri_api
+    monkeypatch.setattr(keiri_api, "get_client", lambda: Client())
+    assert app_module.fetch_health_apply_active_ids() == (["2099001", "2099002"], ["3333003"])

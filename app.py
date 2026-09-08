@@ -5482,6 +5482,41 @@ def route_health_apply_responses():
     })
 
 
+def fetch_health_apply_active_ids():
+    """jinjer の在籍者一覧から社員番号だけを取る（20始まり7桁のみ。試験用IDは skipped に分ける）。
+
+    対象者登録の貼り付け欄を埋めるためのもので、それ以外の情報は返さない。テストはこの関数を差し替える。
+    """
+    from services.health_apply.targets import EMPLOYEE_ID_RE
+    from services.keiri_api import get_client
+
+    ids, skipped = [], []
+    for emp in get_client().get_employees(only_active=True):
+        emp_id = str((emp or {}).get("id") or (emp or {}).get("employee_id") or "").strip()
+        if not emp_id:
+            continue
+        (ids if EMPLOYEE_ID_RE.match(emp_id) else skipped).append(emp_id)
+    return sorted(set(ids)), sorted(set(skipped))
+
+
+@app.route("/health_apply_active_employees", methods=["GET"])
+def route_health_apply_active_employees():
+    """対象者登録の貼り付け欄に入れる「在籍者全員」の社員番号。jinjer を読むだけで何も書かない。"""
+    try:
+        _health_apply_require_access()
+    except _HealthApplyHalt as halt:
+        return _health_apply_halt_response(halt)
+    try:
+        ids, skipped = fetch_health_apply_active_ids()
+    except JinjerAPIError as e:
+        return jsonify({"success": False, "errors": [f"jinjer API エラー: {e}"]}), 500
+    except Exception as e:  # noqa: BLE001
+        logger.exception("health_apply_active_employees: jinjer fetch failed")
+        return jsonify({"success": False, "errors": [f"jinjer からの取得に失敗しました: {e}"]}), 500
+    return jsonify({"success": True, "employee_ids": ids, "count": len(ids), "skipped": skipped,
+                    "fetched_at": _now_iso()})
+
+
 def fetch_health_apply_sources(employee_ids, previous_year):
     """jinjer から (社員プロフィール, 前年度の健診内容, 選択肢名) を取る。GET のみ・逐次。
 
