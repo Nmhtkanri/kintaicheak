@@ -61,6 +61,11 @@ JINJER_COL_BREAK_1_END = "復帰1"
 JINJER_COL_BREAK_TOTAL = "休憩時間"
 JINJER_COL_SCHED_IN = "出勤予定時刻"  # スケジュール（予定）開始時刻。出勤採用時に実打刻へ合わせる
 JINJER_COL_SCHED_OUT = "退勤予定時刻"  # スケジュール未設定の行に出勤予定だけ書かないための判定用
+# スケジュール雛形ID。この列に値が残ったまま送ると jinjer は雛形の時刻を採用し、行の
+# 出勤予定時刻を黙って無視する（2026-09-09 実測: 7〜9月の検証NG 165件中162件がこれ。
+# 雛形1=9:00~17:30 の行に 07:00 を書いても 9:00 のまま）。出勤予定時刻を書き換える行では
+# 必ず空にして送る。
+JINJER_COL_SCHED_TEMPLATE = "スケジュール雛形ID"
 JINJER_COL_EMP_ID = "*従業員ID"
 JINJER_COL_DATE = "*年月日"
 # 勤務状況（0:未打刻 1:欠勤）。打刻を書き込む日にこのフラグが残っていると
@@ -159,7 +164,8 @@ class Stats:
     overwritten_punch_in: int = 0
     overwritten_punch_out: int = 0
     overwritten_sched_in: int = 0  # 出勤採用に合わせてスケジュール開始（出勤予定時刻）も更新した件数
-    overwritten_sched_start: int = 0  # 「スケジュール開始」行の反映＝出勤予定時刻のみ更新（打刻は触らない）
+    overwritten_sched_start: int = 0
+    blanked_sched_template: int = 0  # 出勤予定を書いた行で雛形IDを空にした件数  # 「スケジュール開始」行の反映＝出勤予定時刻のみ更新（打刻は触らない）
     skipped_break: int = 0  # 承認されたが上書きしなかった
     skipped_total: int = 0
     overwritten_break_start: int = 0
@@ -667,6 +673,19 @@ def load_sched_aligns(diff_xlsx: Path) -> list[dict]:
     return out
 
 
+def _blank_sched_template(row: list, tpl_col: int | None, stats: "Stats") -> None:
+    """出勤予定時刻を書いた行のスケジュール雛形IDを空にする。
+
+    雛形IDが残っていると jinjer は雛形の時刻を優先し、書いた出勤予定時刻を無視する
+    （2026-09-09 実測）。空欄なら行の出勤予定/退勤予定/休憩予定がそのまま反映される。
+    """
+    if tpl_col is None:
+        return
+    if (row[tpl_col] or "").strip():
+        row[tpl_col] = ""
+        stats.blanked_sched_template += 1
+
+
 def apply_sched_aligns(
     headers: list[str],
     rows: list[list],
@@ -684,6 +703,7 @@ def apply_sched_aligns(
     """
     sched_in_col = headers.index(JINJER_COL_SCHED_IN) if JINJER_COL_SCHED_IN in headers else None
     sched_out_col = headers.index(JINJER_COL_SCHED_OUT) if JINJER_COL_SCHED_OUT in headers else None
+    tpl_col = headers.index(JINJER_COL_SCHED_TEMPLATE) if JINJER_COL_SCHED_TEMPLATE in headers else None
     if sched_in_col is None or sched_out_col is None:
         if aligns:
             stats.warnings.append(
@@ -715,6 +735,7 @@ def apply_sched_aligns(
             continue   # 予定が既に同じ/より早い・遅刻方向 → 動かさない
         rows[idx][sched_in_col] = a["new_start"]
         stats.overwritten_sched_start += 1
+        _blank_sched_template(rows[idx], tpl_col, stats)
         changed_days.add(key)
 
 
@@ -748,6 +769,7 @@ def apply_approved_rows(
     break_total_col = headers.index(JINJER_COL_BREAK_TOTAL) if JINJER_COL_BREAK_TOTAL in headers else None
     sched_in_col = headers.index(JINJER_COL_SCHED_IN) if JINJER_COL_SCHED_IN in headers else None
     sched_out_col = headers.index(JINJER_COL_SCHED_OUT) if JINJER_COL_SCHED_OUT in headers else None
+    tpl_col = headers.index(JINJER_COL_SCHED_TEMPLATE) if JINJER_COL_SCHED_TEMPLATE in headers else None
     # 勤務状況（0:未打刻1:欠勤）列。正式ヘッダーは注釈付きなので前方一致で解決する。
     work_status_col = next(
         (i for i, h in enumerate(headers) if str(h).startswith(JINJER_COL_WORK_STATUS_PREFIX)),
@@ -843,6 +865,7 @@ def apply_approved_rows(
                 and (rows[idx][sched_out_col] or "").strip()
             ):
                 rows[idx][sched_in_col] = new_sched
+                _blank_sched_template(rows[idx], tpl_col, stats)
                 stats.overwritten_sched_start += 1
                 changed_days.add(key)
             else:
@@ -899,6 +922,7 @@ def apply_approved_rows(
             ):
                 rows[idx][sched_in_col] = new_in
                 stats.overwritten_sched_in += 1
+                _blank_sched_template(rows[idx], tpl_col, stats)
         elif app.kind == DIFF_KIND_PUNCH_OUT:
             new_out = app.manual_fix_value or app.auto_fix_value
             # 夜勤で翌朝退勤の場合、jinjer は 24時超表記でないとインポートできないため
@@ -1031,6 +1055,9 @@ def print_summary(stats: Stats, output_path: Path, dry_run: bool, total_rows: in
     print(f"{mode} ===== 実際の上書き結果 =====")
     print(f"  出勤1 上書き         : {stats.overwritten_punch_in}")
     print(f"  └ 出勤予定時刻も更新 : {stats.overwritten_sched_in}")
+    if stats.blanked_sched_template:
+        print(f"  └ 雛形IDを空にした行 : {stats.blanked_sched_template}"
+              "（雛形が残ると jinjer が出勤予定時刻を無視するため）")
     print(f"  スケジュール開始合わせ: {stats.overwritten_sched_start}（出勤予定時刻のみ・打刻は触らない）")
     print(f"  退勤1 上書き         : {stats.overwritten_punch_out}")
     print(f"  休憩1 上書き         : {stats.overwritten_break_start}")

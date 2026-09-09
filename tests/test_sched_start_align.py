@@ -260,3 +260,71 @@ def test_apply_skips_when_sched_out_missing():
     assert rows[0][headers.index("出勤予定時刻")] == "9:00"
     assert stats.overwritten_sched_start == 0
     assert any("退勤予定が空" in w for w in stats.warnings)
+
+
+# ---------------------------------------------------------------------------
+# スケジュール雛形IDの空欄化（2026-09-09）
+# 雛形IDが残ったまま送ると jinjer は雛形の時刻を採用し、書いた出勤予定時刻を無視する。
+# 7〜9月の検証NG 165件中162件がこれ（雛形1=9:00~17:30 の行に 07:00 → 9:00 のまま）。
+# ---------------------------------------------------------------------------
+
+def _tpl_env(tpl="1"):
+    from quick_export import Stats, build_jinjer_row_index
+    headers = ["*従業員ID", "*年月日", "スケジュール雛形ID", "出勤予定時刻", "退勤予定時刻", "出勤1", "退勤1"]
+    rows = [["2018057", "2026/4/1", tpl, "9:00", "18:00", "8:30", "18:00"]]
+    return headers, rows, build_jinjer_row_index(headers, rows), Stats()
+
+
+def test_sched_align_blanks_template_id():
+    from quick_export import apply_sched_aligns
+    headers, rows, idx, stats = _tpl_env()
+    apply_sched_aligns(headers, rows, idx, [_align()], set(), stats, set())
+    assert rows[0][headers.index("出勤予定時刻")] == "8:30"
+    assert rows[0][headers.index("スケジュール雛形ID")] == ""
+    assert stats.blanked_sched_template == 1
+
+
+def test_sched_align_untouched_row_keeps_template_id():
+    """予定を動かさない行（遅刻方向）は雛形IDもそのまま。"""
+    from quick_export import apply_sched_aligns
+    headers, rows, idx, stats = _tpl_env()
+    apply_sched_aligns(headers, rows, idx, [_align(new="9:30")], set(), stats, set())
+    assert rows[0][headers.index("スケジュール雛形ID")] == "1"
+    assert stats.blanked_sched_template == 0
+
+
+def test_approved_sched_start_blanks_template_id():
+    from quick_export import DIFF_KIND_SCHED_START as K, apply_approved_rows
+    headers, rows, idx, stats = _tpl_env()
+    apply_approved_rows(headers, rows, idx, [_approved(K, "8:30")], stats)
+    assert rows[0][headers.index("出勤予定時刻")] == "8:30"
+    assert rows[0][headers.index("スケジュール雛形ID")] == ""
+    assert stats.blanked_sched_template == 1
+
+
+def test_approved_punch_in_align_blanks_template_id():
+    """出勤採用で出勤予定も合わせる経路でも雛形IDを空にする。"""
+    from quick_export import DIFF_KIND_PUNCH_IN as K, apply_approved_rows
+    headers, rows, idx, stats = _tpl_env()
+    apply_approved_rows(headers, rows, idx, [_approved(K, "7:00")], stats)
+    assert rows[0][headers.index("出勤1")] == "7:00"
+    assert rows[0][headers.index("出勤予定時刻")] == "7:00"
+    assert rows[0][headers.index("スケジュール雛形ID")] == ""
+    assert stats.blanked_sched_template == 1
+
+
+def test_punch_out_only_keeps_template_id():
+    """退勤だけの採用は出勤予定を触らないので雛形IDも残す。"""
+    from quick_export import DIFF_KIND_PUNCH_OUT as K, apply_approved_rows
+    headers, rows, idx, stats = _tpl_env()
+    apply_approved_rows(headers, rows, idx, [_approved(K, "19:00")], stats)
+    assert rows[0][headers.index("スケジュール雛形ID")] == "1"
+    assert stats.blanked_sched_template == 0
+
+
+def test_no_template_column_is_fine():
+    """雛形ID列が無い旧CSVでも落ちない。"""
+    from quick_export import apply_sched_aligns
+    headers, rows, idx, stats = _sheet_env()
+    apply_sched_aligns(headers, rows, idx, [_align()], set(), stats, set())
+    assert stats.blanked_sched_template == 0
