@@ -53,6 +53,7 @@ python -m PyInstaller ^
   --hidden-import services.health_hpm_match ^
   --hidden-import services.health_hpm_csv ^
   --hidden-import services.health_hpm_pdf ^
+  --hidden-import services.health_hpm_options ^
   --hidden-import services.sharoushi_export ^
   --hidden-import services.shaho_master ^
   --hidden-import services.shaho_engine ^
