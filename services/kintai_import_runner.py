@@ -51,6 +51,9 @@ POLL_INTERVAL_SEC = 20
 POLL_MAX_SEC = 900
 
 KUBUN_KYUKA = "休暇日スキップ"
+# 休暇日の行で空にして送る列（予定は触らない。雛形IDも残すと雛形時刻で予定が置き換わる）
+SCHEDULE_COLS = [COL_SCHED_IN, COL_SCHED_OUT, "スケジュール雛形ID"] + [c for pair in BREAK_PAIRS for c in pair]
+PUNCH_COLS = [COL_PUNCH_IN, COL_PUNCH_OUT, "休憩1", "復帰1"]
 KUBUN_NG = "検証NG"
 KUBUN_IMPORT_FAIL = "インポート失敗"
 KUBUN_GUARD = "送信前チェックNG"
@@ -174,6 +177,24 @@ def is_kyuka_row(row: dict[str, str]) -> tuple[bool, str]:
     return True, "休暇登録あり（スケジュールは上書きされないため除外）: " + " / ".join(parts)
 
 
+def strip_schedule_for_kyuka(row: dict[str, str]) -> tuple[dict[str, str], bool]:
+    """休暇日の行から予定系の列を落とし、打刻だけを送る形にする。
+
+    jinjer は休暇登録がある日のスケジュール書き込みを黙って無視するが、打刻は受け付ける
+    （2026-09-09 石橋9999999 AM有休の日で実測: 出勤1/退勤1 だけ送ると打刻が入り、
+    予定と休暇登録はそのまま）。谷津さん指定「有休の日の予定は動かさない」にも合う。
+
+    Returns:
+        (予定列を空にした行, 送る打刻があるか)
+    """
+    out = dict(row)
+    for c in SCHEDULE_COLS:
+        if c in out:
+            out[c] = ""
+    has_punch = any((out.get(c) or "").strip() for c in PUNCH_COLS)
+    return out, has_punch
+
+
 def breaks_of_row(row: dict[str, str]) -> list[tuple[int, int]]:
     """行の休憩予定ペアを分単位で返す（両側そろったペアのみ）"""
     result = []
@@ -238,6 +259,8 @@ class ImportRunResult:
     excluded: list[dict] = field(default_factory=list)   # 手動対応リストの行
     verified_ok: int = 0
     verified_ng: int = 0
+    kyuka_punch_only: int = 0   # 休暇日で予定を落とし打刻だけ送った行
+    kyuka_skipped: int = 0      # 休暇日で送る打刻が無く投入しなかった行（対応不要）
     import_statuses: list[str] = field(default_factory=list)
     report_path: str = ""
     log: list[str] = field(default_factory=list)
@@ -315,27 +338,36 @@ def run_api_import(
     # ---- 2. ガード（休暇日除外） ----
     submit_rows: list[list[str]] = []
     intended: dict[tuple[str, str], dict[str, str]] = {}
+    kyuka_skipped_rows: list[dict] = []   # 検証結果シートに「対応不要」として載せる
     for r, d in rows:
         emp = d.get(COL_EMP, "")
         date_iso = norm_date_iso(d.get(COL_DATE)) or ""
         kyuka, why = is_kyuka_row(d)
         if kyuka:
-            result.excluded.append({
-                "従業員番号": emp, "氏名": d.get(COL_NAME, ""),
-                "日付": date_iso, "区分": KUBUN_KYUKA, "備考": why,
-            })
-            continue
+            # 休暇日は予定を触らず打刻だけ送る。打刻が無ければ投入せず「対応不要」扱い
+            # （予定は書けないし、書かない方針）。手動対応リストには載せない。
+            d, has_punch = strip_schedule_for_kyuka(d)
+            if not has_punch:
+                result.kyuka_skipped += 1
+                kyuka_skipped_rows.append({
+                    "従業員番号": emp, "氏名": d.get(COL_NAME, ""), "日付": date_iso,
+                    "判定": "対応不要", "詳細": "休暇日・打刻の変更なし（予定は触らない）: " + why,
+                })
+                continue
+            result.kyuka_punch_only += 1
+            r = [d.get(h, "") for h in header]
         submit_rows.append(r)
         if emp and date_iso:
             intended[(emp, date_iso)] = d
     result.submitted_rows = len(submit_rows)
-    log(f"ガード: 休暇日スキップ {len(result.excluded)} 行 / 投入対象 {len(submit_rows)} 行 "
-        f"（{len({k[0] for k in intended})} 名）")
+    log(f"ガード: 投入対象 {len(submit_rows)} 行（{len({k[0] for k in intended})} 名）"
+        f" / うち休暇日で打刻のみ {result.kyuka_punch_only} 行"
+        f" / 休暇日で打刻変更なし {result.kyuka_skipped} 行（対応不要）")
 
     if dry_run:
         result.ok = True
         result.report_path = _write_report(
-            output_dir, result, [], month, dry_run=True)
+            output_dir, result, kyuka_skipped_rows, month, dry_run=True)
         log(f"dry-run 完了（jinjerへは送信していません）。手動対応リスト暫定版: {result.report_path}")
         return result
 
@@ -379,7 +411,7 @@ def run_api_import(
 
     # ---- 4. 検証 ----
     log("反映検証中（work-schedules / attendances API）…")
-    verify_rows: list[dict] = []
+    verify_rows: list[dict] = list(kyuka_skipped_rows)
     emps = sorted({k[0] for k in intended})
     # 打刻グループIDは CSV の *打刻グループID から。渡さないと打刻グループを移動した従業員で
     # 旧グループの残骸を現在の予定と誤認する（jinjer_api_client.parse_work_schedules_data 参照）。

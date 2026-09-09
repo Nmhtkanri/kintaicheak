@@ -192,3 +192,56 @@ class TestValidateUploadCsv:
         errs = validate_upload_csv(self._rows(["2026/6/15"]),
                                    target_month="2026-06", today=self.TODAY)
         assert errs == []
+
+
+class TestStripScheduleForKyuka:
+    """休暇日は予定を落として打刻だけ送る（2026-09-09 石橋9999999 AM有休で実測）。"""
+
+    def test_schedule_and_template_blanked_punch_kept(self):
+        from services.kintai_import_runner import strip_schedule_for_kyuka
+        row = {"出勤予定時刻": "09:30", "退勤予定時刻": "17:30", "スケジュール雛形ID": "1",
+               "休憩予定時刻1": "12:00", "復帰予定時刻1": "13:00",
+               "出勤1": "09:30", "退勤1": "12:00", "休日休暇名1": "年次有給", "休日休暇名1：種別": "PM有休"}
+        out, has_punch = strip_schedule_for_kyuka(row)
+        assert has_punch
+        assert out["出勤予定時刻"] == "" and out["退勤予定時刻"] == "" and out["スケジュール雛形ID"] == ""
+        assert out["休憩予定時刻1"] == "" and out["復帰予定時刻1"] == ""
+        assert out["出勤1"] == "09:30" and out["退勤1"] == "12:00"
+        assert out["休日休暇名1"] == "年次有給"          # 休暇列は触らない
+        assert row["出勤予定時刻"] == "09:30"            # 元の行は変更しない
+
+    def test_no_punch_means_nothing_to_send(self):
+        from services.kintai_import_runner import strip_schedule_for_kyuka
+        row = {"出勤予定時刻": "09:30", "退勤予定時刻": "17:30", "出勤1": "", "退勤1": "  "}
+        out, has_punch = strip_schedule_for_kyuka(row)
+        assert not has_punch
+
+    def test_break_only_counts_as_punch(self):
+        from services.kintai_import_runner import strip_schedule_for_kyuka
+        _out, has_punch = strip_schedule_for_kyuka({"休憩1": "12:00", "復帰1": "13:00"})
+        assert has_punch
+
+
+def test_dry_run_kyuka_rows_split(tmp_path):
+    """dry-run: 休暇日で打刻ありは投入対象、打刻なしは対応不要（手動対応リストには載らない）。"""
+    import csv
+    from openpyxl import load_workbook
+    from services.kintai_import_runner import run_api_import
+    header = ["名前", "*従業員ID", "*年月日", "*打刻グループID", "スケジュール雛形ID",
+              "出勤予定時刻", "退勤予定時刻", "出勤1", "退勤1", "休日休暇名1", "休日休暇名1：種別"]
+    rows = [
+        ["A", "1001", "2026/8/3", "40", "1", "09:30", "17:30", "09:30", "12:00", "年次有給", "PM有休"],
+        ["A", "1001", "2026/8/4", "40", "1", "09:30", "17:30", "", "", "年次有給", "AM有休"],
+        ["A", "1001", "2026/8/5", "40", "", "09:30", "17:30", "09:30", "18:00", "", ""],
+    ]
+    p = tmp_path / "up.csv"
+    with open(p, "w", encoding="cp932", newline="") as f:
+        w = csv.writer(f); w.writerow(header); w.writerows(rows)
+    res = run_api_import(p, tmp_path, dry_run=True, month="2026-08", log_func=lambda m: None)
+    assert res.ok
+    assert res.submitted_rows == 2
+    assert res.kyuka_punch_only == 1 and res.kyuka_skipped == 1
+    assert res.excluded == []                                   # 手動対応リストは空
+    wb = load_workbook(res.report_path, read_only=True)
+    v = list(wb["検証結果"].iter_rows(values_only=True))[1:]
+    assert any(r[2] == "2026-08-04" and r[3] == "対応不要" for r in v)
