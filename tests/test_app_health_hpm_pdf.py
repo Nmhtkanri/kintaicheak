@@ -73,6 +73,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "fetch_employees_for_health", employees_stub)
     # 健診申込の選択肢シート（Google）は読まない（年度設定JSONが無い → 変換マスタだけで動く経路）
     monkeypatch.setattr(Config, "HEALTH_APPLY_SETTINGS_JSON", str(tmp_path / "no_years.json"))
+    monkeypatch.setattr(Config, "HEALTH_HPM_OPTIONS_SNAPSHOT_JSON", str(tmp_path / "no_snapshot.json"))
     app_module.app.config["TESTING"] = True
     return {"shared": shared, "local": local, "output": output, "tmp": tmp_path}
 

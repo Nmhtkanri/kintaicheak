@@ -51,11 +51,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "HEALTH_HPM_MASTER_XLSX",
                         make_master_xlsx(tmp_path / "master.xlsx"))
     monkeypatch.setattr(Config, "HEALTH_APPLY_SETTINGS_JSON", write_year_json(tmp_path / "years.json"))
+    monkeypatch.setattr(Config, "HEALTH_HPM_OPTIONS_SNAPSHOT_JSON", str(tmp_path / "写し" / "選択肢_写し.json"))
+    (tmp_path / "写し").mkdir()
     monkeypatch.setattr(app_module, "fetch_employees_for_health", employees_stub)
     state = {"gateway": FakeSheetsGateway(workbook())}
     monkeypatch.setattr(app_module, "health_apply_gateway", lambda year: state["gateway"])
     app_module.app.config["TESTING"] = True
-    return {"tmp": tmp_path, "output": output, "state": state}
+    return {"tmp": tmp_path, "output": output, "state": state,
+            "snapshot": tmp_path / "写し" / "選択肢_写し.json"}
 
 
 @pytest.fixture
@@ -145,6 +148,67 @@ class TestPreview:
         so = preview(client, env)["master"]["sheet_options"]
         assert so["loaded"] is False
         assert "読み取りに失敗" in so["error"]
+
+    def test_success_writes_snapshot_for_other_pcs(self, client, env):
+        assert not env["snapshot"].exists()
+        preview(client, env)
+        payload = json.loads(env["snapshot"].read_text(encoding="utf-8"))
+        assert payload["schema"] == 1
+        assert payload["saved_at"]
+        assert [i["code"] for i in payload["institutions"]][:1] == ["1310528885"]
+        assert "OTHER" not in [i["code"] for i in payload["institutions"]]
+        assert [t["code"] for t in payload["exam_types"]] == ["10", "11", "12", "13", "14", "15"]
+        assert payload["extras"] == [{"code": "GYN", "name": "婦人科検診"}]
+        text = env["snapshot"].read_text(encoding="utf-8")
+        assert "試験 太郎" not in text and "@" not in text, "写しに個人情報を入れない"
+
+    def test_no_key_pc_reads_snapshot(self, client, env, monkeypatch):
+        preview(client, env)                     # 鍵のあるPCが写しを書く
+        assert env["snapshot"].exists()
+
+        def no_key(year):
+            raise GatewayConfigError("サービスアカウントの鍵JSONがありません（テスト）")
+        monkeypatch.setattr(app_module, "health_apply_gateway", no_key)
+        data = preview(client, env)
+        so = data["master"]["sheet_options"]
+        assert so["loaded"] is True
+        assert "写し" in so["source"] and so["saved_at"]
+        assert "鍵" in so["note"] and "鍵JSONがありません" in so["note"]
+        names = [i["name"] for i in data["master"]["institutions"]]
+        assert OTEMACHI in names
+        otemachi = next(i for i in data["master"]["institutions"] if i["name"] == OTEMACHI)
+        assert [c["hpm_value"] for c in otemachi["courses"]] == ["10", "11", "12", "13", "14", "15"]
+
+    def test_no_key_pc_can_generate_from_snapshot(self, client, env, monkeypatch):
+        preview(client, env)
+        def no_key(year):
+            raise GatewayConfigError("鍵なし")
+        monkeypatch.setattr(app_module, "health_apply_gateway", no_key)
+        data = preview(client, env)
+        res = generate(client, data["session_id"], picks(data, OTEMACHI_CODE, "12"))
+        assert res.status_code == 200, res.get_json()
+        rows = read_csv(res.get_json()["output_path"])
+        assert rows[1][18] == "12" and rows[1][23] == OTEMACHI_CODE
+
+    def test_failed_read_does_not_overwrite_snapshot(self, client, env):
+        preview(client, env)
+        before = env["snapshot"].read_bytes()
+        env["state"]["gateway"].fail_read = True
+        so = preview(client, env)["master"]["sheet_options"]
+        assert so["loaded"] is True and "写し" in so["source"]
+        assert env["snapshot"].read_bytes() == before
+
+    def test_broken_snapshot_falls_back(self, client, env, monkeypatch):
+        env["snapshot"].write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(Config, "HEALTH_APPLY_SETTINGS_JSON", str(env["tmp"] / "no.json"))
+        so = preview(client, env)["master"]["sheet_options"]
+        assert so["loaded"] is False
+
+    def test_unwritable_snapshot_does_not_break_preview(self, client, env, monkeypatch):
+        monkeypatch.setattr(Config, "HEALTH_HPM_OPTIONS_SNAPSHOT_JSON",
+                            str(env["tmp"] / "no_such_dir" / "x.json"))
+        data = preview(client, env)
+        assert data["master"]["sheet_options"]["loaded"] is True
 
     def test_bad_header_falls_back(self, client, env):
         wb = workbook()
@@ -248,6 +312,7 @@ def test_ui_wiring():
     assert "class=\"hh-inst-filter " in js
     assert "e.target.classList.contains('hh-inst-filter')" in js
     assert "master.sheet_options.exam_types" in js                  # 機関未選択でも種別を出す
+    assert "so.note" in js                                            # 写しから読んだ旨
     assert "optgroup label=\"申込では無効の種別\"" in js
     assert "function hhSheetOptionsNote(master)" in js
     assert js.index("function hhSheetOptionsNote(master)") < js.index("function hhRenderPreview(data)")

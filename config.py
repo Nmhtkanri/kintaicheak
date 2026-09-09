@@ -355,6 +355,12 @@ class Config:
     # 出力先のベース。実際は {年度}\{年度}年度健康診断受診者結果\CSV格納 へ書く。
     HEALTH_HPM_OUTPUT_BASE = os.environ.get(
         "HEALTH_HPM_OUTPUT_BASE", r"Z:\NMHT総務関係\健康診断")
+    # 健診申込の「選択肢」シート（Google）の写し。鍵（サービスアカウントJSON）は管理者PCにしか
+    # 置かないので、他のPCはここを読んで健診機関・健診種別のプルダウンを埋める。
+    # 機関・種別・追加検査だけで個人情報は含まない。鍵のあるPCが読み込み・照合のたびに書き直す。
+    HEALTH_HPM_OPTIONS_SNAPSHOT_JSON = os.environ.get(
+        "HEALTH_HPM_OPTIONS_SNAPSHOT_JSON",
+        r"Z:\NMHT総務関係\健康診断\健診申込_選択肢_写し.json")
     # 健診結果は要配慮個人情報。launcher.py が作業フォルダを共有NASへ chdir するため、
     # 既定の uploads/sessions に置くと6人が読める場所にpklが残る。各PCのローカルに隔離する。
     HEALTH_HPM_SESSION_DIR = os.environ.get(

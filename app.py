@@ -4404,9 +4404,14 @@ def _health_hpm_sheet_options():
     from services.health_apply import schema as ha_schema
     from services.health_apply.options import OptionCatalog
     from services.health_apply.sheets_gateway import GatewayError
-    from services.health_hpm_options import fallback_options, from_catalog
+    from services.health_hpm_options import (
+        fallback_options,
+        from_catalog,
+        load_snapshot,
+        save_snapshot,
+    )
 
-    try:
+    def _from_google():
         config = _health_apply_load_config()
         year_settings = _health_apply_pick_year(config, None)
         gateway = health_apply_gateway(year_settings)
@@ -4419,13 +4424,31 @@ def _health_hpm_sheet_options():
             ha_schema.rows_to_dicts(ha_schema.OPTION_HEADERS, rows))
         label = year_settings.label or f"{year_settings.fiscal_year}年度"
         return from_catalog(catalog, source=f"健診申込の選択肢シート（{label}）")
+
+    try:
+        options = _from_google()
     except _HealthApplyHalt as e:
-        return fallback_options("; ".join(e.errors))
+        options = fallback_options("; ".join(e.errors))
     except (GatewayError, ha_schema.SchemaError, OSError, ValueError) as e:
-        return fallback_options(str(e))
+        options = fallback_options(str(e))
     except Exception as e:  # noqa: BLE001
         logger.exception("health_hpm: 選択肢シートの読み込みに失敗")
-        return fallback_options(f"選択肢シートを読めませんでした: {e}")
+        options = fallback_options(f"選択肢シートを読めませんでした: {e}")
+
+    snapshot_path = Config.HEALTH_HPM_OPTIONS_SNAPSHOT_JSON
+    if options.loaded:
+        # 鍵のあるPCで読めたら、鍵の無いPC向けに写しを置き直す（失敗しても本流は止めない）
+        try:
+            save_snapshot(options, snapshot_path)
+        except Exception:  # noqa: BLE001
+            logger.warning("health_hpm: 選択肢の写しを書けませんでした: %s", snapshot_path,
+                           exc_info=True)
+        return options
+
+    from_copy = load_snapshot(snapshot_path, options.error)
+    if from_copy is not None:
+        return from_copy
+    return options
 
 
 def _health_person_payload(person, match_result, master, *, page=None,

@@ -3102,7 +3102,9 @@ function hhSheetOptionsNote(master) {
             + escapeHtml(so.source || '健診申込の選択肢シート')
             + ' から健診機関 ' + appended + '件（シート' + (c.institutions || 0) + '件のうち、変換マスタと同じ場所コードの機関と「その他」を除く）'
             + '・健診種別 ' + (c.exam_types || 0) + '件をプルダウンに追記しました。'
-            + '機関のプルダウンの上の入力欄に文字を打つと絞り込めます。</div>';
+            + '機関のプルダウンの上の入力欄に文字を打つと絞り込めます。'
+            + (so.note ? '<div class="hh-reason">' + escapeHtml(so.note) + '</div>' : '')
+            + '</div>';
     }
     return '<div class="hh-issue hh-issue-warning">⚠️ 健診申込の選択肢シートを読めなかったため、'
         + '健診機関・健診種別は変換マスタの分だけです: ' + escapeHtml(so.error || '') + '</div>';

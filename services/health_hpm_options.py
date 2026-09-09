@@ -19,6 +19,10 @@ HPM取込用CSVの健診機関・健診種別は、これまで変換マスタ�
 
 from __future__ import annotations
 
+import datetime as _dt
+import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 
 from services.health_hpm_excel import Issue
@@ -77,6 +81,8 @@ class SheetOptions:
     extras: list[SheetExtra] = field(default_factory=list)
     source: str = ""
     error: str = ""
+    note: str = ""        # 写しから読んだ等の補足（画面に出す）
+    saved_at: str = ""    # 写しの保存日時（写しから読んだときだけ）
 
     @property
     def loaded(self) -> bool:
@@ -119,6 +125,8 @@ class SheetOptions:
             "loaded": self.loaded,
             "source": self.source,
             "error": self.error,
+            "note": self.note,
+            "saved_at": self.saved_at,
             "counts": {"institutions": len(self.institutions),
                        "exam_types": len(self.exam_types),
                        "extras": len(self.extras)},
@@ -309,4 +317,87 @@ def extras_issue(selected: list[tuple[str, list[SheetExtra]]]) -> Issue | None:
         "warning", "EXTRA_NOT_IN_CSV",
         "追加検査は HPM の302列に該当する列が無いため CSV には出していません（暫定）: "
         + "、".join(lines),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 写し（共有フォルダのJSON）
+# ---------------------------------------------------------------------------
+# 鍵（サービスアカウントJSON）は管理者PCにしか置かない。他のPCは Google を読めないので、
+# 鍵のあるPCが読めたときに機関・種別・追加検査だけを写しとして共有フォルダへ置き、
+# 鍵の無いPCはそれを読む。個人情報（対象者・回答）は写しに一切入れない。
+
+SNAPSHOT_SCHEMA = 1
+
+
+def save_snapshot(options: SheetOptions, path: str, now: _dt.datetime | None = None) -> str:
+    """読めた選択肢を写しとして書く。途中で落ちても壊れた写しを残さないよう一時ファイル→置換。"""
+    if not options.loaded:
+        raise ValueError("読めなかった選択肢は写しにしない")
+    now = now or _dt.datetime.now()
+    payload = {
+        "schema": SNAPSHOT_SCHEMA,
+        "saved_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "saved_by": os.environ.get("USERNAME", ""),
+        "source": options.source,
+        "institutions": [{"code": i.code, "name": i.name, "active": i.active,
+                          "order": i.order, "note": i.note} for i in options.institutions],
+        "exam_types": [{"code": t.code, "name": t.name, "active": t.active, "order": t.order}
+                       for t in options.exam_types],
+        "extras": [{"code": e.code, "name": e.name} for e in options.extras],
+        "_memo": "健診申込「選択肢」シートの写し。鍵の無いPCの健診結果→HPM取込用CSVがこれを読む。"
+                 "手で直さず、鍵のあるPCで読み込み・照合をすれば書き直される",
+    }
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".選択肢_写し_", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def load_snapshot(path: str, google_error: str) -> SheetOptions | None:
+    """写しを読む。無い・壊れているなら None（呼び出し側が fallback にする）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != SNAPSHOT_SCHEMA:
+        return None
+    try:
+        institutions = [
+            SheetInstitution(code=str(i["code"]), name=str(i["name"]),
+                             active=bool(i.get("active", True)), order=int(i.get("order", 9999)),
+                             note=str(i.get("note", "")))
+            for i in payload.get("institutions", []) if str(i.get("code", "")).strip()
+        ]
+        exam_types = [
+            SheetExamType(code=str(t["code"]), name=str(t["name"]),
+                          active=bool(t.get("active", True)), order=int(t.get("order", 9999)))
+            for t in payload.get("exam_types", []) if str(t.get("code", "")).strip()
+        ]
+        extras = [SheetExtra(code=str(e["code"]), name=str(e["name"]))
+                  for e in payload.get("extras", []) if str(e.get("code", "")).strip()]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not extras:
+        extras = [SheetExtra(FALLBACK_EXTRA_CODE, FALLBACK_EXTRA_NAME)]
+    saved_at = str(payload.get("saved_at", ""))
+    saved_by = str(payload.get("saved_by", ""))
+    return SheetOptions(
+        institutions=institutions, exam_types=exam_types, extras=extras,
+        source=f"{payload.get('source') or '健診申込の選択肢シート'}の写し（{saved_at}"
+               + (f" {saved_by} のPCで保存" if saved_by else "") + "）",
+        note="このPCには Google を読む鍵が無いため共有フォルダの写しを使いました。"
+             "最新にするには鍵のあるPCで一度「読み込み・照合」をしてください。"
+             f"（Google を読めなかった理由: {google_error}）",
+        saved_at=saved_at,
     )

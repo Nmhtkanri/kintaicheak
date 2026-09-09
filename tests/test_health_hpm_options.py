@@ -24,7 +24,9 @@ from services.health_hpm_options import (  # noqa: E402
     extras_issue,
     fallback_options,
     from_catalog,
+    load_snapshot,
     merged_institutions,
+    save_snapshot,
     resolve_course_choice,
     resolve_extras,
     resolve_institution_choice,
@@ -88,6 +90,38 @@ class TestFromCatalog:
         types = options.as_dict()["exam_types"]
         assert [t["code"] for t in types] == ["10", "11", "12", "13", "14", "15"]
         assert types[0] == {"code": "10", "name": "定期健康診断", "active": True}
+
+
+class TestSnapshot:
+    def test_roundtrip(self, options, tmp_path):
+        path = str(tmp_path / "写し.json")
+        save_snapshot(options, path)
+        back = load_snapshot(path, "鍵がありません")
+        assert back is not None and back.loaded
+        assert [i.code for i in back.institutions] == [i.code for i in options.institutions]
+        assert back.institution_by_code("130192").active is False
+        assert [t.code for t in back.exam_types] == [t.code for t in options.exam_types]
+        assert [e.code for e in back.extras] == ["GYN"]
+        assert "写し" in back.source and "テスト選択肢" in back.source
+        assert "鍵がありません" in back.note
+        assert back.saved_at
+        assert back.as_dict()["saved_at"] == back.saved_at
+
+    def test_refuses_to_save_fallback(self, tmp_path):
+        with pytest.raises(ValueError):
+            save_snapshot(fallback_options("x"), str(tmp_path / "a.json"))
+
+    def test_missing_or_broken_returns_none(self, tmp_path):
+        assert load_snapshot(str(tmp_path / "none.json"), "e") is None
+        p = tmp_path / "bad.json"
+        p.write_text("[]", encoding="utf-8")
+        assert load_snapshot(str(p), "e") is None
+        p.write_text('{"schema": 99}', encoding="utf-8")
+        assert load_snapshot(str(p), "e") is None
+
+    def test_no_temp_file_left(self, options, tmp_path):
+        save_snapshot(options, str(tmp_path / "写し.json"))
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["写し.json"]
 
 
 class TestMergedInstitutions:
