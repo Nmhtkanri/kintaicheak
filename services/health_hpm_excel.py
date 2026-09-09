@@ -53,6 +53,10 @@ VT_NUMERIC = "数値"
 VT_QUALITATIVE = "定性"
 VT_TEXT = "文字"
 VT_NEEDS_CHECK = "要原票確認"
+# 所見（文章）。聴力の「所見なし」、診察・胸部X線・心電図・眼底・胃部・腹部超音波の
+# 「異常なし」「脂肪肝」など。原票判定は source_judgement に持ち、変換マスタの「判定」行が
+# あるときだけ臓器別の判定列（183〜197のまとめ判定列ではない）へ出す。2026-09-09 追加。
+VT_FINDING = "所見"
 
 # 血圧の項目名。測定回が必須なのはこの2つだけ。
 BP_ITEMS = ("収縮期血圧", "拡張期血圧")
@@ -113,6 +117,9 @@ class PersonRecord:
     sheet: str
     metrics: list[HealthMetric] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
+    # 原票の「医師名」欄。HPMの302列に列が無いので CSV には出さず、画面と監査用Excelに残す。
+    # 古い一時ファイル（pkl）には無い属性なので、読む側は getattr(person, "doctor_name", "") で見る
+    doctor_name: str = ""
 
     def blood_pressure(self) -> dict[int, dict[str, str]]:
         """{測定回: {"sys": 収縮期, "dia": 拡張期}}。平均は作らない。"""
@@ -129,6 +136,9 @@ class PersonRecord:
 
     def numeric(self) -> list[HealthMetric]:
         return [m for m in self.metrics if m.value_type == VT_NUMERIC]
+
+    def findings(self) -> list[HealthMetric]:
+        return [m for m in self.metrics if m.value_type == VT_FINDING]
 
 
 @dataclass
@@ -496,6 +506,7 @@ def _read_recipients(ws, result: WorkbookParseResult) -> list[PersonRecord]:
             exam_no=exam_no,
             sheet=sheet,
             issues=issues,
+            doctor_name=_text(_get(row, header, "医師名")),   # 列が無ければ空
         ))
 
     return persons

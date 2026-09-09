@@ -4475,6 +4475,28 @@ def _health_person_payload(person, match_result, master, *, page=None,
                 for m in person.metrics
                 if not master.rules_for(m.category, m.item, m.occurrence)]
 
+    # 所見（聴力・診察・胸部X線・心電図・眼底・胃部・腹部超音波）。判定は臓器別判定列へ
+    findings = []
+    for m in person.findings():
+        rules = master.rules_for(m.category, m.item, m.occurrence)
+        finding_rules = [r for r in rules if r.value_type != "判定"]
+        judge_rules = [r for r in rules if r.value_type == "判定"]
+        if len(finding_rules) == 1:
+            col, note = finding_rules[0].hpm_col, ""
+        elif finding_rules:
+            col, note = None, "健診種別（バリウム=X線／胃カメラ=内視鏡）で出力先を決めます"
+        else:
+            col, note = None, "変換マスタに無い項目です"
+        judge_col = judge_rules[0].hpm_col if len(judge_rules) == 1 else None
+        findings.append({
+            "category": m.category, "item": m.item, "value": m.value,
+            "judgement": m.source_judgement,
+            "hpm_col": col, "col_name": master.header[col] if col is not None else "",
+            "judgement_col": judge_col,
+            "judgement_col_name": master.header[judge_col] if judge_col is not None else "",
+            "note": note,
+        })
+
     return {
         "key": person.key,
         "name": person.name,
@@ -4498,8 +4520,11 @@ def _health_person_payload(person, match_result, master, *, page=None,
             "r3_present": any(o >= 3 for o in bp),
         },
         "qualitative": qualitative,
+        "findings": findings,
+        "doctor_name": getattr(person, "doctor_name", ""),
         "numeric_count": len(person.numeric()),
         "qualitative_count": len(person.qualitative()),
+        "finding_count": len(person.findings()),
         "unmapped_items": unmapped,
         "issues": _health_issue_dicts(person.issues),
         "page": page,

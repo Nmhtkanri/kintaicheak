@@ -3026,7 +3026,9 @@ function hhRenderPerson(person, master, roster) {
         + '<span class="hh-person-name">' + escapeHtml(person.name) + '</span>'
         + '<span style="font-size:12px; color:#62707c">受診日 ' + escapeHtml(person.exam_date)
         + '／受診No. ' + escapeHtml(person.exam_no)
-        + '／数値 ' + person.numeric_count + '項目・定性 ' + person.qualitative_count + '項目</span>'
+        + '／数値 ' + person.numeric_count + '項目・定性 ' + person.qualitative_count + '項目'
+        + (person.finding_count ? '・所見 ' + person.finding_count + '件' : '')
+        + (person.doctor_name ? '／医師名 ' + escapeHtml(person.doctor_name) : '') + '</span>'
         + '</div>';
 
     html += '<div class="hh-grid">';
@@ -3057,6 +3059,23 @@ function hhRenderPerson(person, master, roster) {
         }).join('');
         html += '<div class="hh-box"><div class="hh-box-title">定性検査</div>'
             + '<ul class="hh-qual">' + items + '</ul></div>';
+    }
+
+    // 所見（聴力・診察・胸部X線・心電図・眼底・胃部・腹部超音波）。判定は臓器別の判定列へ出す
+    if ((person.findings || []).length) {
+        const items = person.findings.map(f => {
+            const where = f.hpm_col !== null && f.hpm_col !== undefined
+                ? '→ 列' + f.hpm_col + '（' + escapeHtml(f.col_name) + '）'
+                    + (f.judgement && f.judgement_col !== null && f.judgement_col !== undefined
+                        ? '、判定→列' + f.judgement_col : '')
+                : '<span style="color:#a05a00">' + escapeHtml(f.note || '') + '</span>';
+            return '<li>' + escapeHtml(f.category + '/' + f.item) + '： '
+                + (f.judgement ? '<b>' + escapeHtml(f.judgement) + '</b> ' : '')
+                + '<b>' + escapeHtml(f.value) + '</b> ' + where + '</li>';
+        }).join('');
+        html += '<div class="hh-box"><div class="hh-box-title">所見（原票の文章どおり）'
+            + (person.doctor_name ? '　医師名: ' + escapeHtml(person.doctor_name) + '（CSVには出しません）' : '')
+            + '</div><ul class="hh-qual">' + items + '</ul></div>';
     }
 
     // PDFから読んだときだけ、原票そのものを並べて見比べられるようにする

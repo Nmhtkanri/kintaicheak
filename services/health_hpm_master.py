@@ -61,6 +61,13 @@ IDENTITY_COLS = range(0, 24)
 
 SETTING_VENUE_CODE = "会場コード"
 
+# 項目マッピングの値種別のうち、所見の行と、その所見に対応する臓器別判定の行。
+# 「判定」行は同じ (分類, 項目名, 測定回, 検査方式) の「所見」行とペアで、原票判定A〜Gを
+# 臓器別の判定列（例: 肝臓超音波判定=219）へ出す。まとめ判定列 183〜197 は従来どおり禁止。
+VT_FINDING = "所見"
+VT_JUDGEMENT = "判定"
+_VALUE_MAP_SEPARATORS = (";", "；", "\n")
+
 
 class MasterError(ValueError):
     """マスタが読めない・壊れている。CSV生成は必ず止める。"""
@@ -91,10 +98,15 @@ class ItemMapRule:
     value_type: str
     method: str = ""  # HBs/HCV等の検査方式。空なら方式を問わない
     note: str = ""
+    # 所見の値変換（原票の値 → HPMの値）。例: 聴力の「所見なし」→「正常」。
+    # マスタの「値変換」列（任意）を "所見なし=正常;所見あり=異常" の形で書く
+    value_map: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> tuple:
-        return (self.category, self.item, self.occurrence, self.method)
+        # 所見と判定は同じ項目で列が2つ要るので、判定行だけ区別する
+        return (self.category, self.item, self.occurrence, self.method,
+                VT_JUDGEMENT if self.value_type == VT_JUDGEMENT else "")
 
 
 @dataclass
@@ -158,6 +170,27 @@ def _get(row, header: dict[str, int], name: str) -> str:
     if idx is None or idx >= len(row):
         return ""
     return _text(row[idx])
+
+
+def parse_value_map(text: str, item: str = "") -> tuple[tuple[str, str], ...]:
+    """「値変換」列を (原票の値, HPMの値) の組にする。"a=b;c=d" 形式。"""
+    s = str(text or "")
+    for sep in _VALUE_MAP_SEPARATORS[1:]:
+        s = s.replace(sep, _VALUE_MAP_SEPARATORS[0])
+    out: list[tuple[str, str]] = []
+    for piece in s.split(_VALUE_MAP_SEPARATORS[0]):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if "=" not in piece:
+            raise MasterError(
+                f"{SHEET_ITEM_MAP}シートの {item} の値変換 {piece!r} が「原票の値=HPMの値」の形ではありません")
+        src, dst = (p.strip() for p in piece.split("=", 1))
+        if not src or not dst:
+            raise MasterError(
+                f"{SHEET_ITEM_MAP}シートの {item} の値変換 {piece!r} の左右どちらかが空です")
+        out.append((src, dst))
+    return tuple(out)
 
 
 def _require_columns(header: dict[str, int], columns, sheet_name: str) -> None:
@@ -357,6 +390,7 @@ def _load_item_map(ws, header_names: list[str]) -> list[ItemMapRule]:
             value_type=_get(row, header, "値種別"),
             method=_get(row, header, "検査方式"),
             note=_get(row, header, "備考"),
+            value_map=parse_value_map(_get(row, header, "値変換"), item),
         ))
 
     if not rules:
@@ -414,6 +448,16 @@ def _validate(master: HpmMaster) -> None:
                 f"{previous.item} と {rule.item} の両方が指しています"
             )
         seen_cols[rule.hpm_col] = rule
+
+    # --- 判定行には同じ項目の所見行が要る（判定だけ出す設定は作らない） ---
+    finding_keys = {r.key[:4] for r in master.item_map if r.value_type == VT_FINDING}
+    for rule in master.item_map:
+        if rule.value_type == VT_JUDGEMENT and rule.key[:4] not in finding_keys:
+            raise MasterError(
+                f"{SHEET_ITEM_MAP}シートの {rule.category}/{rule.item}"
+                f"（方式{rule.method or '指定なし'}）は値種別「{VT_JUDGEMENT}」ですが、"
+                f"対になる「{VT_FINDING}」の行がありません"
+            )
 
     # --- 設定 ---
     if not master.venue_code:

@@ -41,6 +41,7 @@ from services.health_hpm_excel import (
     Issue,
     PersonRecord,
     WorkbookParseResult,
+    VT_FINDING,
     _check_blood_pressure,
     format_exam_no,
     normalize_qualitative,
@@ -73,6 +74,19 @@ ITEM_ALIASES = {
 
 # 同じ値が別欄にも印字される項目。正規の項目が別にあるので落とす。
 DROP_ITEMS = {"尿糖（糖代謝）", "尿糖(糖代謝)"}
+
+# 所見欄の項目名を変換マスタの表記へ寄せる（原票の見出しがそのまま返ってきたとき用）
+FINDING_ALIASES = {
+    "脾他": "脾臓",
+    "胸部X線（呼）": "胸部X線", "胸部Ｘ線（呼）": "胸部X線", "胸部X線": "胸部X線", "胸部Ｘ線": "胸部X線",
+    "胸部X線（心）": "心血管系", "胸部Ｘ線（心）": "心血管系",
+    "心電図（安）": "安静時心電図", "心電図": "安静時心電図",
+    "心電図（負）": "負荷心電図",
+    "聴力1KHz（右）": "聴力1000（右）", "聴力1KHz（左）": "聴力1000（左）",
+    "聴力4KHz（右）": "聴力4000（右）", "聴力4KHz（左）": "聴力4000（左）",
+    "聴力1000(右)": "聴力1000（右）", "聴力1000(左)": "聴力1000（左）",
+    "聴力4000(右)": "聴力4000（右）", "聴力4000(左)": "聴力4000（左）",
+}
 
 # 値の頭に付く注記記号。値からは外して原票注記へ回す。
 _NOTE_MARKS = "＊*"
@@ -107,11 +121,29 @@ USER_PROMPT = """この健康診断結果の原票画像から、次のJSONだ�
   "qualitative": [
     {"category": "尿検査", "item": "尿蛋白", "value": "(-)", "method": null}
   ],
+  "findings": [
+    {"category": "腹部超音波", "item": "肝臓", "judgement": "A", "value": "異常なし"}
+  ],
+  "doctor": "医師名の欄の氏名（無ければ null）",
   "judgements": {"身体計測": "B"},
   "needs_check": ["読めなかった項目とその理由"]
 }
 
 値の横に ＊ などの注記記号が印字されている場合は "note" に入れてください（"value" には含めない）。
+
+findings には「所見（文章）」の欄を入れてください。value は印字どおりの文章
+（例: 異常なし、所見なし、脂肪肝、胆嚢壁内結石）、judgement はその行に印字された判定の英字
+（無ければ null）。value が空欄の欄は入れないでください。項目名（item）は次の標準名にしてください:
+- 聴力（category「聴力」）: 聴力1000（右）, 聴力1000（左）, 聴力4000（右）, 聴力4000（左）
+  ※「簡易」の欄は読まない。1KHz→1000、4KHz→4000
+- 診察（category「診察」）: 診察
+- 胸部X線（category「胸部X線」）: 胸部X線（「呼」の行）, 心血管系（「心」の行）
+- 心電図（category「心電図」）: 安静時心電図（「安」の行）, 負荷心電図（「負」の行）
+- 眼底（category「眼底」）: 眼底
+- 胃部（category「胃部」）: 胃部
+- 腹部超音波（category「腹部超音波」）: 肝臓, 胆嚢, 膵臓, 腎臓, 脾臓（「脾他」は脾臓）
+  ※臓器ごとに1件ずつ。judgement も臓器ごとの英字
+doctor には「医師名」の欄の氏名を入れてください（印字どおり。無ければ null）。
 
 metrics の項目名は原票の印字どおりで構いませんが、次の標準名があるものはそれに合わせてください:
 身長, 体重, BMI, 腹囲, 視力（右）（裸眼）, 視力（左）（裸眼）, 視力（右）（矯正）, 視力（左）（矯正）,
@@ -344,6 +376,8 @@ def readings_to_person(raw: dict, page_no: int, item_lookup: dict) -> PersonReco
     _read_blood_pressure(raw, person, judgements, page_no)
     _read_metrics(raw, person, judgements, item_lookup, page_no)
     _read_qualitative(raw, person, item_lookup, page_no)
+    _read_findings(raw, person, item_lookup, page_no)
+    person.doctor_name = _text(raw.get("doctor"))
     _check_bmi(person)
 
     for note in raw.get("needs_check") or []:
@@ -438,6 +472,26 @@ def _read_qualitative(raw, person: PersonRecord, item_lookup: dict, page_no: int
         ))
 
 
+def _read_findings(raw, person: PersonRecord, item_lookup: dict, page_no: int) -> None:
+    """所見（聴力・診察・胸部X線・心電図・眼底・胃部・腹部超音波）。空欄は入れない。"""
+    for entry in raw.get("findings") or []:
+        item = _text(entry.get("item"))
+        if not item:
+            continue
+        item = FINDING_ALIASES.get(item, item)
+        value = _text(entry.get("value"))
+        if not value:
+            continue  # 未実施・空欄は空欄のまま（判定だけあっても所見が無ければ出さない）
+        judgement = _text(entry.get("judgement")).upper()
+        category, _vt = item_lookup.get(item, (_text(entry.get("category")), VT_FINDING))
+        person.metrics.append(HealthMetric(
+            category=category, item=item, occurrence=1, value=value,
+            value_type=VT_FINDING, source_judgement=judgement,
+            original_display=(f"{judgement} {value}" if judgement else value),
+            source_page=str(page_no), source_sheet=person.sheet,
+        ))
+
+
 def _check_bmi(person: PersonRecord) -> None:
     """身長・体重から出したBMIと読み取ったBMIがずれていたら警告する。
 
@@ -512,9 +566,10 @@ def analyze_health_pdf(pdf_path: str, master, *, source_filename: str = "",
         result.pages[person.key] = page_no
         numeric = len(person.numeric())
         qualitative = len(person.qualitative())
+        findings = len(person.findings())
         yield ("progress", {
             "message": (f"{page_no}/{total}ページ目 {person.name} を読み取りました"
-                        f"（数値{numeric}件・定性{qualitative}件）"),
+                        f"（数値{numeric}件・定性{qualitative}件・所見{findings}件）"),
             "page": page_no, "total": total, "name": person.name})
 
     if not parse.persons:
@@ -536,7 +591,7 @@ def analyze_health_pdf(pdf_path: str, master, *, source_filename: str = "",
 # 原票画像を貼った整形済みExcel（スキーマ2.0）をCSVと同じフォルダへ残す。
 # 中身は PersonRecord から書くので、これを読み直せばエラー0件になる。
 
-RECIPIENT_HEADERS = ["PDFページ", "氏名", "年齢", "性別", "受診日", "受診No.", "個人票シート"]
+RECIPIENT_HEADERS = ["PDFページ", "氏名", "年齢", "性別", "受診日", "受診No.", "個人票シート", "医師名"]
 ITEM_HEADERS = ["PDFページ", "氏名", "受診日", "分類", "項目", "値", "単位",
                 "原票判定", "原票注記", "個人票シート", "測定回", "値種別", "原票表記"]
 SUMMARY_HEADERS = ["PDFページ", "氏名", "年齢", "性別", "受診日", "受診No.",
@@ -646,7 +701,8 @@ def write_audit_workbook(out_path: str, parse: WorkbookParseResult, pages: dict[
         page_text = str(page) if page else ""
         exam_date = person.exam_date.isoformat() if person.exam_date else ""
         rec_rows.append([page_text, person.name, person.age, person.gender,
-                         exam_date, person.exam_no, person.sheet])
+                         exam_date, person.exam_no, person.sheet,
+                         getattr(person, "doctor_name", "")])
 
         for metric in person.metrics:
             item_rows.append([
@@ -671,7 +727,7 @@ def write_audit_workbook(out_path: str, parse: WorkbookParseResult, pages: dict[
         ])
 
     _audit_sheet(wb, "受診者一覧", RECIPIENT_HEADERS, rec_rows,
-                 widths=[10, 18, 8, 8, 14, 12, 22])
+                 widths=[10, 18, 8, 8, 14, 12, 22, 14])
 
     # --- 原票画像のページシート ---
     for person in parse.persons:

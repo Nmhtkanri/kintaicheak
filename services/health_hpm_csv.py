@@ -30,8 +30,13 @@ import re
 import unicodedata
 from datetime import date
 
-from services.health_hpm_excel import Issue
-from services.health_hpm_master import BP_EXPECTED_COLS, JUDGEMENT_COLS, TOTAL_COLS
+from services.health_hpm_excel import VT_FINDING, Issue
+from services.health_hpm_master import (
+    BP_EXPECTED_COLS,
+    JUDGEMENT_COLS,
+    TOTAL_COLS,
+    VT_JUDGEMENT,
+)
 from services.health_hpm_match import gender_to_hpm
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,11 @@ LINE_TERMINATOR = "\r\n"
 FISCAL_START_MONTH = 4
 
 _INVALID_FILENAME_RE = re.compile(r'[\\/:*?"<>|]')
+# 臓器別判定列に書いてよい形（実績: A, B, C3）
+_JUDGEMENT_RE = re.compile(r"^[A-G]\d?$")
+
+STOMACH_XRAY = "X線"
+STOMACH_ENDOSCOPY = "内視鏡"
 
 
 class OutputExistsError(FileExistsError):
@@ -139,6 +149,69 @@ def _method_of(metric, rules) -> tuple[object, Issue | None]:
     )
 
 
+def stomach_method(course) -> str:
+    """胃部の所見をX線（バリウム）と内視鏡（胃カメラ）のどちらの列へ出すかを健診種別で決める。
+
+    原票の「胃部」欄には区別が無いので、コース（HPM出力値 12=バリウム／13=胃カメラ、
+    または表示名の語）から決める。決められなければ空文字（出力しない）。
+    """
+    text = f"{getattr(course, 'display_name', '')} {getattr(course, 'hpm_value', '')}"
+    if getattr(course, "hpm_value", "") == "12" or any(k in text for k in ("バリウム", "X線", "Ｘ線")):
+        return STOMACH_XRAY
+    if getattr(course, "hpm_value", "") == "13" or any(k in text for k in ("胃カメラ", "内視鏡")):
+        return STOMACH_ENDOSCOPY
+    return ""
+
+
+def _write_finding(person, metric, rules, course, row) -> list[Issue]:
+    """所見1件を所見列へ、原票判定を臓器別判定列へ書く。"""
+    issues: list[Issue] = []
+    label = f"{person.name}: {metric.category}/{metric.item}"
+    finding_rules = [r for r in rules if r.value_type != VT_JUDGEMENT]
+    judge_rules = [r for r in rules if r.value_type == VT_JUDGEMENT]
+
+    if any(r.method for r in finding_rules):
+        method = stomach_method(course)
+        finding_rules = [r for r in finding_rules if r.method == method]
+        judge_rules = [r for r in judge_rules if r.method == method]
+        if not finding_rules:
+            issues.append(Issue(
+                "warning", "FINDING_METHOD_UNKNOWN",
+                f"{label}: 健診種別「{getattr(course, 'display_name', '')}」から"
+                f"{STOMACH_XRAY}か{STOMACH_ENDOSCOPY}か判別できないため出力しません"
+                f"（原票の値: {metric.value}）"))
+            return issues
+    if len(finding_rules) != 1:
+        issues.append(Issue(
+            "warning", "FINDING_RULE_AMBIGUOUS",
+            f"{label}: 変換マスタの所見行が{len(finding_rules)}件あり出力先を決められません"))
+        return issues
+
+    rule = finding_rules[0]
+    value = metric.value
+    if rule.value_map:
+        mapping = dict(rule.value_map)
+        if value in mapping:
+            value = mapping[value]
+        else:
+            table = ", ".join(f"{a}→{b}" for a, b in rule.value_map)
+            issues.append(Issue(
+                "warning", "FINDING_VALUE_UNMAPPED",
+                f"{label}: 値 {value!r} は値変換表（{table}）に無いためそのまま出力します。"
+                "HPMのチェックで弾かれたら変換マスタの値変換に足してください"))
+    row[rule.hpm_col] = value
+
+    judgement = (metric.source_judgement or "").strip().upper()
+    if judge_rules and judgement:
+        if _JUDGEMENT_RE.match(judgement):
+            row[judge_rules[0].hpm_col] = judgement
+        else:
+            issues.append(Issue(
+                "warning", "FINDING_JUDGEMENT_INVALID",
+                f"{label}: 判定 {judgement!r} がA〜Gの形ではないため判定列には出力しません"))
+    return issues
+
+
 def build_person_row(person, employee, course, institution, master,
                      header: list[str] | None = None) -> tuple[list[str], list[Issue]]:
     """1名分の302列。定義した列だけ埋め、それ以外は空欄のまま。"""
@@ -170,6 +243,10 @@ def build_person_row(person, employee, course, institution, master,
         rules = master.rules_for(metric.category, metric.item, metric.occurrence)
         if not rules:
             unmapped.append(f"{metric.category}/{metric.item}")
+            continue
+
+        if metric.value_type == VT_FINDING:
+            issues.extend(_write_finding(person, metric, rules, course, row))
             continue
 
         rule, issue = _method_of(metric, rules)
