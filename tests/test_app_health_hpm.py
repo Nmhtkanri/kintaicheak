@@ -67,6 +67,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "HEALTH_HPM_MASTER_XLSX",
                         make_master_xlsx(tmp_path / "master.xlsx"))
     monkeypatch.setattr(app_module, "fetch_employees_for_health", employees_stub)
+    # 健診申込の選択肢シート（Google）は読まない（年度設定JSONが無い → 変換マスタだけで動く経路）
+    monkeypatch.setattr(Config, "HEALTH_APPLY_SETTINGS_JSON", str(tmp_path / "no_years.json"))
     app_module.app.config["TESTING"] = True
     return {"shared": shared, "local": local, "output": output, "tmp": tmp_path}
 

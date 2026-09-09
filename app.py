@@ -4379,23 +4379,53 @@ def _health_issue_dicts(issues):
     return [{"level": i.level, "code": i.code, "message": i.message} for i in issues]
 
 
-def _health_master_payload(master):
-    """画面のプルダウン用に機関と種別を渡す。"""
-    from services.health_hpm_master import courses_of
+def _health_master_payload(master, sheet_options=None):
+    """画面のプルダウン用に機関と種別を渡す。
 
-    institutions = []
-    for name in sorted(master.institutions):
-        institution = master.institutions[name]
-        institutions.append({
-            "name": institution.name,
-            "location_code": institution.location_code,
-            "hpm_confirmed": institution.hpm_confirmed,
-            "note": institution.note,
-            "courses": [{"display_name": c.display_name, "hpm_value": c.hpm_value}
-                        for c in courses_of(master, institution.name)],
-        })
+    変換マスタの登録分に、健診申込の「選択肢」シート（Google）の機関・種別を追記する
+    （2026-09-09）。シートが読めなかったときは変換マスタだけになり、理由を
+    sheet_options.error で画面へ渡す。
+    """
+    from services.health_hpm_options import fallback_options, merged_institutions
+
+    if sheet_options is None:
+        sheet_options = fallback_options("選択肢シートは読んでいません")
     return {"path": master.path, "settings": dict(master.settings),
-            "institutions": institutions}
+            "institutions": merged_institutions(master, sheet_options),
+            "sheet_options": sheet_options.as_dict()}
+
+
+def _health_hpm_sheet_options():
+    """健診申込の年度設定と鍵で Google「選択肢」シートだけを読む。
+
+    読めなくても HPM モードは止めない（変換マスタだけで動く）。対象者・回答（個人情報）
+    には触らない。利用許可CSVの検査もしない（選択肢に個人情報は無いため）。
+    """
+    from services.health_apply import schema as ha_schema
+    from services.health_apply.options import OptionCatalog
+    from services.health_apply.sheets_gateway import GatewayError
+    from services.health_hpm_options import fallback_options, from_catalog
+
+    try:
+        config = _health_apply_load_config()
+        year_settings = _health_apply_pick_year(config, None)
+        gateway = health_apply_gateway(year_settings)
+        values = gateway.read_values(ha_schema.SHEET_OPTIONS)
+        header, rows = ha_schema.split_header(values)
+        errors = ha_schema.verify_headers(ha_schema.SHEET_OPTIONS, header)
+        if errors:
+            return fallback_options("; ".join(errors))
+        catalog = OptionCatalog.from_rows(
+            ha_schema.rows_to_dicts(ha_schema.OPTION_HEADERS, rows))
+        label = year_settings.label or f"{year_settings.fiscal_year}年度"
+        return from_catalog(catalog, source=f"健診申込の選択肢シート（{label}）")
+    except _HealthApplyHalt as e:
+        return fallback_options("; ".join(e.errors))
+    except (GatewayError, ha_schema.SchemaError, OSError, ValueError) as e:
+        return fallback_options(str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("health_hpm: 選択肢シートの読み込みに失敗")
+        return fallback_options(f"選択肢シートを読めませんでした: {e}")
 
 
 def _health_person_payload(person, match_result, master, *, page=None,
@@ -4504,6 +4534,7 @@ def route_health_hpm_preview():
         matches[person.key] = match_person(
             person.name, person.gender, person.age, person.exam_date, employees)
 
+    sheet_options = _health_hpm_sheet_options()
     _save_health_session(session_id, {
         "kind": "health_hpm",
         "created_at": _now_iso(),
@@ -4512,6 +4543,7 @@ def route_health_hpm_preview():
         "parse": parsed,
         "employees": employees,
         "match": matches,
+        "sheet_options": sheet_options,
     })
 
     errors = parsed.errors()
@@ -4525,7 +4557,7 @@ def route_health_hpm_preview():
         "counts": {"persons": len(parsed.persons),
                    "errors": len(errors), "warnings": len(warnings)},
         "workbook_issues": _health_issue_dicts(parsed.issues),
-        "master": _health_master_payload(master),
+        "master": _health_master_payload(master, sheet_options),
         "roster": [c.as_dict() for c in employees],
         "persons": [_health_person_payload(p, matches[p.key], master)
                     for p in parsed.persons],
@@ -4590,6 +4622,8 @@ def route_health_hpm_pdf_preview():
             yield _sse_event("progress", {"message": "jinjer の社員と突き合わせています…"})
             matches = {p.key: match_person(p.name, p.gender, p.age, p.exam_date, employees)
                        for p in analysis.parse.persons}
+            yield _sse_event("progress", {"message": "健診申込の選択肢シートを読んでいます…"})
+            sheet_options = _health_hpm_sheet_options()
 
             # 原票PNGはファイルに置く。pkl には入れない（重いうえ画面へ配れない）
             for page_no, png in analysis.page_pngs.items():
@@ -4608,6 +4642,7 @@ def route_health_hpm_pdf_preview():
                 "source": "pdf",
                 "pages": analysis.pages,
                 "pdf_name": source_filename,
+                "sheet_options": sheet_options,
             })
 
             errors = analysis.parse.errors()
@@ -4622,7 +4657,7 @@ def route_health_hpm_pdf_preview():
                 "counts": {"persons": len(analysis.parse.persons),
                            "errors": len(errors), "warnings": len(warnings)},
                 "workbook_issues": _health_issue_dicts(analysis.parse.issues),
-                "master": _health_master_payload(master),
+                "master": _health_master_payload(master, sheet_options),
                 "roster": [c.as_dict() for c in employees],
                 "persons": [
                     _health_person_payload(
@@ -4682,9 +4717,15 @@ def route_health_hpm_generate():
         verify_written_csv,
         write_hpm_csv,
     )
-    from services.health_hpm_master import MasterError, find_course, load_master, \
-        resolve_institution
+    from services.health_hpm_master import MasterError, load_master
     from services.health_hpm_match import validate_selection
+    from services.health_hpm_options import (
+        extras_issue,
+        fallback_options,
+        resolve_course_choice,
+        resolve_extras,
+        resolve_institution_choice,
+    )
 
     log_lines = []
 
@@ -4718,12 +4759,22 @@ def route_health_hpm_generate():
         return jsonify({"success": False, "errors": [str(e)]}), 400
     _log(f"変換マスタ: {session['master_path']}（{len(master.header)}列）")
 
+    # 選択肢シートは読み込み時のものを使う（生成のたびに Google を叩かない）
+    sheet_options = session.get("sheet_options") or fallback_options("選択肢シートは読んでいません")
+    if sheet_options.loaded:
+        _log(f"選択肢シート: {sheet_options.source}"
+             f"（機関{len(sheet_options.institutions)}件・種別{len(sheet_options.exam_types)}件）")
+    else:
+        _log(f"選択肢シート: 読めなかったため変換マスタのみ（{sheet_options.error}）")
+
     selections = {str(p.get("key")): p for p in (body.get("persons") or [])}
     resolved = []
+    extras_selected = []   # (氏名, [SheetExtra]) — CSVには書かない（列が未確定）
     problems = []
     for person in parsed.persons:
         choice = selections.get(person.key) or {}
-        institution = resolve_institution(master, choice.get("institution", ""))
+        institution = resolve_institution_choice(
+            master, sheet_options, choice.get("institution", ""))
         if institution is None:
             problems.append(f"{person.name}: 健診機関を選んでください")
             continue
@@ -4732,9 +4783,16 @@ def route_health_hpm_generate():
                 f"{person.name}: {institution.name} はHPMで未確認の機関です。"
                 "コードを確認して変換マスタの「HPM確認済み」をTRUEにしてください")
             continue
-        course = find_course(master, institution.name, choice.get("course", ""))
+        course = resolve_course_choice(
+            master, sheet_options, institution, choice.get("course", ""))
         if course is None:
             problems.append(f"{person.name}: 健診種別を選んでください")
+            continue
+        extras, unknown_extras = resolve_extras(sheet_options, choice.get("extras"))
+        if unknown_extras:
+            problems.append(
+                f"{person.name}: 追加検査のコードが不明です（{'、'.join(unknown_extras)}）。"
+                "もう一度「読み込み・照合」からやり直してください")
             continue
         try:
             employee = validate_selection(choice.get("employee_id", ""), employees)
@@ -4742,10 +4800,16 @@ def route_health_hpm_generate():
             problems.append(f"{person.name}: {e}")
             continue
         resolved.append((person, employee, course, institution))
+        extras_selected.append((person.name, extras))
 
     if problems:
         return jsonify({"success": False, "errors": problems, "console": log_lines}), 400
     _log(f"jinjer照合: {len(resolved)}/{len(parsed.persons)}名 確定")
+    extra_warning = extras_issue(extras_selected)
+    if extra_warning is not None:
+        _log("追加検査: " + "、".join(
+            f"{name}={'・'.join(e.name for e in ex)}" for name, ex in extras_selected if ex)
+            + "（HPMの列が未確定のためCSVには出しません）")
 
     exam_dates = [p.exam_date for p, _, _, _ in resolved if p.exam_date]
     years = mixed_fiscal_years(exam_dates)
@@ -4814,7 +4878,8 @@ def route_health_hpm_generate():
         "column_count": len(rows[0]),
         "verified": True,
         "warnings": _health_issue_dicts(
-            list(parsed.warnings()) + list(warnings) + audit_issues),
+            list(parsed.warnings()) + list(warnings)
+            + ([extra_warning] if extra_warning is not None else []) + audit_issues),
         "console": log_lines,
     })
 

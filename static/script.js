@@ -2874,27 +2874,81 @@ function hhBpCell(value) {
     return value ? escapeHtml(value) : '<span class="hh-blank">—</span>';
 }
 
+// 機関の value は変換マスタが機関名、選択肢シートが場所コード（サーバー側がその順で引く）
+function hhInstitutionValue(inst) {
+    return inst.value !== undefined ? inst.value : inst.name;
+}
+
+function hhInstitutionOption(inst, selected) {
+    const label = inst.name + (inst.hpm_confirmed ? '' : '（HPM未確認・使えません）');
+    const value = hhInstitutionValue(inst);
+    return '<option value="' + escapeHtml(value) + '"'
+        + (value === selected ? ' selected' : '')
+        + (inst.hpm_confirmed ? '' : ' disabled')
+        + '>' + escapeHtml(label) + '</option>';
+}
+
+// 変換マスタの機関と、健診申込の「選択肢」シート（Google）から追記した機関を分けて出す
 function hhInstitutionOptions(master, selected) {
     let html = '<option value="">（選んでください）</option>';
-    (master.institutions || []).forEach(inst => {
-        const label = inst.name + (inst.hpm_confirmed ? '' : '（HPM未確認・使えません）');
-        html += '<option value="' + escapeHtml(inst.name) + '"'
-            + (inst.name === selected ? ' selected' : '')
-            + (inst.hpm_confirmed ? '' : ' disabled')
-            + '>' + escapeHtml(label) + '</option>';
-    });
+    const all = master.institutions || [];
+    const fromMaster = all.filter(i => i.source !== 'sheet');
+    const fromSheet = all.filter(i => i.source === 'sheet');
+    if (!fromSheet.length) {
+        fromMaster.forEach(inst => { html += hhInstitutionOption(inst, selected); });
+        return html;
+    }
+    html += '<optgroup label="変換マスタ">'
+        + fromMaster.map(inst => hhInstitutionOption(inst, selected)).join('') + '</optgroup>';
+    html += '<optgroup label="健診申込の選択肢シート">'
+        + fromSheet.map(inst => hhInstitutionOption(inst, selected)).join('') + '</optgroup>';
     return html;
 }
 
-function hhCourseOptions(master, institutionName, selected) {
-    const inst = (master.institutions || []).find(i => i.name === institutionName);
+function hhFindInstitution(master, value) {
+    return (master.institutions || []).find(i => hhInstitutionValue(i) === value);
+}
+
+// 健診種別: その機関の変換マスタのコースの後ろに、選択肢シートの種別（10〜15）が追記されている
+function hhCourseOptions(master, institutionValue, selected) {
+    const inst = hhFindInstitution(master, institutionValue);
     let html = '<option value="">（選んでください）</option>';
     if (!inst) return html;
-    (inst.courses || []).forEach(c => {
-        html += '<option value="' + escapeHtml(c.hpm_value) + '"'
-            + (c.hpm_value === selected ? ' selected' : '')
-            + '>' + escapeHtml(c.display_name) + '</option>';
+    const opt = (c) => '<option value="' + escapeHtml(c.hpm_value) + '"'
+        + (c.hpm_value === selected ? ' selected' : '')
+        + '>' + escapeHtml(c.display_name) + '</option>';
+    const courses = inst.courses || [];
+    const fromMaster = courses.filter(c => c.source !== 'sheet');
+    const fromSheet = courses.filter(c => c.source === 'sheet');
+    if (fromMaster.length && fromSheet.length) {
+        html += '<optgroup label="変換マスタ">' + fromMaster.map(opt).join('') + '</optgroup>'
+            + '<optgroup label="健診申込の選択肢シート">' + fromSheet.map(opt).join('') + '</optgroup>';
+    } else {
+        courses.forEach(c => { html += opt(c); });
+    }
+    return html;
+}
+
+// 暫定の既定: 女性なら追加検査（婦人科検診）をON。健診結果の性別か、jinjer で一致した社員の性別で見る
+function hhIsFemale(person) {
+    if ((person.gender || '') === '女性') return true;
+    const emp = person.jinjer && person.jinjer.employee;
+    return !!(emp && emp.gender === '女性');
+}
+
+// 追加検査のチェック。HPM の302列に該当列が無いので CSV には書かない（画面と警告に残すだけ）
+function hhExtrasHtml(person, master) {
+    const extras = (master.sheet_options && master.sheet_options.extras) || [];
+    if (!extras.length) return '';
+    const female = hhIsFemale(person);
+    let html = '<div style="margin-top:6px; font-size:12px">追加検査： ';
+    extras.forEach(ex => {
+        html += '<label style="margin-right:8px; cursor:pointer">'
+            + '<input type="checkbox" class="hh-extra" data-key="' + escapeHtml(person.key) + '"'
+            + ' value="' + escapeHtml(ex.code) + '"' + (female ? ' checked' : '') + '> '
+            + escapeHtml(ex.name) + '</label>';
     });
+    html += '<div class="hh-reason">女性は既定でオン（暫定）。HPMの列が未確定のためCSVには書きません。</div></div>';
     return html;
 }
 
@@ -2945,7 +2999,8 @@ function hhRenderPerson(person, master, roster) {
         + '<select class="hh-select hh-inst" data-key="' + escapeHtml(person.key) + '" style="width:100%; margin-bottom:4px">'
         + hhInstitutionOptions(master, '') + '</select>'
         + '<select class="hh-select hh-course" data-key="' + escapeHtml(person.key) + '" style="width:100%">'
-        + hhCourseOptions(master, '', '') + '</select></div>';
+        + hhCourseOptions(master, '', '') + '</select>'
+        + hhExtrasHtml(person, master) + '</div>';
 
     html += '<div class="hh-box"><div class="hh-box-title">血圧（原票どおり・平均は作りません）</div>'
         + '<table class="hh-bp"><tr><th></th><th>収縮期</th><th>拡張期</th></tr>'
@@ -2998,6 +3053,21 @@ function hhRenderPerson(person, master, roster) {
     return html;
 }
 
+// 健診申込の「選択肢」シートを読めたか（読めなくても変換マスタだけで先へ進める）
+function hhSheetOptionsNote(master) {
+    const so = master && master.sheet_options;
+    if (!so) return '';
+    if (so.loaded) {
+        const c = so.counts || {};
+        return '<div class="hh-issue" style="font-size:12px; color:#3b5a75">ℹ️ '
+            + escapeHtml(so.source || '健診申込の選択肢シート')
+            + ' から健診機関 ' + (c.institutions || 0) + '件・健診種別 ' + (c.exam_types || 0)
+            + '件をプルダウンに追記しました（変換マスタと同じ場所コードの機関は除く）。</div>';
+    }
+    return '<div class="hh-issue hh-issue-warning">⚠️ 健診申込の選択肢シートを読めなかったため、'
+        + '健診機関・健診種別は変換マスタの分だけです: ' + escapeHtml(so.error || '') + '</div>';
+}
+
 function hhRenderPreview(data) {
     hhPreview = data;
     document.getElementById('hh-cnt-persons').textContent = data.counts.persons;
@@ -3005,7 +3075,8 @@ function hhRenderPreview(data) {
     document.getElementById('hh-cnt-warnings').textContent = data.counts.warnings;
 
     const issuesEl = document.getElementById('hh-workbook-issues');
-    issuesEl.innerHTML = (data.workbook_issues || []).map(hhIssueHtml).join('');
+    issuesEl.innerHTML = (data.workbook_issues || []).map(hhIssueHtml).join('')
+        + hhSheetOptionsNote(data.master);
 
     let html = '';
     if ((data.master.institutions || []).length && data.persons.length > 1) {
@@ -3035,11 +3106,15 @@ function hhCollectSelections() {
             const el = document.querySelector('.' + cls + '[data-key="' + p.key + '"]');
             return el ? (el.value || '') : '';
         };
+        const extras = Array.from(
+            document.querySelectorAll('.hh-extra[data-key="' + p.key + '"]:checked'))
+            .map(el => el.value);
         return {
             key: p.key,
             employee_id: pick('hh-emp'),
             institution: pick('hh-inst'),
             course: pick('hh-course'),
+            extras: extras,
         };
     });
 }
