@@ -38,6 +38,7 @@ from services.jinjer_api_client import JinjerAPIError, JinjerClient
 COL_NAME = "名前"
 COL_EMP = "*従業員ID"
 COL_DATE = "*年月日"
+COL_STORE = "*打刻グループID"
 COL_SCHED_IN = "出勤予定時刻"
 COL_SCHED_OUT = "退勤予定時刻"
 COL_PUNCH_IN = "出勤1"
@@ -380,9 +381,16 @@ def run_api_import(
     log("反映検証中（work-schedules / attendances API）…")
     verify_rows: list[dict] = []
     emps = sorted({k[0] for k in intended})
+    # 打刻グループIDは CSV の *打刻グループID から。渡さないと打刻グループを移動した従業員で
+    # 旧グループの残骸を現在の予定と誤認する（jinjer_api_client.parse_work_schedules_data 参照）。
+    store_by_emp: dict[str, str] = {}
+    for (e_, _d), rowd in intended.items():
+        gid = (rowd.get(COL_STORE) or "").strip()
+        if gid and e_ not in store_by_emp:
+            store_by_emp[e_] = gid
     for i, emp in enumerate(emps, 1):
         try:
-            sched_month = cli.get_work_schedules(emp, month)
+            sched_month = cli.get_work_schedules(emp, month, store_id=store_by_emp.get(emp, ""))
             time.sleep(0.15)
             att_month = cli.get_attendance_times(emp, month)
         except JinjerAPIError as e:
