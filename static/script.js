@@ -2888,14 +2888,32 @@ function hhInstitutionOption(inst, selected) {
         + '>' + escapeHtml(label) + '</option>';
 }
 
-// 変換マスタの機関と、健診申込の「選択肢」シート（Google）から追記した機関を分けて出す
-function hhInstitutionOptions(master, selected) {
-    let html = '<option value="">（選んでください）</option>';
-    const all = master.institutions || [];
+// 絞り込み用の正規化: 全角半角をそろえ、空白を捨て、小文字にする（表示には使わない）
+function hhNormalize(text) {
+    return String(text || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+}
+
+// 絞り込みに掛かるか。機関名と場所コードで見る。選択中のものは必ず残す
+function hhInstitutionMatches(inst, filter, selected) {
+    if (!filter) return true;
+    if (hhInstitutionValue(inst) === selected && selected) return true;
+    const hay = hhNormalize(inst.name) + ' ' + hhNormalize(inst.location_code);
+    return hay.indexOf(filter) !== -1;
+}
+
+// 変換マスタの機関と、健診申込の「選択肢」シート（Google）から追記した機関を分けて出す。
+// filterText を渡すと、機関名・場所コードにその文字を含むものだけに絞る
+function hhInstitutionOptions(master, selected, filterText) {
+    const filter = hhNormalize(filterText);
+    let html = '<option value="">' + (filter ? '（絞り込み中・選んでください）' : '（選んでください）') + '</option>';
+    const all = (master.institutions || []).filter(i => hhInstitutionMatches(i, filter, selected));
     const fromMaster = all.filter(i => i.source !== 'sheet');
     const fromSheet = all.filter(i => i.source === 'sheet');
-    if (!fromSheet.length) {
-        fromMaster.forEach(inst => { html += hhInstitutionOption(inst, selected); });
+    if (!all.length) {
+        return html + '<option value="" disabled>（該当する健診機関がありません）</option>';
+    }
+    if (!fromSheet.length || !fromMaster.length) {
+        all.forEach(inst => { html += hhInstitutionOption(inst, selected); });
         return html;
     }
     html += '<optgroup label="変換マスタ">'
@@ -2905,26 +2923,45 @@ function hhInstitutionOptions(master, selected) {
     return html;
 }
 
+function hhInstitutionFilterHtml(cls, key, id) {
+    return '<input type="text" class="hh-inst-filter ' + cls + '"'
+        + (id ? ' id="' + id + '"' : '')
+        + (key ? ' data-key="' + escapeHtml(key) + '"' : '')
+        + ' placeholder="🔍 健診機関を絞り込み（例: 大手町、同友会、1310）"'
+        + ' style="width:100%; box-sizing:border-box; margin-bottom:3px; font-size:12px; padding:3px 6px">';
+}
+
 function hhFindInstitution(master, value) {
     return (master.institutions || []).find(i => hhInstitutionValue(i) === value);
 }
 
-// 健診種別: その機関の変換マスタのコースの後ろに、選択肢シートの種別（10〜15）が追記されている
+// 健診種別。機関を選ぶ前から選択肢シートの種別（定期健康診断・人間ドックA/B/C）を出し、
+// 機関を選んだらその機関の変換マスタのコースを先頭に足す。申込で無効な種別（14・15）は末尾の群に分ける
 function hhCourseOptions(master, institutionValue, selected) {
     const inst = hhFindInstitution(master, institutionValue);
     let html = '<option value="">（選んでください）</option>';
-    if (!inst) return html;
     const opt = (c) => '<option value="' + escapeHtml(c.hpm_value) + '"'
         + (c.hpm_value === selected ? ' selected' : '')
         + '>' + escapeHtml(c.display_name) + '</option>';
-    const courses = inst.courses || [];
-    const fromMaster = courses.filter(c => c.source !== 'sheet');
-    const fromSheet = courses.filter(c => c.source === 'sheet');
-    if (fromMaster.length && fromSheet.length) {
-        html += '<optgroup label="変換マスタ">' + fromMaster.map(opt).join('') + '</optgroup>'
-            + '<optgroup label="健診申込の選択肢シート">' + fromSheet.map(opt).join('') + '</optgroup>';
-    } else {
-        courses.forEach(c => { html += opt(c); });
+
+    const fromMaster = inst ? (inst.courses || []).filter(c => c.source !== 'sheet') : [];
+    const masterValues = fromMaster.map(c => c.hpm_value);
+    const sheetTypes = ((master.sheet_options && master.sheet_options.exam_types) || [])
+        .filter(t => masterValues.indexOf(t.code) === -1)
+        .map(t => ({ display_name: t.name, hpm_value: t.code, active: t.active !== false }));
+    const activeTypes = sheetTypes.filter(t => t.active);
+    const inactiveTypes = sheetTypes.filter(t => !t.active);
+
+    if (fromMaster.length) {
+        html += '<optgroup label="変換マスタ（' + escapeHtml(inst.name) + '）">' + fromMaster.map(opt).join('') + '</optgroup>';
+    }
+    if (activeTypes.length) {
+        html += fromMaster.length
+            ? '<optgroup label="健診申込の選択肢シート">' + activeTypes.map(opt).join('') + '</optgroup>'
+            : activeTypes.map(opt).join('');
+    }
+    if (inactiveTypes.length) {
+        html += '<optgroup label="申込では無効の種別">' + inactiveTypes.map(opt).join('') + '</optgroup>';
     }
     return html;
 }
@@ -2996,8 +3033,9 @@ function hhRenderPerson(person, master, roster) {
     html += hhJinjerBlock(person, roster);
 
     html += '<div class="hh-box"><div class="hh-box-title">健診機関・健診種別</div>'
+        + hhInstitutionFilterHtml('hh-inst-filter-person', person.key, '')
         + '<select class="hh-select hh-inst" data-key="' + escapeHtml(person.key) + '" style="width:100%; margin-bottom:4px">'
-        + hhInstitutionOptions(master, '') + '</select>'
+        + hhInstitutionOptions(master, '', '') + '</select>'
         + '<select class="hh-select hh-course" data-key="' + escapeHtml(person.key) + '" style="width:100%">'
         + hhCourseOptions(master, '', '') + '</select>'
         + hhExtrasHtml(person, master) + '</div>';
@@ -3059,10 +3097,12 @@ function hhSheetOptionsNote(master) {
     if (!so) return '';
     if (so.loaded) {
         const c = so.counts || {};
+        const appended = (master.institutions || []).filter(i => i.source === 'sheet').length;
         return '<div class="hh-issue" style="font-size:12px; color:#3b5a75">ℹ️ '
             + escapeHtml(so.source || '健診申込の選択肢シート')
-            + ' から健診機関 ' + (c.institutions || 0) + '件・健診種別 ' + (c.exam_types || 0)
-            + '件をプルダウンに追記しました（変換マスタと同じ場所コードの機関は除く）。</div>';
+            + ' から健診機関 ' + appended + '件（シート' + (c.institutions || 0) + '件のうち、変換マスタと同じ場所コードの機関と「その他」を除く）'
+            + '・健診種別 ' + (c.exam_types || 0) + '件をプルダウンに追記しました。'
+            + '機関のプルダウンの上の入力欄に文字を打つと絞り込めます。</div>';
     }
     return '<div class="hh-issue hh-issue-warning">⚠️ 健診申込の選択肢シートを読めなかったため、'
         + '健診機関・健診種別は変換マスタの分だけです: ' + escapeHtml(so.error || '') + '</div>';
@@ -3082,8 +3122,9 @@ function hhRenderPreview(data) {
     if ((data.master.institutions || []).length && data.persons.length > 1) {
         html += '<div class="hh-box" style="margin-bottom:9px; background:#fafcfe">'
             + '<div class="hh-box-title">全員に同じ健診機関・種別を設定する</div>'
+            + '<div style="max-width:420px">' + hhInstitutionFilterHtml('', '', 'hh-bulk-inst-filter') + '</div>'
             + '<select class="hh-select" id="hh-bulk-inst" style="min-width:240px">'
-            + hhInstitutionOptions(data.master, '') + '</select> '
+            + hhInstitutionOptions(data.master, '', '') + '</select> '
             + '<select class="hh-select" id="hh-bulk-course" style="min-width:220px">'
             + hhCourseOptions(data.master, '', '') + '</select> '
             + '<button type="button" class="btn btn-secondary" id="hh-bulk-apply">全員に適用</button>'
@@ -3225,18 +3266,30 @@ function setupHealthHpmMode() {
 
     const personsEl = document.getElementById('hh-persons');
 
-    // 機関を変えたら、その機関の健診種別だけに選択肢を差し替える
+    // 機関を変えたら、その機関のコースを先頭に足した健診種別へ差し替える（選んでいた種別は残す）
     personsEl.addEventListener('change', (e) => {
         if (e.target.classList.contains('hh-inst')) {
             const key = e.target.dataset.key;
             const courseEl = document.querySelector('.hh-course[data-key="' + key + '"]');
-            if (courseEl) courseEl.innerHTML = hhCourseOptions(hhPreview.master, e.target.value, '');
+            if (courseEl) courseEl.innerHTML = hhCourseOptions(hhPreview.master, e.target.value, courseEl.value);
         }
         if (e.target.id === 'hh-bulk-inst') {
             const bulkCourse = document.getElementById('hh-bulk-course');
-            if (bulkCourse) bulkCourse.innerHTML = hhCourseOptions(hhPreview.master, e.target.value, '');
+            if (bulkCourse) bulkCourse.innerHTML = hhCourseOptions(hhPreview.master, e.target.value, bulkCourse.value);
         }
         hhUpdateGenerateButton();
+    });
+
+    // 絞り込み入力: 文字を打つたびに機関プルダウンを作り直す。選択中の機関は絞り込みに掛からなくても残す
+    personsEl.addEventListener('input', (e) => {
+        if (!e.target.classList.contains('hh-inst-filter')) return;
+        const sel = e.target.id === 'hh-bulk-inst-filter'
+            ? document.getElementById('hh-bulk-inst')
+            : document.querySelector('.hh-inst[data-key="' + e.target.dataset.key + '"]');
+        if (!sel) return;
+        const current = sel.value;
+        sel.innerHTML = hhInstitutionOptions(hhPreview.master, current, e.target.value);
+        sel.value = current;
     });
 
     personsEl.addEventListener('click', (e) => {
@@ -3245,6 +3298,9 @@ function setupHealthHpmMode() {
         const course = document.getElementById('hh-bulk-course').value;
         if (!inst) { alert('健診機関を選んでください'); return; }
         document.querySelectorAll('.hh-inst').forEach(sel => {
+            // 各人の絞り込みで隠れていても選べるよう、選択中の機関を残して作り直す
+            const filterEl = document.querySelector('.hh-inst-filter[data-key="' + sel.dataset.key + '"]');
+            sel.innerHTML = hhInstitutionOptions(hhPreview.master, inst, filterEl ? filterEl.value : '');
             sel.value = inst;
             const courseEl = document.querySelector('.hh-course[data-key="' + sel.dataset.key + '"]');
             if (courseEl) {

@@ -123,6 +123,9 @@ class SheetOptions:
                        "exam_types": len(self.exam_types),
                        "extras": len(self.extras)},
             "extras": [{"code": e.code, "name": e.name} for e in self.extras],
+            # 機関を選ぶ前から種別を出すために、種別の一覧も画面へ渡す（有効=0 は末尾の群）
+            "exam_types": [{"code": t.code, "name": t.name, "active": t.active}
+                           for t in self.exam_types],
         }
 
 

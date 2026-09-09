@@ -82,6 +82,12 @@ class TestFromCatalog:
         assert fb.institutions == [] and fb.exam_types == []
         assert [e.code for e in fb.extras] == ["GYN"]
         assert fb.as_dict()["counts"] == {"institutions": 0, "exam_types": 0, "extras": 1}
+        assert fb.as_dict()["exam_types"] == []
+
+    def test_as_dict_exposes_exam_types(self, options):
+        types = options.as_dict()["exam_types"]
+        assert [t["code"] for t in types] == ["10", "11", "12", "13", "14", "15"]
+        assert types[0] == {"code": "10", "name": "定期健康診断", "active": True}
 
 
 class TestMergedInstitutions:

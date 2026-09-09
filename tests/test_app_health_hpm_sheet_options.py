@@ -244,6 +244,11 @@ def test_ui_wiring():
     assert "class=\"hh-extra\"" in js
     assert "extras: extras," in js                       # 送信値に追加検査
     assert "optgroup label=\"健診申込の選択肢シート\"" in js
+    assert "function hhInstitutionFilterHtml(cls, key, id)" in js   # 機関の絞り込み入力
+    assert "class=\"hh-inst-filter " in js
+    assert "e.target.classList.contains('hh-inst-filter')" in js
+    assert "master.sheet_options.exam_types" in js                  # 機関未選択でも種別を出す
+    assert "optgroup label=\"申込では無効の種別\"" in js
     assert "function hhSheetOptionsNote(master)" in js
     assert js.index("function hhSheetOptionsNote(master)") < js.index("function hhRenderPreview(data)")
     assert "hhExtrasHtml(person, master)" in js
