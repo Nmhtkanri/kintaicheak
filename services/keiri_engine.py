@@ -121,10 +121,31 @@ KYOSHUTSUKIN_BIKO = "子ども・子育て拠出金"
 # B9/実測: 納付ファイルには従業員から預かった分を取り崩す行が品目ごとに1行入る。
 #   金額は労使折半のため会社負担と同額＝**主取引に計上した人の会社負担額を品目別に集計**する
 #   （2026-07 実測で主取引の合計と預り金の合計が完全一致 4,473,085）。
-KENPO_AZUKARI = [("salary_other_items:other15", "健康保険料（預り分）"),
-                 ("salary_other_items:other16", "介護保険料（預り分）"),
+# ①主取引（前月分の会社負担）は**当月明細の本人控除**から読む（2026-09-10）。
+#   jinjer は 会社負担=その月の分／本人控除=前月分（翌月控除）で、標準報酬が給与計算の後に
+#   登録された月（2026-07 は 7/31 に 33 人分が管理者登録）は前月明細の会社負担が旧額のまま
+#   になる。当月明細の本人控除は登録後の値で、経理担当もそちらで計上している
+#   （2026-08 実行分で 33 人が一致）。月変の無い月は会社負担と本人控除は同額。
+#   支援金は API に会社負担側の項目が無いので元から本人控除で読む。
+COMPANY_TO_HONNIN = {
+    "salary_other_items:other15": "salary_deduction_items:deduction29",   # 健康保険料
+    "salary_other_items:other16": "salary_deduction_items:deduction30",   # 介護保険料
+    "salary_other_items:other17": "salary_deduction_items:deduction31",   # 厚生年金保険料
+}
+
+
+def honnin_key(source_key):
+    """マスタ行のキー（会社負担）を、同額の本人控除キーに読み替える。本人控除のキーはそのまま。"""
+    return COMPANY_TO_HONNIN.get(source_key, source_key)
+
+
+# ②預り金の取り崩し＝当月給与で実際に控除した額なので、本人控除のキーで読む（2026-09-10 に
+# 会社負担キー other15/16/17 から変更。月変の無い月は同額。9 月適用の定時決定のように
+# 会社負担（当月分）が先に新額になる月は、控除（前月分）と食い違うため本人控除が正）。
+KENPO_AZUKARI = [("salary_deduction_items:deduction29", "健康保険料（預り分）"),
+                 ("salary_deduction_items:deduction30", "介護保険料（預り分）"),
                  ("salary_deduction_items:child_support", "子ども・子育て支援金（預り分）")]
-KONEN_AZUKARI = [("salary_other_items:other17", "厚生年金保険料（預り分）")]
+KONEN_AZUKARI = [("salary_deduction_items:deduction31", "厚生年金保険料（預り分）")]
 
 # C3: 休職者かつ社保が発生している人は、預り金の行は暫定取引に入れ、仮払金だけを
 #     「1行=1取引」（管理番号・支払期日とも空欄）で末尾に分ける（2026-07-28 経理担当確認）。
@@ -1030,8 +1051,8 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
                 azukari_specs, alerts, kyoshutsukin=False, split_midmonth=True):
     """健保/厚年ファイルの4取引を作る（2026-07-24 実データで構造確定）:
 
-      ① 主取引     発生日=前月末・期日=当月末 … 在籍者の会社負担（法定福利費）
-      ② 預り金     発生日=当月末・期日=当月末 … ①に対応する従業員預り分の取り崩し
+      ① 主取引     発生日=前月末・期日=当月末 … 在籍者の会社負担（法定福利費）。金額は当月明細の本人控除（前月分）から読む
+      ② 預り金     発生日=当月末・期日=当月末 … ①に対応する従業員預り分の取り崩し（当月明細の本人控除）
       ③ 退職者分   発生日=当月末・期日=翌月末 … 当月退職者の翌月分（社保2倍回収の会社負担）
       ④ 退職者預り 発生日=翌月末・期日=翌月末 … ③に対応する預り分
 
@@ -1041,20 +1062,30 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
     prev_end = month_last_day(prev)
     month_end = month_last_day(month)
     next_end = month_last_day(ym_add(month, 1))
+    file_label = {"KEMPO": "健保", "KONEN": "厚年"}.get(kanri, kanri)   # 要確認 md の行に付ける
 
-    def shaho_total(pi, pi_deduction=None):
-        """マスタ行の合算。会社負担の項目（other15/16/17）は pi から読む。
+    def shaho_total(pi):
+        """マスタ行そのまま（会社負担＋支援金）の合算。③退職者分に使う。"""
+        return sum(int(r["amount_sign"]) * pi_value(pi, r["source_key"]) for r in master_rows)
 
-        本人控除の項目（子ども・子育て支援金 child_support。jinjer の API に会社負担側の
-        項目が無く、同額の本人控除で代用している）は pi_deduction から読む。
-        本人控除は翌月控除＝当月明細に前月分が載るので、①主取引（前月分）では
-        会社負担を前月明細から・支援金を当月明細から読んで月を揃える（2026-09-10）。
-        pi_deduction を省くと両方 pi から読む（③退職者分など当月明細×0.5 の経路）。
+    def company_total(pi):
+        """会社負担の項目（other15/16/17）だけの合算。入社判定・後追い登録の検知に使う。"""
+        return sum(int(r["amount_sign"]) * pi_value(pi, r["source_key"])
+                   for r in master_rows if r["source_key"] in COMPANY_TO_HONNIN)
+
+    def honnin_company_total(pi):
+        """会社負担の項目（other15/16/17）だけを本人控除キーに読み替えて合算する。
+        company_total（前月明細）と同じ範囲で比べるための値（支援金を含めない）。"""
+        return sum(int(r["amount_sign"]) * pi_value(pi, honnin_key(r["source_key"]))
+                   for r in master_rows if r["source_key"] in COMPANY_TO_HONNIN)
+
+    def shaho_total_honnin(pi):
+        """同じマスタ行を**本人控除**のキーに読み替えて合算する（①主取引用。COMPANY_TO_HONNIN 参照）。
+
+        当月明細の本人控除＝前月分。標準報酬の後追い登録があっても登録後の値で、
+        経理担当の最終 CSV と一致する（2026-08 実行分の 33 人で確認）。
         """
-        pi_d = pi if pi_deduction is None else pi_deduction
-        return sum(int(r["amount_sign"]) * pi_value(
-            pi_d if r["source_key"].startswith("salary_deduction_items:") else pi, r["source_key"])
-            for r in master_rows)
+        return sum(int(r["amount_sign"]) * pi_value(pi, honnin_key(r["source_key"])) for r in master_rows)
 
     def is_retiree(emp):
         """当月末で退職した人だけが社保2倍回収の対象。
@@ -1068,24 +1099,16 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
         """入社月が対象月（＝前月）の人。
 
         jinjer は入社月の明細に社保を載せない（控除開始が翌月給与のため）が、
-        社保の発生自体は入社月から。最終CSVは翌月＝当月明細の値で入社月分を計上している
+        社保の発生自体は入社月から。①は当月明細の本人控除（＝入社月分）で計上する
         （2026-07 実測: 橘2026012 の 25,175＝7月明細の健保24,566＋子育て609、
           川口2026013 の 13,300＝12,978＋322。厚年 48,495／25,620 も当月明細と一致）。
         """
         return str(ridx.get(emp, {}).get("joined_on") or "")[:7] == prev
 
-    def source_pi(emp):
-        """当月退職者は社保を2倍徴収されているので、当月値の半分を1か月分として使う。
-        入社月の人は前月明細が空なので当月明細を使う。それ以外は前月の値をそのまま使う。"""
-        if is_retiree(emp) and emp in st_m:
-            return st_m[emp], 0.5
-        if (is_new_hire(emp) and emp in st_m
-                and not shaho_total(st_prev[emp]) and shaho_total(st_m[emp])):
-            alerts["shaho_new_hire"].add(
-                (emp, ridx.get(emp, {}).get("name", emp),
-                 str(ridx.get(emp, {}).get("joined_on") or ""), int(shaho_total(st_m[emp]))))
-            return st_m[emp], 1.0
-        return st_prev[emp], 1.0
+    def main_ratio(emp):
+        """①の金額に掛ける比率。当月末退職者は社保を2倍徴収されているので半分を1か月分にする。
+        金額の読み元は経路によらず当月明細の本人控除（shaho_total_honnin）。"""
+        return 0.5 if (is_retiree(emp) and emp in st_m) else 1.0
 
     # ②預り金・拠出金の集計対象（当月給与から控除・負担が発生する人）
     azukari_emps = []
@@ -1099,7 +1122,6 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
 
     # --- ① 主取引（当月も在籍している人。前月末で退職した人は前月のCSVで処理済み）---
     main_rows = []
-    azukari_base = []            # ②の集計対象（①に載せた人）
     for emp in sorted(st_prev):
         if emp not in st_m:
             continue
@@ -1109,12 +1131,27 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
         if is_shaho_menjo_prev(st_prev[emp], st_m[emp]):
             alerts["shaho_menjo"].add((emp, ridx.get(emp, {}).get("name", emp), prev))
             continue          # 育休等で社保免除＝計上しない
-        pi_src, ratio = source_pi(emp)
-        # 会社負担は pi_src（通常は前月明細）、本人控除で代用している支援金は当月明細から
-        total = shaho_total(pi_src, st_m[emp]) * ratio
+        ratio = main_ratio(emp)
+        # ①は当月明細の本人控除（＝前月分）から読む。当月末退職者は 2 倍徴収なので半分。
+        total = shaho_total_honnin(st_m[emp]) * ratio
+        prev_company = company_total(st_prev[emp])
+        cur_honnin = honnin_company_total(st_m[emp]) * ratio      # 同じ範囲（支援金を除く）で比べる
+        if not prev_company and total:
+            # 前月明細に会社負担が無い＝入社月の人（jinjer は入社月の明細に社保を載せない）か、
+            # 資格取得の後追い登録など。どちらも①に載せたうえで要確認 md に出す。
+            kind = "入社月" if is_new_hire(emp) else "後追い（前月明細に会社負担なし）"
+            alerts["shaho_new_hire"].add(
+                (emp, ridx.get(emp, {}).get("name", emp),
+                 str(ridx.get(emp, {}).get("joined_on") or ""), int(total), kind, file_label))
+        elif prev_company and total and ratio == 1.0 and abs(prev_company - cur_honnin) >= 0.5:
+            # 前月明細の会社負担（旧額）と当月明細の本人控除が違う＝標準報酬の後追い登録、
+            # 2か月分控除、徴収漏れなど。金額は変えず一覧に出して人が見る（2026-07 は 33 人）。
+            # 当月末退職者（ratio 0.5）は外す: 退職月に月変があると ×0.5 は 2 か月の平均になり
+            # 前月分そのものと比べられないため。①に載らない人（total 0）も外す。
+            alerts["shaho_prev_diff"].add(
+                (emp, ridx.get(emp, {}).get("name", emp), int(prev_company), int(cur_honnin), file_label))
         if not total:
             continue
-        azukari_base.append((emp, pi_src, ratio))
         name = ridx.get(emp, {}).get("name", emp)
         idou = midmonth_date(resolver.histories, emp, prev) if split_midmonth else None
         if idou:   # ルール9(b): 法定福利費も旧部門／新部門で÷2
@@ -1139,8 +1176,9 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
                                         "本社", SONOTA_HONSHA, KYOSHUTSUKIN_BIKO))
 
     # --- ② 預り金の取り崩し ---
-    # ①（前月分の費用）と違い、**当月給与から控除した分**なので当月(st_m)の値を使う
-    #   （2026-07 実測: 介護 451,260 が7月の other16 と完全一致。6月の値では合わない）。
+    # ①（前月分の費用）と違い、**当月給与から控除した分**なので当月(st_m)の本人控除を使う
+    #   （2026-07 実測: 介護 451,260 が7月明細と完全一致。6月の値では合わない。
+    #     2026-09-10 に会社負担キーから本人控除キーへ変更。月変の無い月は同額）。
     #   当月退職者は2倍徴収されているため、半分は④へ回す。
     azukari_rows = []
     for key, item in azukari_specs:
@@ -1596,14 +1634,25 @@ def build_yokakunin(month, alerts, master):
             lines.append(f"- {emp} {name}（{ym}分）")
     else:
         lines.append("- なし")
-    lines += ["", "## 入社月の社保を当月明細から拾った人", "",
-              "jinjer は入社月の明細に社保を載せない（控除開始が翌月給与のため）が、"
-              "社保の発生自体は入社月から。前月明細がゼロで当月明細に値がある入社月の人は、"
-              "当月明細の値で前月分（健保＝健保＋介護＋子ども子育て支援金／厚年＝厚年）を計上する。", ""]
+    lines += ["", "## 前月分の社保を当月明細の本人控除から拾った人（前月明細に会社負担が無い人）", "",
+              "①主取引は当月明細の本人控除（＝前月分）で計上する。前月明細に会社負担が無いのは、"
+              "入社月の人（jinjer は入社月の明細に社保を載せない）か、資格取得の後追い登録など。"
+              "後追いの行は前月分が本当に発生していたか確認する。", ""]
     if alerts["shaho_new_hire"]:
-        lines += ["| 社員番号 | 氏名 | 入社日 | 会社負担 |", "|---|---|---|---|"]
-        for emp, name, joined, amt in sorted(alerts["shaho_new_hire"]):
-            lines.append(f"| {emp} | {name} | {joined} | {amt:,} |")
+        lines += ["| 社員番号 | 氏名 | 入社日 | 種別 | ファイル | ①に計上した額 |", "|---|---|---|---|---|---|"]
+        for emp, name, joined, amt, kind, fl in sorted(alerts["shaho_new_hire"], key=lambda t: (t[0], t[5])):
+            lines.append(f"| {emp} | {name} | {joined} | {kind} | {fl} | {amt:,} |")
+    else:
+        lines.append("- なし")
+    lines += ["", "## 前月明細の会社負担と当月明細の本人控除が違う人（標準報酬の後追い登録など）", "",
+              "①は当月明細の本人控除で計上している。前月明細の会社負担と違う人は、標準報酬が前月の"
+              "給与計算の後に登録された（2026-07 は 7/31 に 33 人）か、2か月分控除・徴収漏れの可能性。"
+              "金額は変えていないので、後者なら手で直す。", ""]
+    if alerts["shaho_prev_diff"]:
+        lines += ["| 社員番号 | 氏名 | ファイル | 前月明細の会社負担 | 当月明細の本人控除（①に計上。支援金を除く） | 差 |",
+                  "|---|---|---|---|---|---|"]
+        for emp, name, before, after, fl in sorted(alerts["shaho_prev_diff"], key=lambda t: (t[0], t[4])):
+            lines.append(f"| {emp} | {name} | {fl} | {before:,} | {after:,} | {after - before:+,} |")
     else:
         lines.append("- なし")
     lines += ["", "## 社保調整の品目別分割（実施済み）", "",
@@ -1710,7 +1759,8 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
               "tatekae_skip": set(), "split_done": set(),
               "retiree": set(), "shaho_menjo": set(), "juminzei_shokai": set(),
               "juminzei_soosai": set(), "karibarai": set(),
-              "shaho_chosei_split": set(), "shaho_new_hire": set(), "watch_used": set(),
+              "shaho_chosei_split": set(), "shaho_new_hire": set(), "shaho_prev_diff": set(),
+              "watch_used": set(),
               "ikusei_maybe": set()}
     resolver = Resolver(histories, alerts, ridx)
 
