@@ -183,14 +183,14 @@ class YokakuninShahoSectionsTests(unittest.TestCase):
         alerts = defaultdict(set)
         alerts["shaho_new_hire"].add(("2026020", "社員2026020", "2026-07-01", 13944, "入社月", "健保"))
         alerts["shaho_prev_diff"].add(("2011001", "社員2011001", 20000, 22000, "健保"))
-        md = build_yokakunin("2026-08", alerts, {})
+        md = chr(10).join(build_yokakunin("2026-08", alerts, {}))   # 行のリストを返す
         self.assertIn("## 前月分の社保を当月明細の本人控除から拾った人", md)
         self.assertIn("| 2026020 | 社員2026020 | 2026-07-01 | 入社月 | 健保 | 13,944 |", md)
         self.assertIn("## 前月明細の会社負担と当月明細の本人控除が違う人", md)
         self.assertIn("| 2011001 | 社員2011001 | 健保 | 20,000 | 22,000 | +2,000 |", md)
 
     def test_sections_say_none_when_empty(self):
-        md = build_yokakunin("2026-08", defaultdict(set), {})
+        md = chr(10).join(build_yokakunin("2026-08", defaultdict(set), {}))
         i = md.index("## 前月明細の会社負担と当月明細の本人控除が違う人")
         self.assertIn("- なし", md[i:i + 400])
 
