@@ -314,19 +314,23 @@ function doGet(e) {
   } catch (error) {
     return simplePage_('現在は申込を受け付けていません', `設定が整っていません。健康診断担当者へご連絡ください。<br><small>${escapeHtml_(error.message)}</small>`);
   }
-  const target = findTargetByHash_(token ? hashToken_(token) : '');
+  const options = readOptions_();
+  // トークン無し（設定シートの WebアプリURL をそのまま開いた）か ?demo=1 は、説明用のサンプル画面（個人情報なし・送信不可）
+  const demo = !token || cleanText_(e && e.parameter ? e.parameter.demo : '') === '1';
+  const target = demo ? demoTarget_(e && e.parameter ? e.parameter : {}, options) : findTargetByHash_(hashToken_(token));
   if (!target) {
     return simplePage_('申込URLが無効です', '健康診断担当者へご連絡ください。<br>Invalid application link. Please contact the administrator.');
   }
-  if (!isAccepting_(kv, new Date())) {
+  if (!demo && !isAccepting_(kv, new Date())) {
     return simplePage_('受付期間外です', `受付期間は ${escapeHtml_(kv['受付開始'])} 〜 ${escapeHtml_(kv['受付終了'])} です。健康診断担当者へご連絡ください。`);
   }
-  try {
-    recordFirstAccess_(target);
-  } catch (error) {
-    console.error(`初回アクセス日時を記録できませんでした: ${error}`);
+  if (!demo) {
+    try {
+      recordFirstAccess_(target);
+    } catch (error) {
+      console.error(`初回アクセス日時を記録できませんでした: ${error}`);
+    }
   }
-  const options = readOptions_();
   const template = HtmlService.createTemplateFromFile('Index');
   template.token = token;
   template.settings = kv;
@@ -344,10 +348,36 @@ function doGet(e) {
     extras: activeOptions_(options, KIND.extra),
     relationships: activeOptions_(options, KIND.relationship),
   };
-  template.canAnswer = [STATUS.sent, STATUS.reanswer].includes(template.employee.status);
+  template.demo = demo;
+  template.canAnswer = demo || [STATUS.sent, STATUS.reanswer].includes(template.employee.status);
   return template.evaluate()
     .setTitle(`${kv['年度']}年度 健康診断申込`)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * 説明用のサンプル対象者（架空。シートには無い）。URL のパラメータで見せ方を変えられる:
+ *   age=34|40（年度末年齢。既定 34）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
+ */
+function demoTarget_(params, options) {
+  const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '34';
+  const prev = ['same', 'other', 'none'].includes(cleanText_(params.prev)) ? cleanText_(params.prev) : 'same';
+  const target = { rowNumber: 0 };
+  TARGET_HEADERS.forEach((h) => { target[h] = ''; });
+  Object.assign(target, {
+    '年度': '', '社員番号': '2099999', '氏名': 'サンプル 太郎', '社用メール': 'sample.taro@nmht.co.jp', '在籍区分': '0',
+    '年度末年齢': age, '申込状態': STATUS.sent, '前年度情報元': SOURCE_NONE,
+  });
+  if (prev !== 'none') {
+    const code = prev === 'other' ? '130192' : '1311337070';
+    const inst = optionByCode_(options, KIND.institution, code, false);
+    Object.assign(target, {
+      '前年度情報元': '履歴', '前年度健診機関コード': code,
+      '前年度健診機関名': inst ? inst.name : (prev === 'other' ? '東京品川病院 総合健診センター' : 'MYメディカルクリニック 渋谷'),
+      '前年度健診種別コード': EXAM_TYPE_REGULAR, '前年度健診種別名': '定期健康診断', '前年度追加検査': 'GYN',
+    });
+  }
+  return target;
 }
 
 function simplePage_(title, bodyHtml) {

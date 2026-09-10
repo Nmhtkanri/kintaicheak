@@ -357,3 +357,28 @@ def test_index_has_no_clinic_filter_and_shows_self_booking_notice():
     assert html.count("ご自身でご予約をお願いいたします。") >= 3 and "ご自分で予約" not in html       # 前年度ブロック・前年度と同じ・その他
     assert "previous.extraNames" in html and "previous.extraCodes.join" not in html
     assert 'name="sameClinicName"' in html and 'name="samePlannedDate"' in html
+
+
+# --- 説明用のサンプル画面（トークン無し / ?demo=1） -----------------------------------------------
+
+def test_demo_target_variants_have_no_real_person():
+    scenario = ("(() => { const o = readOptions_(); const pick = (t) => ({id: t['社員番号'], age: t['年度末年齢'], src: t['前年度情報元'],"
+                " inst: t['前年度健診機関コード'], name: t['前年度健診機関名'], status: t['申込状態'], row: t.rowNumber});"
+                " return {d: pick(demoTarget_({}, o)), a40: pick(demoTarget_({age: '40'}, o)), other: pick(demoTarget_({prev: 'other'}, o)),"
+                " none: pick(demoTarget_({prev: 'none'}, o)), junk: pick(demoTarget_({age: 'abc', prev: 'x'}, o))}; })()")
+    r = run_gas(workbook(), scenario)["result"]
+    assert r["d"] == {"id": "2099999", "age": "34", "src": "履歴", "inst": "1311337070", "name": "MYメディカルクリニック 渋谷", "status": S.STATUS_SENT, "row": 0} \
+        or (r["d"]["id"], r["d"]["age"], r["d"]["src"], r["d"]["inst"], r["d"]["row"]) == ("2099999", "34", "履歴", "1311337070", 0)
+    assert r["a40"]["age"] == "40"
+    assert r["other"]["inst"] == "130192" and r["other"]["name"] == "東京品川病院 総合健診センター"
+    assert r["none"]["src"] == S.SOURCE_NONE and r["none"]["inst"] == ""
+    assert r["junk"]["age"] == "34" and r["junk"]["inst"] == "1311337070"     # 変な値は既定に戻す
+
+
+def test_demo_page_never_submits():
+    html = (CODE.parent / "Index.html").read_text(encoding="utf-8")
+    assert "demo-banner" in html and "これは説明用のサンプル画面です" in html
+    assert "if(demo){message.textContent='サンプル画面のため送信できません。';return;}" in html
+    src = CODE.read_text(encoding="utf-8")
+    assert "const demo = !token || cleanText_(e && e.parameter ? e.parameter.demo : '') === '1';" in src
+    assert "if (!demo) {\n    try {\n      recordFirstAccess_(target);" in src          # サンプルでは初回アクセスを記録しない
