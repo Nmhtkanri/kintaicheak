@@ -139,6 +139,9 @@ class Config:
     # 画面から追記するが、共有フォルダに置くので Excel で直接直しても次回実行から効く。
     KEIRI_SONOTA_MANUAL_CSV = os.environ.get(
         "KEIRI_SONOTA_MANUAL_CSV", r"Z:\API連携\docs\経理モード_その他手入力.csv")
+    # 賞与の社保料率（適用開始年月, 健保率, 介護率, 支援金率, 厚年率）。無ければ services/keiri_bonus.py の既定値
+    KEIRI_BONUS_RATES_CSV = os.environ.get(
+        "KEIRI_BONUS_RATES_CSV", r"Z:\API連携\docs\経理モード_賞与料率.csv")
     KEIRI_KEIHI_MAPPING_CSV = os.environ.get(
         "KEIRI_KEIHI_MAPPING_CSV", r"Z:\API連携\docs\経理モード_経費転記マッピング_draftD.csv")
     # 「対象外(全期間ゼロ)」のはずの項目に金額を検知したとき、freee CSV の生成を止めるか。

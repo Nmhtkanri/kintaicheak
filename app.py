@@ -3039,6 +3039,79 @@ def route_keiri_run():
     return jsonify(payload)
 
 
+KEIRI_BONUS_LABEL_RE = re.compile(r"^[0-9A-Za-z\u3040-\u30ff\u4e00-\u9fff（）・ー]{1,30}$")
+
+
+@app.route("/keiri_bonus_run", methods=["POST"])
+def route_keiri_bonus_run():
+    """賞与の freee 取引インポート CSV（支給／健康保険／厚生年金）を作る（2026-09-10）。
+
+    multipart: month（yyyy-MM）, label（FE部賞与 など。ファイル名になる）, hassei（支給ファイルの発生日 yyyy-MM-dd）,
+               shaho_hassei / shaho_kigen（任意）, refresh_custom（"1" で部門・人件費区分を取り直す）,
+               file（jinjer の賞与支給控除項目一覧表 CSV）
+    出力は outputs/keiri/{YYYYMM}/ に置くので、ダウンロードは /keiri_download/<ym>/<filename> をそのまま使う。
+    """
+    from services.keiri_bonus import generate_bonus
+
+    month = (request.form.get("month") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify({"success": False, "errors": ["支給月は YYYY-MM 形式で指定してください"]}), 400
+    label = (request.form.get("label") or "").strip()
+    if not KEIRI_BONUS_LABEL_RE.fullmatch(label):
+        return jsonify({"success": False,
+                        "errors": ["賞与の種類（ファイル名）は 30 文字以内で、記号は（）・ー だけにしてください"]}), 400
+    if "賞与" not in label:
+        # 給与側の最終CSV突合（keiri_diff）はファイル名の「賞与」で賞与ファイルを除外している
+        return jsonify({"success": False,
+                        "errors": ["賞与の種類には「賞与」を含めてください（例: FE部賞与）。月次の突合と取り違えないためです"]}), 400
+    hassei = (request.form.get("hassei") or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", hassei):
+        return jsonify({"success": False, "errors": ["支給ファイルの発生日を YYYY-MM-DD で指定してください"]}), 400
+    optional = {}
+    for key in ("shaho_hassei", "shaho_kigen"):
+        v = (request.form.get(key) or "").strip()
+        if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            return jsonify({"success": False, "errors": [f"{key} は YYYY-MM-DD で指定してください"]}), 400
+        optional[key] = v or None
+    up = request.files.get("file")
+    if up is None or not up.filename:
+        return jsonify({"success": False, "errors": ["賞与 CSV（jinjer の賞与支給控除項目一覧表）を選んでください"]}), 400
+    raw = up.read()
+    if not raw:
+        return jsonify({"success": False, "errors": ["賞与 CSV が空です"]}), 400
+    refresh = (request.form.get("refresh_custom") or "") == "1"
+    client = None
+    if refresh:
+        from services.keiri_api import get_client
+        try:
+            client = get_client()
+        except Exception as e:
+            return jsonify({"success": False, "errors": [f"jinjer API に接続できません: {e}"]}), 500
+    try:
+        result = generate_bonus(month, raw, label, hassei, client=client, refresh=refresh,
+                                shaho_hassei=optional["shaho_hassei"], shaho_kigen=optional["shaho_kigen"])
+    except ValueError as e:
+        return jsonify({"success": False, "errors": [str(e)]}), 400
+    except Exception as e:
+        logger.exception("keiri_bonus_run failed")
+        return jsonify({"success": False, "errors": [f"生成に失敗しました: {e}"]}), 500
+    # 監査用に入力 CSV の写しを残す（成功したときだけ。uploads は 7 日で掃除される）
+    keep = os.path.join(Config.UPLOAD_FOLDER, f"bonus_{month.replace('-', '')}_{label}_{uuid.uuid4().hex}.csv")
+    try:
+        with open(keep, "wb") as f:
+            f.write(raw)
+    except OSError:
+        keep = ""
+    files = [{"種別": kind, "filename": info["name"], "取引数": info["transactions"], "行数": info["rows"],
+              "金額合計": info["total"]} for kind, info in result["files"].items()]
+    logger.info("keiri bonus generated: %s %s people=%d out=%s", month, label, result["people"], result["out_dir"])
+    return jsonify({"success": True, "month": month, "ym": month.replace("-", ""), "label": label,
+                    "hassei": hassei, "people": result["people"], "files": files,
+                    "out_dir": result["out_dir"], "rates_src": result["rates_src"],
+                    "yokakunin_md": result["yokakunin_md"], "alerts": result["alerts"], "input_copy": keep,
+                    "overwritten": result.get("overwritten", [])})
+
+
 @app.route("/keiri_sonota_save", methods=["POST"])
 def route_keiri_sonota_save():
     """「その他」の手入力を台帳CSVへ保存する（同じ支給月・社員番号は置き換え）。
@@ -3047,9 +3120,12 @@ def route_keiri_sonota_save():
     台帳は共有フォルダなので、Excel で開いたままだと書けずにエラーになる。
 
     JSON: {"month": "2026-08",
-           "entries": [{"社員番号","氏名","金額","勘定科目","品目","税区分","備考"}, ...]}
+           "entries": [{"社員番号","氏名","金額","勘定科目","品目","税区分","備考",
+                        "明細金額"(任意: jinjer の「その他」の金額)}, ...]}
+    同じ社員番号の行が複数あってよい（1 人を複数の科目に割る）。「明細金額」が付いていれば、
+    その人の行の金額合計が一致しないときは 1 行も保存しない（合計が違うと仕訳に載らないため）。
     """
-    from services.keiri_engine import save_sonota_manual
+    from services.keiri_engine import save_sonota_manual, to_number
 
     data = request.get_json(silent=True) or {}
     month = str(data.get("month") or "").strip()
@@ -3063,6 +3139,32 @@ def route_keiri_sonota_save():
     if not entries:
         return jsonify({"success": False,
                         "errors": ["保存する行がありません（科目を1件以上入力してください）"]}), 400
+    # 1 人の行の金額合計 ＝ jinjer の「その他」の金額 でなければ保存しない
+    sum_errors = []
+    by_emp = {}
+    for e in entries:
+        by_emp.setdefault(str(e.get("社員番号") or "").strip(), []).append(e)
+    for emp, rows in by_emp.items():
+        name = str(rows[0].get("氏名") or "")
+        targets = {to_number(r.get("明細金額")) for r in rows if str(r.get("明細金額") or "").strip() != ""}
+        if not targets:
+            continue                      # 画面以外からの呼び出し（明細金額なし）は台帳側の一致判定に任せる
+        if len(targets) != 1 or None in targets or len(targets) != len(rows) and any(
+                str(r.get("明細金額") or "").strip() == "" for r in rows):
+            sum_errors.append(f"{emp} {name}: 行ごとの jinjer 金額（明細金額）が揃っていません。画面を作り直してください")
+            continue
+        target = targets.pop()
+        amounts = [to_number(r.get("金額")) for r in rows]
+        if any(a is None for a in amounts):
+            continue                      # 数値でない金額は save_sonota_manual が弾く
+        if any(abs(a - round(a)) >= 1e-9 for a in amounts):
+            sum_errors.append(f"{emp} {name}: 金額は整数（円）で入れてください")
+            continue
+        if abs(sum(amounts) - target) >= 0.5:
+            sum_errors.append(f"{emp} {name}: 行の金額の合計 {int(sum(amounts)):,} が"
+                              f" jinjer の金額 {int(target):,} と違います（分けた行の合計を合わせてください）")
+    if sum_errors:
+        return jsonify({"success": False, "errors": sum_errors}), 400
     try:
         path = save_sonota_manual(entries)
     except ValueError as e:

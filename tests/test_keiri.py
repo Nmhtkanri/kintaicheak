@@ -608,8 +608,9 @@ class SonotaManualTests(unittest.TestCase):
     def test_save_then_load_round_trip(self):
         save_sonota_manual([self._entry()], self.ledger)
         loaded = load_sonota_manual(self.ledger)
-        self.assertEqual(loaded[("2026-08", "2024047")]["勘定科目"], "支払手数料")
-        self.assertEqual(loaded[("2026-08", "2024047")]["金額"], "33000")
+        self.assertEqual(len(loaded[("2026-08", "2024047")]), 1)
+        self.assertEqual(loaded[("2026-08", "2024047")][0]["勘定科目"], "支払手数料")
+        self.assertEqual(loaded[("2026-08", "2024047")][0]["金額"], "33000")
 
     def test_same_month_and_employee_is_replaced_not_duplicated(self):
         save_sonota_manual([self._entry()], self.ledger)
@@ -617,7 +618,46 @@ class SonotaManualTests(unittest.TestCase):
         save_sonota_manual([updated], self.ledger)
         loaded = load_sonota_manual(self.ledger)
         self.assertEqual(len(loaded), 1)
-        self.assertEqual(loaded[("2026-08", "2024047")]["備考"], "直した")
+        self.assertEqual(len(loaded[("2026-08", "2024047")]), 1)
+        self.assertEqual(loaded[("2026-08", "2024047")][0]["備考"], "直した")
+
+    def test_split_rows_replace_together_and_journal_per_row(self):
+        """＋で分けた 2 行（20,000＋13,000）は台帳にまとめて置き換わり、仕訳も 2 行になる。"""
+        save_sonota_manual([self._entry()], self.ledger)                       # まず 1 行
+        rows = [dict(self._entry(20000), 品目="雑費"),
+                dict(self._entry(13000), 勘定科目="福利厚生費", 品目="福利厚生費", 備考="有給買取")]
+        save_sonota_manual(rows, self.ledger)                                  # 2 行に置き換え
+        loaded = load_sonota_manual(self.ledger)
+        self.assertEqual([r["金額"] for r in loaded[("2026-08", "2024047")]], ["20000", "13000"])
+        tx, alerts = self._run(33000, loaded)
+        jisseki = [t for t in tx if t["発生日"] == "2026/7/31"][0]
+        got = [(r["勘定科目"], r["品目"], r["金額"], r["備考"]) for r in jisseki["rows"]
+               if r["従業員"] == "能美 龍郎" and r["勘定科目"] in ("支払手数料", "福利厚生費")]
+        self.assertEqual(got, [("支払手数料", "雑費", 20000, "保証委託契約時事務手数料"),
+                               ("福利厚生費", "福利厚生費", 13000, "有給買取")])
+        self.assertEqual(len(alerts["keihi_manual"]), 2)
+        self.assertFalse(alerts["keihi_tenki"])
+
+    def test_blank_amount_in_one_of_split_rows_falls_back_to_pending(self):
+        """台帳を Excel で手編集して 1 行の金額が空欄になった月は、その人は 1 行も載せず要確認へ。"""
+        manual = {("2026-08", "2024047"): [self._entry(20000), dict(self._entry(13000), 金額="")]}
+        tx, alerts = self._run(33000, manual)
+        self.assertEqual({(e, ledger) for e, _n, _v, ledger in alerts["keihi_manual_mismatch"]}, {("2024047", None)})
+        self.assertFalse(alerts["keihi_manual"])
+
+    def test_zero_or_fractional_amount_is_rejected_on_save(self):
+        with self.assertRaises(ValueError):
+            save_sonota_manual([self._entry(0)], self.ledger)
+        with self.assertRaises(ValueError):
+            save_sonota_manual([self._entry(0.5)], self.ledger)
+        self.assertFalse(os.path.exists(self.ledger))
+
+    def test_split_rows_whose_total_differs_fall_back_to_pending(self):
+        """分けた行の合計（30,000）が jinjer（33,000）と違えば 1 行も載せず要確認へ。"""
+        manual = {("2026-08", "2024047"): [self._entry(20000), self._entry(10000)]}
+        tx, alerts = self._run(33000, manual)
+        self.assertEqual({e for e, *_ in alerts["keihi_manual_mismatch"]}, {"2024047"})
+        self.assertFalse(alerts["keihi_manual"])
 
     def test_missing_required_column_writes_nothing(self):
         """勘定科目・品目・税区分のどれかが空なら1行も書かない（必須ガード）。"""
@@ -626,7 +666,7 @@ class SonotaManualTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.ledger))
 
     def test_ledger_row_becomes_a_journal_row(self):
-        manual = {("2026-08", "2024047"): self._entry()}
+        manual = {("2026-08", "2024047"): [self._entry()]}
         tx, alerts = self._run(33000, manual)
         jisseki = [t for t in tx if t["発生日"] == "2026/7/31"][0]
         row = [r for r in jisseki["rows"] if r["勘定科目"] == "支払手数料"][0]
@@ -637,7 +677,7 @@ class SonotaManualTests(unittest.TestCase):
 
     def test_amount_change_falls_back_to_pending(self):
         """台帳の金額と jinjer がズレたら計上せず要確認へ戻す（中身が別物の可能性）。"""
-        manual = {("2026-08", "2024047"): self._entry(33000)}
+        manual = {("2026-08", "2024047"): [self._entry(33000)]}
         tx, alerts = self._run(46860, manual)
         rows = [r for t in tx for r in t["rows"]]
         self.assertEqual([r for r in rows if r["勘定科目"] == "支払手数料"], [])

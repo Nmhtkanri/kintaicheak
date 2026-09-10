@@ -29,6 +29,7 @@ import io
 import json
 import logging
 import os
+import re
 from collections import Counter, defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -607,6 +608,14 @@ class Resolver:
 # ---------------------------------------------------------------------------
 # 行・取引の構築
 # ---------------------------------------------------------------------------
+def _alert_add(container, item):
+    """alerts の入れ物が list なら append、set なら add（keihi_manual は行単位なので list が正）。"""
+    if isinstance(container, list):
+        container.append(item)
+    else:
+        container.add(item)
+
+
 def detail_row(account, tax, amount, item, bumon, name, biko=""):
     return {"勘定科目": account, "税区分": tax, "金額": int(round(amount)),
             "税計算区分": "内税", "税額": "", "備考": biko, "品目": item, "部門": bumon,
@@ -688,10 +697,11 @@ def _txt(v):
 
 
 def load_sonota_manual(path=None):
-    """「その他」の手入力台帳を {(支給月, 社員番号): 行dict} で読む。
+    """「その他」の手入力台帳を {(支給月, 社員番号): [行dict, ...]} で読む。
 
-    同じ支給月・社員番号の行が複数あるときは**最後の行**を採る（画面からは追記するため、
-    後ろの行ほど新しい）。ファイルが無ければ空を返す＝台帳を使わなくても従来どおり動く。
+    2026-09-10 から同じ支給月・社員番号に**複数行**を持てる（画面の＋で行を分け、
+    1 つの「その他」を複数の科目に割る）。行の順はファイル順。
+    ファイルが無ければ空を返す＝台帳を使わなくても従来どおり動く。
     """
     path = path or Config.KEIRI_SONOTA_MANUAL_CSV
     if not path or not os.path.exists(path):
@@ -709,12 +719,32 @@ def load_sonota_manual(path=None):
     for r in rows:
         ym, emp = _txt(r.get("支給月")), _txt(r.get("社員番号"))
         if ym and emp:
-            out[(ym, emp)] = {c: _txt(r.get(c)) for c in SONOTA_MANUAL_COLS}
+            out.setdefault((ym, emp), []).append({c: _txt(r.get(c)) for c in SONOTA_MANUAL_COLS})
     return out
 
 
+def sonota_manual_bad_months(ledger):
+    """台帳の支給月が YYYY-MM でない行（Excel で開いて保存すると 'Aug-26' 等に化けて効かなくなる）。"""
+    return sorted({(ym, emp, rows[0].get("氏名", "")) for (ym, emp), rows in ledger.items()
+                   if not re.fullmatch(r"\d{4}-\d{2}", ym)})
+
+
+def sonota_manual_total(rows):
+    """台帳の行リストの金額合計（数値でない行があれば None）。"""
+    total = 0
+    for r in rows or []:
+        n = to_number(r.get("金額"))
+        if n is None:
+            return None
+        total += n
+    return total
+
+
 def save_sonota_manual(entries, path=None):
-    """画面で入力した行を台帳へ書く（同じ支給月・社員番号は置き換え）。
+    """画面で入力した行を台帳へ書く（同じ支給月・社員番号の行は**まとめて**置き換え）。
+
+    1 人を複数行に分けたときは、その人の行を全部渡す。渡した人の既存行は消えて
+    今回の行だけになる。渡していない人の行は触らない。
 
     勘定科目・品目・税区分のどれかが空、または金額が数値でない行があるときは
     **1行も書かずに ValueError** にする（中途半端な台帳から変な仕訳が出るのを防ぐ）。
@@ -730,20 +760,34 @@ def save_sonota_manual(entries, path=None):
         if missing:
             raise ValueError(f"{row['社員番号']} {row['氏名']}: "
                              f"{'・'.join(missing)} が空欄です（3つとも埋めてください）")
-        if to_number(row["金額"]) is None:
+        amt = to_number(row["金額"])
+        if amt is None:
             raise ValueError(f"{row['社員番号']} {row['氏名']}: 金額が数値ではありません")
+        if abs(amt - round(amt)) >= 1e-9:
+            raise ValueError(f"{row['社員番号']} {row['氏名']}: 金額は整数（円）で入れてください")
+        if not amt:
+            raise ValueError(f"{row['社員番号']} {row['氏名']}: 金額が 0 の行があります（＋で増やした行に金額を入れるか、−で消してください）")
         cleaned.append(row)
     if not cleaned:
         return path
     ledger = load_sonota_manual(path)
+    replaced = set()
     for row in cleaned:
-        ledger[(row["支給月"], row["社員番号"])] = row
+        key = (row["支給月"], row["社員番号"])
+        if key not in replaced:
+            ledger[key] = []            # 渡された人の既存行はまとめて置き換える
+            replaced.add(key)
+        ledger[key].append(row)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+    # 共有フォルダの台帳を全書き換えするので、一時ファイルに書いてから差し替える（途中で落ちても壊れない）
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=SONOTA_MANUAL_COLS)
         w.writeheader()
         for key in sorted(ledger):
-            w.writerow(ledger[key])
+            for row in ledger[key]:
+                w.writerow(row)
+    os.replace(tmp, path)
     return path
 
 
@@ -894,16 +938,24 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
                 # マクロに明細が無い（＝jinjer へ手入力された分）は台帳を見る。
                 # 金額が変わっていたら台帳を信用せず要確認へ戻す（前月の入力が残っていても
                 # 中身が別物のことがあるため。2026-08 柳場2026010 の 46,860 が実例）。
-                manual = (sonota_manual or {}).get((month, emp))
-                if manual:
-                    ledger_amt = to_number(manual.get("金額"))
+                manual_rows = (sonota_manual or {}).get((month, emp)) or []
+                if manual_rows:
+                    # 台帳の行の**合計**が jinjer の金額と一致するときだけ、行ごとに仕訳にする
+                    # （1 人を複数の科目に割れる。2026-09-10）
+                    ledger_amt = sonota_manual_total(manual_rows)
                     if ledger_amt is not None and abs(ledger_amt - v) < 0.5:
-                        others.append(detail_row(manual["勘定科目"], manual["税区分"], v,
-                                                 manual["品目"], bumon_p, name,
-                                                 manual.get("備考", "")))
-                        alerts["keihi_manual"].add((emp, name, int(v), manual["勘定科目"],
-                                                    manual["品目"], manual["税区分"],
-                                                    manual.get("備考", "")))
+                        for manual in manual_rows:
+                            amt = to_number(manual.get("金額"))
+                            if not amt:
+                                continue
+                            others.append(detail_row(manual["勘定科目"], manual["税区分"], amt,
+                                                     manual["品目"], bumon_p, name,
+                                                     manual.get("備考", "")))
+                            # 同額・同内容に分けた行が set で潰れて md の合計が減らないよう list
+                            # （generate() は list で初期化。テスト等が set を渡しても動くようにする）
+                            _alert_add(alerts["keihi_manual"], (emp, name, int(amt), manual["勘定科目"],
+                                                                manual["品目"], manual["税区分"],
+                                                                manual.get("備考", "")))
                         continue
                     alerts["keihi_manual_mismatch"].add(
                         (emp, name, int(v), int(ledger_amt) if ledger_amt is not None else None))
@@ -1522,6 +1574,14 @@ def build_yokakunin(month, alerts, master):
         lines.append(f"| **合計** | | **{total:,}** | | | | |")
     else:
         lines.append("- なし")
+    lines += ["", "## ⚠️ 手入力台帳の支給月が YYYY-MM でない行（台帳が効いていない）", "",
+              "Excel で台帳を開いて保存すると支給月が日付に化ける（例 Aug-26）。その行はどの月にも"
+              "一致せず黙って無効になる。台帳を直すこと（`Z:\\API連携\\docs\\経理モード_その他手入力.csv`）。", ""]
+    if alerts["sonota_ledger_bad_month"]:
+        for ym, emp, name in sorted(alerts["sonota_ledger_bad_month"]):
+            lines.append(f"- 支給月「{ym}」 {emp} {name}")
+    else:
+        lines.append("- なし")
     lines += ["", "## ⚠️ 経費転記で分解できず計上しなかった人（手で追加が必要）", "",
               "明細の合計が jinjer の「その他」と一致しないため、行を作っていない。"
               "前月分をまとめて計上した／マクロ側に重複行がある／経費申請ではなく手入力した、"
@@ -1755,7 +1815,7 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
               "new_usage": set(), "mishunyukin": set(), "biko_needed": set(),
               "genbutsu": set(), "kyushoku": set(), "loan_mismatch": set(),
               "keihi_tenki": set(), "keihi_bunkai": [], "keihi_book_missing": set(),
-              "keihi_manual": set(), "keihi_manual_mismatch": set(),
+              "keihi_manual": [], "keihi_manual_mismatch": set(), "sonota_ledger_bad_month": set(),
               "tatekae_skip": set(), "split_done": set(),
               "retiree": set(), "shaho_menjo": set(), "juminzei_shokai": set(),
               "juminzei_soosai": set(), "karibarai": set(),
@@ -1782,6 +1842,8 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
 
     # 「その他」のうちマクロに明細が無い分を画面で入れた台帳（無ければ従来どおり要確認へ）
     sonota_manual = load_sonota_manual(sonota_manual_csv)
+    for bad in sonota_manual_bad_months(sonota_manual):
+        alerts["sonota_ledger_bad_month"].add(bad)
 
     detect_juminzei_shokai(st_m, st_prev, ridx, alerts)
     prev_juminzei = load_prev_juminzei(prev, out_base, final_dir=final_csv_dir)

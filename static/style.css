@@ -1584,3 +1584,6 @@ details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
 .tpl-combo-time { color: #2980b9; font-variant-numeric: tabular-nums; }
 .tpl-combo-id { color: #999; margin-left: auto; padding-left: 12px; }
 .tpl-combo-empty { padding: 8px 10px; color: #999; }
+
+/* 経理モード「その他」手入力の ＋／− ボタン（2026-09-10） */
+#keiri-sonota-rows .btn-sm { padding: 2px 8px; font-size: 12px; line-height: 1.2; }

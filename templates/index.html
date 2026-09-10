@@ -623,6 +623,12 @@
             </div>
         </div>
 
+        <!-- 給与／賞与の切替（健康診断モードの項目切替と同じ作り）。中身は消さないので行き来しても結果は残る -->
+        <div class="health-subtabs" id="keiri-subtabs">
+            <button type="button" class="health-subtab is-active" data-keiri-sub="salary">給与（月次の4CSV）</button>
+            <button type="button" class="health-subtab" data-keiri-sub="bonus">賞与（支給・健保・厚年）</button>
+        </div>
+        <div id="keiri-salary-pane">
         <div class="fields">
             <label class="field field-inline">
                 <span class="field-label">支給月 <span class="tag tag-req">必須</span></span>
@@ -713,6 +719,7 @@
                     経費一覧表マクロに明細が無い分（jinjer へ直接入力された有給買取・事務手数料など）です。
                     勘定科目・品目・税区分を入れて「台帳に保存して作り直す」を押すと、その科目で仕訳に入ります。
                     入力は支給月ごとに台帳へ残るので、同じ月をやり直しても入れ直しは不要です。
+                    1 つの金額に複数の科目が混ざっているときは「＋」で行を増やして金額を分けます（合計は jinjer の金額と一致させる）。「−」で行を消せます（消しても台帳の前回分は残ります。保留のまま次に進めたいときにお使いください）。
                     <span id="keiri-sonota-path" style="display:block; margin-top:2px; opacity:.8"></span>
                 </div>
                 <div id="keiri-sonota-rows"></div>
@@ -731,6 +738,76 @@
             <div id="keiri-pane-kensan" class="keiri-pane md-view" style="display:none"></div>
             <div id="keiri-pane-diff" class="keiri-pane md-view" style="display:none"></div>
         </div>
+        </div><!-- /keiri-salary-pane -->
+
+        <!-- 賞与: jinjer の「賞与支給控除項目一覧表」CSV → 支給／健康保険／厚生年金 の3CSV（2026-09-10） -->
+        <div id="keiri-bonus-pane" style="display:none">
+            <div class="fields">
+                <label class="field field-inline">
+                    <span class="field-label">支給月 <span class="tag tag-req">必須</span></span>
+                    <input type="text" id="keiri-bonus-month" placeholder="2026-09" style="width:150px">
+                    <span class="field-sub">ファイル名と、社保ファイルの発生日（月末）・支払期日（翌月末）に使います</span>
+                </label>
+                <label class="field field-inline">
+                    <span class="field-label">賞与の種類 <span class="tag tag-req">必須</span></span>
+                    <select id="keiri-bonus-label" style="width:180px">
+                        <option value="FE部賞与">FE部賞与</option>
+                        <option value="本社賞与">本社賞与</option>
+                        <option value="決算賞与">決算賞与</option>
+                        <option value="__other__">その他（右に入力）</option>
+                    </select>
+                    <input type="text" id="keiri-bonus-label-other" placeholder="例: 特別賞与" style="width:160px; display:none">
+                    <span class="field-sub">ファイル名になります（例: freee_data_FE部賞与（202609）.csv）</span>
+                </label>
+                <label class="field field-inline">
+                    <span class="field-label">支給ファイルの発生日 <span class="tag tag-req">必須</span></span>
+                    <input type="date" id="keiri-bonus-hassei" style="width:170px">
+                    <span class="field-sub">経理担当の実績: 9月は 9/15、6月は 6/15、決算賞与は 3/31。支払期日は CSV の支給日を使います</span>
+                </label>
+                <label class="field field-inline">
+                    <span class="field-label">賞与 CSV <span class="tag tag-req">必須</span></span>
+                    <input type="file" id="keiri-bonus-file" accept=".csv">
+                    <span class="field-sub">jinjer → 賞与計算 → 賞与支給控除項目一覧表（項目を絞らずに出力。cp932）</span>
+                </label>
+                <div class="field">
+                    <span class="field-label">あわせて行うこと</span>
+                    <div class="check-row">
+                        <label><input type="checkbox" id="keiri-bonus-refresh-custom"> 部門・人件費区分を取り直す</label>
+                    </div>
+                </div>
+            </div>
+            <details class="more" style="margin-top:12px">
+                <summary>社保ファイルの日付を変える／計算の決まり</summary>
+                <div class="more-body">
+                    <label class="field field-inline">
+                        <span class="field-label">社保ファイルの発生日</span>
+                        <input type="date" id="keiri-bonus-shaho-hassei" style="width:170px">
+                        <span class="field-sub">空欄なら支給月の月末</span>
+                    </label>
+                    <label class="field field-inline">
+                        <span class="field-label">社保ファイルの支払期日</span>
+                        <input type="date" id="keiri-bonus-shaho-kigen" style="width:170px">
+                        <span class="field-sub">空欄なら翌月末</span>
+                    </label>
+                    <p>賞与手当＝総支給額。預り金は本人控除の各列（厚年・健保・雇用・源泉・介護・支援金）。
+                       会社負担＝標準賞与額×総率÷2 の四捨五入（2026-09 の経理担当の実績）。料率は
+                       <code>Z:\API連携\docs\経理モード_賞与料率.csv</code> があればそこから、無ければ 2026 年度の既定値です。</p>
+                </div>
+            </details>
+            <div class="actions">
+                <button type="button" class="btn btn-primary btn-run-main" id="keiri-bonus-run-btn">🧾 賞与の仕訳CSVを作成</button>
+                <span id="keiri-bonus-status" class="status-text"></span>
+            </div>
+            <div id="keiri-bonus-result-area" style="display:none; padding:12px 14px; margin-top:8px; border-top:1px solid #ddd">
+                <div class="summary-cards" style="margin-bottom:8px">
+                    <div class="summary-card"><div class="card-label">対象人数</div><div class="card-value" id="keiri-bonus-cnt-emp">0</div></div>
+                    <div class="summary-card"><div class="card-label">要確認の件数</div><div class="card-value" id="keiri-bonus-cnt-alert">0</div></div>
+                </div>
+                <div id="keiri-bonus-files" style="margin-bottom:10px"></div>
+                <div style="font-weight:bold; margin:10px 0 4px">要確認リスト</div>
+                <div id="keiri-bonus-yokakunin" class="md-view"></div>
+            </div>
+        </div><!-- /keiri-bonus-pane -->
         <div id="keiri-error-area" class="alert alert-error" style="display:none; margin:8px 14px"></div>
     </div>
 

@@ -125,6 +125,8 @@ const MODE_HINTS = {
 // 健康診断HPMモードの中の項目（'hpm' = 健診結果→HPM取込CSV、'apply' = 健診申込）。
 // 健診申込は 2026-09-04 に専用タブ（health_apply）からこのモードの項目へ統合した。
 let healthSubMode = 'hpm';
+// 経理モードの項目切替（salary: 月次の4CSV / bonus: 賞与の3CSV）。applyModeUI より前に置くこと
+let keiriSubMode = 'salary';
 
 // 進捗バー／エラー表示がどのモードのものかを覚えておく。
 // タブでモードを切り替えても消さず、そのモードに戻ったときに再表示するため。
@@ -215,6 +217,18 @@ function applyModeUI(mode) {
     if (kiCard) kiCard.style.display = isExpense ? '' : 'none';
     // 経理モード: 仕訳CSV生成カードのみ表示
     if (keiriCard) keiriCard.style.display = isKeiri ? '' : 'none';
+    // 経理モードの 給与／賞与 切替（カードの中の 2 ペインを出し入れ。中身は消さない）
+    const keiriSubtabs = document.getElementById('keiri-subtabs');
+    if (keiriSubtabs) {
+        keiriSubtabs.style.display = isKeiri ? '' : 'none';
+        keiriSubtabs.querySelectorAll('[data-keiri-sub]').forEach(btn =>
+            btn.classList.toggle('is-active', btn.dataset.keiriSub === keiriSubMode));
+    }
+    const keiriSalaryPane = document.getElementById('keiri-salary-pane');
+    const keiriBonusPane = document.getElementById('keiri-bonus-pane');
+    const showKeiriBonus = isKeiri && keiriSubMode === 'bonus';
+    if (keiriSalaryPane) keiriSalaryPane.style.display = showKeiriBonus ? 'none' : '';
+    if (keiriBonusPane) keiriBonusPane.style.display = showKeiriBonus ? '' : 'none';
     // 請求書モード: PDF確認とfreee CSV生成カードのみ表示
     if (invoiceCard) invoiceCard.style.display = isInvoice ? '' : 'none';
     // 請求書モードは「提出用PDFを作る」と「freee CSVを作る」の2カード立て
@@ -286,6 +300,13 @@ document.querySelectorAll('input[name="mode"]').forEach(radio => {
 document.querySelectorAll('#health-subtabs [data-health-sub]').forEach(btn => {
     btn.addEventListener('click', () => {
         healthSubMode = btn.dataset.healthSub === 'apply' ? 'apply' : 'hpm';
+        applyModeUI(getCurrentMode());
+    });
+});
+// 経理モードの項目切替（salary / bonus）
+document.querySelectorAll('#keiri-subtabs [data-keiri-sub]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        keiriSubMode = btn.dataset.keiriSub === 'bonus' ? 'bonus' : 'salary';
         applyModeUI(getCurrentMode());
     });
 });
@@ -2110,48 +2131,97 @@ function keiriRenderSonota(data) {
     if (pathEl) pathEl.textContent = '台帳: ' + (data.sonota_manual_csv || '');
 
     let html = '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th><th>金額</th>'
-             + '<th>部門</th><th>勘定科目｜品目｜税区分</th><th>備考</th></tr>';
-    pending.forEach((p, i) => {
-        html += '<tr data-emp="' + mailEsc(p['社員番号']) + '">'
-              + '<td>' + mailEsc(p['社員番号']) + '</td>'
-              + '<td>' + mailEsc(p['氏名']) + '</td>'
-              + '<td style="text-align:right">' + Number(p['金額']).toLocaleString() + '</td>'
-              + '<td>' + mailEsc(p['部門']) + '</td>'
-              + '<td><input type="text" class="keiri-sonota-combo" list="keiri-sonota-choices"'
-              + ' data-idx="' + i + '" placeholder="選ぶか直接入力" style="width:280px"></td>'
-              + '<td><input type="text" class="keiri-sonota-biko" data-idx="' + i + '"'
-              + ' placeholder="例: 有給残6日買取分" style="width:240px"></td></tr>';
-    });
+             + '<th>部門</th><th>勘定科目｜品目｜税区分</th><th>備考</th><th></th></tr>';
+    pending.forEach((p, i) => { html += keiriSonotaRowHtml(p, i, p['金額']); });
     html += '</table>';
     rows.innerHTML = html;
     rows.dataset.pending = JSON.stringify(pending);
     area.style.display = 'block';
 }
 
-/** 入力欄 → 台帳へ送る行。空欄の人は送らない（＝これまでどおり保留のまま）。 */
+/** 保留者 1 人分の入力行。＋で同じ人の行を増やし（金額を分ける）、−で行を消す。 */
+function keiriSonotaRowHtml(p, srcIdx, amount) {
+    return '<tr data-emp="' + mailEsc(p['社員番号']) + '" data-src="' + srcIdx + '">'
+         + '<td>' + mailEsc(p['社員番号']) + '</td>'
+         + '<td>' + mailEsc(p['氏名']) + '</td>'
+         + '<td><input type="number" class="keiri-sonota-amt" value="' + Number(amount || 0) + '"'
+         + ' step="1" style="width:110px; text-align:right"></td>'
+         + '<td>' + mailEsc(p['部門']) + '</td>'
+         + '<td><input type="text" class="keiri-sonota-combo" list="keiri-sonota-choices"'
+         + ' placeholder="選ぶか直接入力" style="width:280px"></td>'
+         + '<td><input type="text" class="keiri-sonota-biko"'
+         + ' placeholder="例: 有給残6日買取分" style="width:240px"></td>'
+         + '<td style="white-space:nowrap">'
+         + '<button type="button" class="btn btn-sm keiri-sonota-add" title="この人の行を増やす（金額を分ける）">＋</button> '
+         + '<button type="button" class="btn btn-sm keiri-sonota-del" title="この行を消す">−</button></td></tr>';
+}
+
+/** 入力欄 → 台帳へ送る行。空欄の行は送らない（＝これまでどおり保留のまま）。
+ *  同じ人の行が複数あるときは、金額の合計が jinjer の金額と一致していなければエラーにする。 */
 function keiriCollectSonota() {
     const rows = document.getElementById('keiri-sonota-rows');
     if (!rows || !rows.dataset.pending) return { entries: [], errors: [] };
     const pending = JSON.parse(rows.dataset.pending);
     const entries = [], errors = [];
-    rows.querySelectorAll('.keiri-sonota-combo').forEach(inp => {
-        const combo = (inp.value || '').trim();
+    const sums = {};   // 社員番号 → 入力した行の金額合計
+    rows.querySelectorAll('tr[data-src]').forEach(tr => {
+        const combo = ((tr.querySelector('.keiri-sonota-combo') || {}).value || '').trim();
         if (!combo) return;
-        const p = pending[Number(inp.dataset.idx)];
+        const p = pending[Number(tr.dataset.src)];
         const parts = combo.split(/[｜|]/).map(s => s.trim());
         if (parts.length !== 3 || parts.some(s => !s)) {
             errors.push(p['社員番号'] + ' ' + p['氏名']
                 + '：「勘定科目｜品目｜税区分」の3つを ｜ 区切りで入れてください（入力: ' + combo + '）');
             return;
         }
-        const biko = rows.querySelector('.keiri-sonota-biko[data-idx="' + inp.dataset.idx + '"]');
+        const amtEl = tr.querySelector('.keiri-sonota-amt');
+        const amt = Number(amtEl ? amtEl.value : p['金額']);
+        if (!Number.isInteger(amt)) {
+            errors.push(p['社員番号'] + ' ' + p['氏名'] + '：金額は整数（円）で入れてください');
+            return;
+        }
+        if (amt === 0) {
+            errors.push(p['社員番号'] + ' ' + p['氏名'] + '：金額が 0 の行があります（金額を入れるか − で消してください）');
+            return;
+        }
+        const bikoEl = tr.querySelector('.keiri-sonota-biko');
+        sums[p['社員番号']] = (sums[p['社員番号']] || 0) + amt;
         entries.push({
-            '社員番号': p['社員番号'], '氏名': p['氏名'], '金額': p['金額'],
+            '社員番号': p['社員番号'], '氏名': p['氏名'], '金額': amt, '明細金額': p['金額'],
             '勘定科目': parts[0], '品目': parts[1], '税区分': parts[2],
-            '備考': biko ? (biko.value || '').trim() : '',
+            '備考': bikoEl ? (bikoEl.value || '').trim() : '',
         });
     });
+    pending.forEach(p => {
+        if (!(p['社員番号'] in sums)) return;
+        if (Math.abs(sums[p['社員番号']] - Number(p['金額'])) >= 0.5) {
+            errors.push(p['社員番号'] + ' ' + p['氏名'] + '：行の金額の合計 '
+                + sums[p['社員番号']].toLocaleString() + ' が jinjer の金額 '
+                + Number(p['金額']).toLocaleString() + ' と違います');
+        }
+    });
     return { entries, errors };
+}
+
+// ＋／− は行が動的に増減するので、表の親で受ける（インライン onclick は使わない）
+const keiriSonotaRowsEl = document.getElementById('keiri-sonota-rows');
+if (keiriSonotaRowsEl) {
+    keiriSonotaRowsEl.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button');
+        if (!btn) return;
+        const tr = btn.closest('tr[data-src]');
+        if (!tr) return;
+        if (btn.classList.contains('keiri-sonota-add')) {
+            const pending = JSON.parse(keiriSonotaRowsEl.dataset.pending || '[]');
+            const p = pending[Number(tr.dataset.src)];
+            if (!p) return;
+            const tmp = document.createElement('tbody');
+            tmp.innerHTML = keiriSonotaRowHtml(p, Number(tr.dataset.src), 0);
+            tr.after(tmp.firstElementChild);
+        } else if (btn.classList.contains('keiri-sonota-del')) {
+            tr.remove();
+        }
+    });
 }
 
 const keiriRunBtn = document.getElementById('keiri-run-btn');
@@ -2253,6 +2323,94 @@ if (keiriRunBtn) {
             }
         });
     }
+}
+
+// --- 経理モード（賞与）: 賞与 CSV をアップロードして 3CSV を作る ---------------------------
+function keiriBonusLabel() {
+    const sel = document.getElementById('keiri-bonus-label');
+    const other = document.getElementById('keiri-bonus-label-other');
+    if (!sel) return '';
+    if (sel.value === '__other__') return other ? (other.value || '').trim() : '';
+    return sel.value;
+}
+
+function keiriRenderBonus(data) {
+    const el = document.getElementById('keiri-bonus-files');
+    if (el) {
+        let html = '<table class="keiri-md-table"><tr><th>種別</th><th>ファイル</th><th>取引数</th><th>行数</th><th>金額合計</th><th></th></tr>';
+        for (const f of data.files || []) {
+            const url = '/keiri_download/' + data.ym + '/' + encodeURIComponent(f.filename);
+            html += '<tr><td>' + mailEsc(f['種別']) + '</td><td>' + mailEsc(f.filename) + '</td><td>' + f['取引数'] + '</td>'
+                  + '<td>' + f['行数'] + '</td><td style="text-align:right">' + Number(f['金額合計']).toLocaleString() + '</td>'
+                  + '<td><a class="btn btn-download" style="padding:2px 8px; font-size:12px" href="' + url + '">📥</a></td></tr>';
+        }
+        html += '</table>';
+        html += '<div class="hint" style="margin-top:4px">出力先: <code>' + mailEsc(data.out_dir || '') + '</code>'
+              + '<br>料率: ' + mailEsc(data.rates_src || '')
+              + ((data.overwritten || []).length ? '<br>⚠️ 同名のファイルを上書きしました: ' + mailEsc((data.overwritten || []).join('、')) : '')
+              + '</div>';
+        el.innerHTML = html;
+    }
+    const yk = document.getElementById('keiri-bonus-yokakunin');
+    if (yk) yk.innerHTML = keiriRenderMarkdown(data.yokakunin_md || '');
+}
+
+const keiriBonusLabelSel = document.getElementById('keiri-bonus-label');
+if (keiriBonusLabelSel) {
+    keiriBonusLabelSel.addEventListener('change', () => {
+        const other = document.getElementById('keiri-bonus-label-other');
+        if (other) other.style.display = keiriBonusLabelSel.value === '__other__' ? '' : 'none';
+    });
+}
+
+const keiriBonusRunBtn = document.getElementById('keiri-bonus-run-btn');
+if (keiriBonusRunBtn) {
+    keiriBonusRunBtn.addEventListener('click', async () => {
+        const status = document.getElementById('keiri-bonus-status');
+        const month = (document.getElementById('keiri-bonus-month').value || '').trim();
+        const label = keiriBonusLabel();
+        const hassei = (document.getElementById('keiri-bonus-hassei').value || '').trim();
+        const fileEl = document.getElementById('keiri-bonus-file');
+        keiriShowError([]);
+        const errs = [];
+        if (!/^\d{4}-\d{2}$/.test(month)) errs.push('支給月は YYYY-MM 形式で入力してください（例: 2026-09）');
+        if (!label) errs.push('賞与の種類を選ぶか入力してください');
+        if (!hassei) errs.push('支給ファイルの発生日を入れてください');
+        if (!fileEl || !fileEl.files || !fileEl.files.length) errs.push('賞与 CSV を選んでください');
+        if (errs.length) { keiriShowError(errs); return; }
+        const fd = new FormData();
+        fd.append('month', month);
+        fd.append('label', label);
+        fd.append('hassei', hassei);
+        fd.append('shaho_hassei', (document.getElementById('keiri-bonus-shaho-hassei').value || '').trim());
+        fd.append('shaho_kigen', (document.getElementById('keiri-bonus-shaho-kigen').value || '').trim());
+        fd.append('refresh_custom', document.getElementById('keiri-bonus-refresh-custom').checked ? '1' : '0');
+        fd.append('file', fileEl.files[0]);
+        keiriBonusRunBtn.disabled = true;
+        status.textContent = '生成中…';
+        document.getElementById('keiri-bonus-result-area').style.display = 'none';
+        try {
+            const res = await fetch('/keiri_bonus_run', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (!data.success) {
+                keiriShowError(data.errors || ['生成に失敗しました']);
+                status.textContent = '';
+                return;
+            }
+            document.getElementById('keiri-bonus-cnt-emp').textContent = data.people;
+            const alerts = data.alerts || {};
+            document.getElementById('keiri-bonus-cnt-alert').textContent =
+                Object.values(alerts).reduce((a, b) => a + (Number(b) || 0), 0);
+            keiriRenderBonus(data);
+            document.getElementById('keiri-bonus-result-area').style.display = 'block';
+            status.textContent = '完了（' + data.label + ' ' + data.month + '）';
+        } catch (e) {
+            keiriShowError('通信に失敗しました: ' + e);
+            status.textContent = '';
+        } finally {
+            keiriBonusRunBtn.disabled = false;
+        }
+    });
 }
 
 // =============================================================================
