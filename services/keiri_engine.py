@@ -1042,8 +1042,19 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
     month_end = month_last_day(month)
     next_end = month_last_day(ym_add(month, 1))
 
-    def shaho_total(pi):
-        return sum(int(r["amount_sign"]) * pi_value(pi, r["source_key"]) for r in master_rows)
+    def shaho_total(pi, pi_deduction=None):
+        """マスタ行の合算。会社負担の項目（other15/16/17）は pi から読む。
+
+        本人控除の項目（子ども・子育て支援金 child_support。jinjer の API に会社負担側の
+        項目が無く、同額の本人控除で代用している）は pi_deduction から読む。
+        本人控除は翌月控除＝当月明細に前月分が載るので、①主取引（前月分）では
+        会社負担を前月明細から・支援金を当月明細から読んで月を揃える（2026-09-10）。
+        pi_deduction を省くと両方 pi から読む（③退職者分など当月明細×0.5 の経路）。
+        """
+        pi_d = pi if pi_deduction is None else pi_deduction
+        return sum(int(r["amount_sign"]) * pi_value(
+            pi_d if r["source_key"].startswith("salary_deduction_items:") else pi, r["source_key"])
+            for r in master_rows)
 
     def is_retiree(emp):
         """当月末で退職した人だけが社保2倍回収の対象。
@@ -1099,7 +1110,8 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
             alerts["shaho_menjo"].add((emp, ridx.get(emp, {}).get("name", emp), prev))
             continue          # 育休等で社保免除＝計上しない
         pi_src, ratio = source_pi(emp)
-        total = shaho_total(pi_src) * ratio
+        # 会社負担は pi_src（通常は前月明細）、本人控除で代用している支援金は当月明細から
+        total = shaho_total(pi_src, st_m[emp]) * ratio
         if not total:
             continue
         azukari_base.append((emp, pi_src, ratio))
