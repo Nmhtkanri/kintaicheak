@@ -20,6 +20,51 @@ from .template import build_template
 from .writer import write_quarter
 
 
+FG_MODES = ("auto", "legacy", "report")
+
+
+def resolve_fg_source(fg_mode: str, *, no_fg: bool = False, fg=None,
+                      input_dir: Path | None = None) -> tuple[bool, Path | None, Path | None]:
+    """Fieldglass の読み方を決める（build_quarter から切り出した純粋関数。2026-09-10）。
+
+    戻り値: (use_report, report_path, fg_path)
+      - use_report=True  … 新レポート（*ユニアデックス*業務内容*.xlsx）1本を読む。fg_path は None
+      - use_report=False … 旧 WorkOrder CSV（fg_path）を読む。fg_path が None なら Fieldglass 分なし
+    規則:
+      - fg_mode は auto / legacy / report 以外なら ValueError
+      - no_fg なら何も探さず (False, None, None)
+      - legacy は新レポートがあっても旧 CSV。--fg 明示があれば新レポートは探さない
+      - auto は新レポートがあれば report、無ければ legacy に倒す
+      - report は新レポート必須。無ければ FileNotFoundError
+    """
+    if fg_mode not in FG_MODES:
+        raise ValueError(f"fg_mode は {' / '.join(FG_MODES)} のいずれか: {fg_mode!r}")
+    if no_fg:
+        return False, None, None
+    folder = Path(input_dir) if input_dir is not None else config.INPUT_DIR
+    report_path = None
+    if fg_mode != "legacy" and not fg:
+        report_path = newest_or_none(folder, PATTERN_FG_UAL_REPORT)
+    use_report = fg_mode == "report" or (fg_mode == "auto" and report_path is not None)
+    if fg_mode == "report" and report_path is None:
+        raise FileNotFoundError(
+            f"入力が見つかりません: {folder}\\{PATTERN_FG_UAL_REPORT}")
+    if use_report:
+        return True, report_path, None
+    fg_path = Path(fg) if fg else newest_or_none(folder, PATTERN_FG_WO)
+    return False, None, fg_path
+
+
+def uses_ericsson_overlay(fg_mode: str) -> bool:
+    """エリクソンの新レポートで直接契約マスタの行を上書きするか。legacy は比較検証用なので行わない。
+
+    未知の値で上書きに倒れないよう、ここでも fg_mode を検証する（直接契約行を書き換える判定のため）。
+    """
+    if fg_mode not in FG_MODES:
+        raise ValueError(f"fg_mode は {' / '.join(FG_MODES)} のいずれか: {fg_mode!r}")
+    return fg_mode != "legacy"
+
+
 def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None,
                   out_dir=None, fg=None, fg_details=None, no_fg: bool = False,
                   jinjer_api: bool = False, fg_mode: str = "auto") -> dict:
@@ -69,28 +114,12 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
         records.append(build_record(c, person, state, q_start, q_end, generated_at=started))
 
     # --- SAP Fieldglass（2026年4月以降のユニアデックス分）---
-    if fg_mode not in ("auto", "legacy", "report"):
-        raise ValueError(f"fg_mode は auto / legacy / report のいずれか: {fg_mode!r}")
+    use_report, report_path, fg_path = resolve_fg_source(
+        fg_mode, no_fg=no_fg, fg=fg, input_dir=config.INPUT_DIR)
     fg_records: list = []
     fg_note = ""
-    fg_path = None
     det_path = None
-    report_path = None
-    use_report = False
     fg_src_name = ""
-    if not no_fg:
-        if fg_mode != "legacy" and not fg:
-            report_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_UAL_REPORT)
-        use_report = fg_mode == "report" or (fg_mode == "auto" and report_path is not None)
-        if fg_mode == "report" and report_path is None:
-            raise FileNotFoundError(
-                f"入力が見つかりません: {config.INPUT_DIR}\\{PATTERN_FG_UAL_REPORT}")
-        if not use_report:
-            report_path = None
-            if fg:
-                fg_path = Path(fg)
-            else:
-                fg_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_WO)
     if use_report or fg_path is not None:
         from .fieldglass import (FG_CARRIED_FIELDS, apply_defaults, contract_from_workorder,
                                  derive_defaults, detail_has_schedule, fill_from_person,
@@ -201,7 +230,7 @@ def build_quarter(quarter: str, *, tc=None, cpi=None, roster=None, template=None
     # エリクソンの新レポートがあれば、直接契約マスタの該当行へ現行値を上書きする
     # （レポートに期間・WOが無いため行は増やさない。legacy モードでは行わない＝比較検証用）
     eric_note = ""
-    if d_hit and fg_mode != "legacy":
+    if d_hit and uses_ericsson_overlay(fg_mode):
         eric_path = newest_or_none(config.INPUT_DIR, PATTERN_FG_ERICSSON)
         if eric_path is not None:
             from .fieldglass_report import apply_ericsson_report, load_ericsson_report

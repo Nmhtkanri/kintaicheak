@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from . import config  # noqa: E402
+from .build import FG_MODES  # noqa: E402
 from .estaffing import load_contracts  # noqa: E402
 from .roster import load_roster  # noqa: E402
 from .template import build_template  # noqa: E402
@@ -181,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     p2.add_argument("--fg", help="Fieldglass WorkOrder CSV（省略時は input の最新 *WorkOrder*.csv）")
     p2.add_argument("--fg-details", help="SAP詳細JSON（省略時は input の最新 *fieldglass_details*.json）")
     p2.add_argument("--no-fg", action="store_true", help="Fieldglass 分を含めない")
-    p2.add_argument("--fg-mode", choices=["auto", "legacy", "report"], default="auto",
+    p2.add_argument("--fg-mode", choices=list(FG_MODES), default="auto",
                     help="auto=新レポートがあれば使う / legacy=旧WO CSV＋詳細JSON / report=新レポート必須")
     p2.add_argument("--jinjer-api", action="store_true",
                     help="jinjer API から退職者込みの人マスタを再取得してキャッシュ（無指定ならキャッシュを使う）")
