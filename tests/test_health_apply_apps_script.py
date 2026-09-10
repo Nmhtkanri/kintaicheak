@@ -354,6 +354,6 @@ def test_validate_same_with_unbookable_previous_keeps_code_and_captures_self_boo
 def test_index_has_no_clinic_filter_and_shows_self_booking_notice():
     html = (CODE.parent / "Index.html").read_text(encoding="utf-8")
     assert "clinicFilter" not in html
-    assert html.count("ご自分で予約をお願いします") >= 3       # 前年度ブロック・前年度と同じ・その他
+    assert html.count("ご自身でご予約をお願いいたします。") >= 3 and "ご自分で予約" not in html       # 前年度ブロック・前年度と同じ・その他
     assert "previous.extraNames" in html and "previous.extraCodes.join" not in html
     assert 'name="sameClinicName"' in html and 'name="samePlannedDate"' in html
