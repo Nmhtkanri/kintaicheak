@@ -1587,6 +1587,8 @@ details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
 
 /* 経理モード「その他」手入力の ＋／− ボタン（2026-09-10） */
 #keiri-sonota-rows .btn-sm { padding: 2px 8px; font-size: 12px; line-height: 1.2; }
+/* 3 列が入力欄になり表が横に広がるので、カードからはみ出さず表の中で横スクロールさせる（2026-09-11） */
+#keiri-sonota-rows { overflow-x: auto; }
 
 /* 経理モードの 給与／賞与 切替は暖色（オレンジ系）にする（2026-09-11 谷津さん指定。健診モードの緑はそのまま） */
 #keiri-subtabs { background: #fdf3e7; border-color: #f0d3b0; }
