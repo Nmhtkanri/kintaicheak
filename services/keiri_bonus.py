@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """賞与用の freee 取引インポート CSV（支給・健康保険・厚生年金）を作る（2026-09-10 新設）。
 
-入力は jinjer から手で落とす「賞与支給控除項目一覧表」CSV（121 列・cp932。
-`jinjer_賞与支給控除項目一覧表_9637_YYYYMMDD.csv`）。jinjer の API に賞与明細は無い。
+入力は jinjer API（既定。`GET /v1/employees/bonus-statements`。子ども・子育て支援金だけ API に無いので
+標準賞与額×率÷2 で計算し、差引支給額との差で検算する）か、手で落とす「賞与支給控除項目一覧表」CSV
+（121 列・cp932。`jinjer_賞与支給控除項目一覧表_9637_YYYYMMDD.csv`）。
 
 規則は経理担当の最終 CSV（Y:\\給与明細\\R8年\\{3,4,6,9}月\\freee\\freee_data_*賞与*.csv）から
 2026-09-10 に導いた。2026-09 の FE 部賞与 30 人で全項目一致:
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 import os
 import re
@@ -37,7 +39,9 @@ from services.keiri_engine import (NAME_ALIASES, Resolver, detail_row,
                                    jinkenhi_account, jp_date, load_custom_histories,
                                    load_or_fetch_roster, month_last_day, roster_index,
                                    write_freee_csv, ym_add)
-from services.keiri_api import to_number
+from services.keiri_api import (classify_employee, get_client, normalize_label, normalize_ymd, now_iso,
+                                statement_flag, to_number)
+from services.keiri_engine import SPECIAL_TARGET_EMPLOYEES
 
 # 2026 年度（関東 IT ソフトウェア健康保険組合／厚生年金）。総率＝労使合計。
 DEFAULT_RATES = {"kenpo": 0.0927, "kaigo": 0.0180, "shien": 0.0023, "konen": 0.1830}
@@ -133,7 +137,150 @@ def load_rates(month: str, path: str | None = None) -> tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
-# 入力
+# 入力（API）
+# ---------------------------------------------------------------------------
+API_DEDUCTION_LABELS = ["雇用保険料", "健康保険料", "介護保険料", "厚生年金", "厚生年金基金", "年調過不足額", "所得税"]
+API_OTHER_MAP = {          # bonus_other_items の項目名 → CSV の列名
+    "健康保険料": "事業主健康保険料", "介護保険料": "事業主介護保険料", "厚生年金": "事業主厚生年金",
+    "子ども・子育て拠出金": "事業主子ども・子育て拠出金",
+    "健保標準賞与額": COL_SB_KENPO, "厚年標準賞与額": COL_SB_KONEN,
+}
+
+
+def _n_calculated(data) -> int:
+    return sum(1 for p in data or [] for st in p.get("statements") or []
+               if (st.get("payroll_info") or {}).get("is_calculated", True))
+
+
+def fetch_bonus_statements(cache_dir: str, ym: str, client=None, refresh: bool = False) -> tuple[list, str]:
+    """指定月の賞与計算結果を API から取って raw/bonus_statements_{ym}.json にキャッシュし、(生 data[], 取得時刻) を返す。
+
+    空の応答や「計算済みのレコードが 1 件も無い」応答（jinjer で賞与計算を実行する前）はキャッシュせずに止める。
+    キャッシュすると次回以降も既定でそれを読み、計算後に取り直さない限り古いまま進んでしまうため。
+    """
+    path = os.path.join(cache_dir, "raw", f"bonus_statements_{ym}.json")
+    if not refresh and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj["data"], str(obj.get("fetched_at") or "")
+    data = (client or get_client()).get_bonus_statements(ym)
+    if not data:
+        raise ValueError(f"{ym} の賞与計算結果が jinjer から 0 件でした（賞与計算をしていない月か、API が空を返した）。"
+                         "計算対象月を確認して、もう一度実行してください")
+    if not _n_calculated(data):
+        raise ValueError(f"{ym} の賞与計算結果は {len(data)} 人分ありますが、賞与計算が実行済みの人が 1 人もいません。"
+                         "jinjer で賞与計算を実行してから、もう一度「賞与計算結果を API から取り直す」で実行してください（保存していません）")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fetched_at = now_iso()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"fetched_at": fetched_at, "executed_on": ym, "data": data}, f, ensure_ascii=False)
+    return data, fetched_at
+
+
+def _items_by_label(items, dup=None) -> dict:
+    """項目名 → 値。項目名は normalize_label で寄せる。同じ名前が 2 件あれば dup に名前を積む（値は先勝ち）。"""
+    out = {}
+    for it in items or []:
+        lab = normalize_label(str(it.get("label") or ""))
+        if not lab:
+            continue
+        if lab in out:
+            if dup is not None:
+                dup.add(lab)
+            continue
+        out[lab] = it.get("value")
+    return out
+
+
+def rows_from_api(data: list, *, rates: dict, alerts, count: int | None = None,
+                  paid_on: str | None = None) -> list[dict]:
+    """API の賞与計算結果を、CSV（賞与支給控除項目一覧表）と同じ列名の行 dict にする。
+
+    - 子ども・子育て支援金は API に無いので、本人＝標準賞与額×率÷2 の五捨六入、事業主＝本人と同額（谷津さん確認）。
+      検算: 総支給額 − 差引支給額 − API に載っている控除の合計 ＝ 支援金 のはず（差引支給額は支援金控除後）。合わなければ要確認。
+    - 同じ月に賞与が複数回あるとき（count が複数）は count を指定する。未指定で複数あれば ValueError。
+    - paid_on を渡すとその日付を支給日にする（API の paid_on は処理基準日と同じ値のことがある）。
+    """
+    counts = set()
+    for person in data:
+        for st in person.get("statements") or []:
+            if st.get("count") is not None:
+                counts.add(int(to_number(st.get("count")) or 0))
+    if count is None and len(counts) > 1:
+        raise ValueError("この月は賞与が複数回あります（回数: " + "・".join(str(c) for c in sorted(counts))
+                         + "）。回数を指定してください")
+    rows = []
+    skipped = defaultdict(list)
+    known_ded = {normalize_label(x) for x in API_DEDUCTION_LABELS} | {normalize_label(f"賞与控除項目{i}") for i in range(1, 16)}
+    for person in data:
+        emp = str(person.get("employee_id") or "").strip()
+        if not emp or (classify_employee(emp) != "target" and emp not in SPECIAL_TARGET_EMPLOYEES):
+            skipped["対象外の社員番号"].append(emp or "(空)")
+            continue
+        for st in person.get("statements") or []:
+            if count is not None and int(to_number(st.get("count")) or 0) != int(count):
+                skipped["別の回数のレコード"].append(emp)
+                continue
+            pi = st.get("payroll_info") or {}
+            if not pi.get("is_calculated", True):
+                skipped["賞与計算が未実行"].append(emp)        # jinjer で賞与計算を実行する前のレコード
+                continue
+            bi = st.get("basic_info") or {}
+            name = f"{bi.get('last_name', '')} {bi.get('first_name', '')}".strip()
+            dup = set()
+            ded = _items_by_label(pi.get("bonus_deduction_items"), dup)
+            oth = _items_by_label(pi.get("bonus_other_items"), dup)
+            pay = _items_by_label(pi.get("bonus_payment_items"), dup)
+            if dup:
+                alerts["bonus_check"].add((emp, name, "API の項目名が重複しています（先の値を採用）: " + "・".join(sorted(dup))))
+            # 既知の名前に無い控除に金額が入っていたら、仕訳に載らないので要確認へ
+            for lab, val in ded.items():
+                if lab not in known_ded and to_number(val):
+                    alerts["bonus_unmapped"].add((emp, name, f"控除「{lab}」（API）", int(round(to_number(val)))))
+            total = sum(int(round(to_number(it.get("value")) or 0)) for it in pi.get("bonus_items") or [])
+            # paid_on は給与側の実測では payroll_info 直下、賞与の実測（2026-09-11）では statement 直下。両方を見る
+            api_paid_on = normalize_ymd(str(statement_flag(person, st, "paid_on") or ""))
+            if not paid_on and api_paid_on:
+                alerts["bonus_check"].add((emp, name, f"支払期日に API の支給日 {api_paid_on} を使いました"
+                                                     "（処理基準日と同じ値のことがあるので、経理の支給日と違えば画面の「支払期日（支給日）」に入れて作り直す）"))
+            row = {COL_EMP: emp, COL_NAME: name, COL_TOTAL: str(total),
+                   COL_PAID_ON: (paid_on or api_paid_on).replace("-", "/"), "_source": "api"}
+            g = lambda d, lab: str(int(round(to_number(d.get(normalize_label(lab))) or 0)))   # noqa: E731
+            for lab in API_DEDUCTION_LABELS:
+                row[lab] = g(ded, lab)
+            for i in range(1, 16):
+                row[f"賞与控除項目{i}"] = g(ded, f"賞与控除項目{i}")
+            for lab, col in API_OTHER_MAP.items():
+                row[col] = g(oth, lab)
+            row["事業主雇用保険料"] = g(oth, "雇用保険料")
+            # 支援金（API に無い）
+            sb_k = int(row[COL_SB_KENPO])
+            shien = round_gosha_rokunyu(sb_k * rates["shien"] / 2) if sb_k else 0
+            row["子ども・子育て支援金"] = str(shien)
+            row["事業主子ども・子育て支援金"] = str(shien)
+            listed = sum(int(row[lab]) for lab in API_DEDUCTION_LABELS) + sum(int(row[f"賞与控除項目{i}"]) for i in range(1, 16))
+            sashihiki = int(round(to_number(pay.get(normalize_label("差引支給額"))) or 0))
+            row["差引支給額"] = str(sashihiki)
+            row["控除合計"] = str(listed + shien)
+            implied = total - sashihiki - listed
+            if implied != shien:
+                alerts["bonus_check"].add((emp, name, f"支援金の計算値 {shien:,} が明細から逆算した値 {implied:,}"
+                                                     "（総支給額−差引支給額−API の控除合計）と合いません"))
+            rows.append(row)
+    if not rows:
+        detail = "、".join(f"{k} {len(v)} 人" for k, v in skipped.items()) or "レコードなし"
+        raise ValueError("API の賞与計算結果に使える人がいません（" + detail + "）。"
+                         "jinjer で賞与計算を実行済みか、計算対象月と回数が合っているかを確認してください。"
+                         "キャッシュを読んでいる場合は「賞与計算結果を API から取り直す」を付けて再実行してください")
+    for reason, emps in skipped.items():
+        # 読み飛ばした人は常に要確認へ（rows が空のときだけでなく）。7777777 のような例外は SPECIAL_TARGET_EMPLOYEES で対象に入れる
+        alerts["bonus_check"].add(("", "", f"{reason}の人を {len(emps)} 人読み飛ばしました: " + "・".join(emps[:20])
+                                   + ("…" if len(emps) > 20 else "")))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 入力（CSV）
 # ---------------------------------------------------------------------------
 def load_bonus_csv(source) -> list[dict]:
     """jinjer 賞与 CSV（パスまたは bytes）→ 行 dict のリスト。必須列が無ければ ValueError。"""
@@ -171,7 +318,7 @@ def _num(row: dict, col: str, bad=None) -> int:
 
 def _iso_date(s: str) -> str:
     """'2026/9/25' or '2026-09-25' → '2026-09-25'。"""
-    s = str(s or "").strip()
+    s = normalize_ymd(str(s or "").strip())
     if not s:
         return ""
     parts = s.replace("-", "/").split("/")
@@ -242,7 +389,7 @@ def build_bonus(rows: list[dict], *, month: str, hassei: str, resolver, ridx: di
 
         # --- 検算・要確認 ---
         ded_total = g("控除合計")
-        if total - ded_total != g("差引支給額"):
+        if row.get("_source") != "api" and total - ded_total != g("差引支給額"):
             alerts["bonus_check"].add((emp, name, f"総支給額 {total:,} − 控除合計 {ded_total:,} ≠ 差引支給額 {g('差引支給額'):,}"))
         if g("年調過不足額"):
             alerts["bonus_unmapped"].add((emp, name, "年調過不足額", g("年調過不足額")))
@@ -343,8 +490,10 @@ def file_names(label: str, month: str) -> dict:
             "厚生年金": f"freee_data_{label}_厚生年金（{mc}）.csv"}
 
 
-def build_yokakunin(month: str, label: str, rates: dict, rates_src: str, alerts, n_people: int) -> list[str]:
+def build_yokakunin(month: str, label: str, rates: dict, rates_src: str, alerts, n_people: int,
+                    input_src: str = "") -> list[str]:
     lines = [f"# 要確認リスト 賞与 {label} {month.replace('-', '')}", "",
+             f"- 入力: {input_src}" if input_src else "- 入力: （不明）",
              f"- 対象 {n_people} 人。料率: 健保 {rates['kenpo']:.4%} / 介護 {rates['kaigo']:.4%} / "
              f"支援金 {rates['shien']:.4%} / 厚年 {rates['konen']:.4%}（{rates_src}）",
              "- 会社負担＝標準賞与額×総率÷2 の四捨五入（経理担当の最終 CSV に合わせた。jinjer の事業主列とは 1 円ずれることがある）", ""]
@@ -356,7 +505,10 @@ def build_yokakunin(month: str, label: str, rates: dict, rates_src: str, alerts,
         lines += ["", "料率 CSV（経理モード_賞与料率.csv）を直すか、jinjer 側の標準賞与額を確認すること。"]
     else:
         lines.append("- なし")
-    lines += ["", "## 会社負担が jinjer の事業主列と 1 円ずれた人（計算値を採用）", "",
+    lines += ["", "## 会社負担が jinjer の事業主列と 1 円ずれた人（計算値を採用）", ""]
+    if input_src.startswith("API"):
+        lines += ["※ API 入力では事業主子ども・子育て支援金は API に無く、本人と同額の計算値を jinjer 列の合計に含めている。", ""]
+    lines += [
               "会社負担＝標準賞与額×総率÷2 の四捨五入（2026-09 の経理担当の実績）。jinjer の事業主列は項目ごとに"
               "丸めるので 1 円ずれることがある。経理担当の方法が月で揺れているので、どちらを正にするか確認して"
               "手で直す場合はこの表を使う。", ""]
@@ -405,13 +557,26 @@ def build_yokakunin(month: str, label: str, rates: dict, rates_src: str, alerts,
 
 def generate_bonus(month: str, csv_source, label: str, hassei: str, *, out_base: str | None = None,
                    client=None, refresh: bool = False, shaho_hassei: str | None = None,
-                   shaho_kigen: str | None = None, rates_csv: str | None = None) -> dict:
-    """賞与 CSV → 3 つの freee CSV ＋ 要確認 md。戻り値は画面用の要約。"""
+                   shaho_kigen: str | None = None, rates_csv: str | None = None,
+                   source: str = "csv", count: int | None = None, paid_on: str | None = None,
+                   refresh_statements: bool = False) -> dict:
+    """賞与 CSV または API → 3 つの freee CSV ＋ 要確認 md。戻り値は画面用の要約。
+
+    source="api" のときは csv_source を使わず、month（計算対象月）の賞与計算結果を API から取る
+    （キャッシュ raw/bonus_statements_{month}.json。refresh_statements で取り直し）。
+    """
     from services.keiri_engine import OUT_BASE
     out_base = out_base or OUT_BASE
-    rows = load_bonus_csv(csv_source)
     rates, rates_src = load_rates(month, rates_csv)
     alerts = defaultdict(set)
+    if source == "api":
+        data, fetched_at = fetch_bonus_statements(out_base, month, client=client, refresh=refresh_statements)
+        rows = rows_from_api(data, rates=rates, alerts=alerts, count=count, paid_on=paid_on)
+        input_src = (f"API bonus-statements {month}" + (f"（回数 {count}）" if count is not None else "")
+                     + f"（取得 {fetched_at}。支援金は標準賞与額×率÷2 の計算値）")
+    else:
+        rows = load_bonus_csv(csv_source)
+        input_src = "CSV（賞与支給控除項目一覧表）"
     # 名簿は給与側と同様に「給与明細を取り直す」側の扱いなので、ここでは取り直さない（キャッシュが無ければ取得）
     roster = load_or_fetch_roster(client, os.path.join(out_base, "raw", "roster.json"), refresh=False)
     ridx = roster_index(roster)
@@ -419,7 +584,8 @@ def generate_bonus(month: str, csv_source, label: str, hassei: str, *, out_base:
         if emp in ridx:
             ridx[emp]["name"] = alias
     if not rows or not any(_num(r, COL_TOTAL) for r in rows):
-        raise ValueError("賞与 CSV の総支給額がすべて 0 か、明細行がありません（列や文字コードを確認してください）")
+        raise ValueError("API の賞与計算結果の総支給額がすべて 0 です（計算対象月・回数を確認）" if source == "api"
+                         else "賞与 CSV の総支給額がすべて 0 か、明細行がありません（列や文字コードを確認してください）")
     # 部門・人件費区分のキャッシュ（raw/custom_items.json）は給与モードと共用。取り直すときは給与側と同じ
     # 全対象者で作り直す（賞与対象者だけで上書きすると月次 4CSV の部門が解決できなくなる）
     from services.keiri_api import classify_employee
@@ -445,11 +611,11 @@ def generate_bonus(month: str, csv_source, label: str, hassei: str, *, out_base:
                               "total": sum(r["金額"] for t in tx for r in t["rows"])}
     yk_path = os.path.join(out_dir, f"要確認_賞与_{label}_{mc}.md")
     yk_lines = build_yokakunin(month, label, rates, rates_src, alerts,
-                               sum(len(v) for v in pay_tx_people.values()))
+                               sum(len(v) for v in pay_tx_people.values()), input_src=input_src)
     with open(yk_path, "w", encoding="utf-8") as f:
         f.write("\n".join(yk_lines) + "\n")
     return {"month": month, "label": label, "hassei": hassei, "out_dir": out_dir,
             "files": result_files, "yokakunin_path": yk_path, "yokakunin_md": "\n".join(yk_lines),
             "people": sum(len(v) for v in pay_tx_people.values()), "rates": rates, "rates_src": rates_src,
-            "overwritten": overwritten,
+            "overwritten": overwritten, "input_src": input_src,
             "alerts": {k: len(alerts[k]) for k in MD_ALERT_KEYS if alerts.get(k)}}

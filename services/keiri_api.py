@@ -20,6 +20,7 @@ import requests
 from services.jinjer_api_client import JinjerAPIError, JinjerClient
 
 STATEMENTS_PATH = "/v1/employees/salary-statements"
+BONUS_STATEMENTS_PATH = "/v1/employees/bonus-statements"   # 賞与計算結果（2026-09-11 実 API で確認）
 CUSTOM_ITEMS_PATH = "/v1/employees/custom-items"
 
 # payroll_info 配下の項目配列（各要素 {id,label,value}）
@@ -92,6 +93,28 @@ class KeiriJinjerClient(JinjerClient):
         while page <= 500:  # 安全上限
             page_params = dict(params, page=page)
             data = self._get(STATEMENTS_PATH, page_params)
+            if not isinstance(data, list) or not data:
+                break
+            results.extend(data)
+            page += 1
+            _time.sleep(0.25)
+        return results
+
+    def get_bonus_statements(self, executed_on: str, employee_ids=None) -> list:
+        """指定月（yyyy-MM）の賞与計算結果を全ページ取得して data[] を返す（給与版と同じ作り）。
+
+        2026-09-11 実測: 給与版と同じく 10 件/ページ。返る項目は bonus_items / bonus_deduction_items /
+        bonus_payment_items / bonus_other_items（事業主負担 other13〜19・標準賞与額 other31/32）。
+        子ども・子育て支援金は本人側・事業主側とも返らない（計算で補う）。paid_on は処理基準日と同じ値で
+        支給日と違うことがある（2026-09 で実例）。
+        """
+        params = {"executed-on": executed_on}
+        if employee_ids:
+            params["employee-ids"] = ",".join(str(v) for v in employee_ids)
+        results: list = []
+        page = 1
+        while page <= 500:
+            data = self._get(BONUS_STATEMENTS_PATH, dict(params, page=page))
             if not isinstance(data, list) or not data:
                 break
             results.extend(data)

@@ -196,6 +196,158 @@ class BuildBonusTests(unittest.TestCase):
             "厚生年金": "freee_data_FE部賞与_厚生年金（202609）.csv"})
 
 
+def _api_person(emp, last, first, *, total=219670, koyo=1098, kenpo=10151, kaigo=0, konen=20038, zei=23049,
+                sb=219000, sashihiki=None, count=1, paid_on="2026-09-08", other15=None, other17=None, kyoshutsu=788):
+    """実 API（2026-09-11 に 2018012 で確認した構造）を模した 1 人分。支援金は API に無い。"""
+    shien = 252 if sb == 219000 else 0
+    if sashihiki is None:
+        sashihiki = total - (koyo + kenpo + kaigo + konen + zei + shien)
+    ded = [("deduction6", "雇用保険料", koyo), ("deduction7", "健康保険料", kenpo), ("deduction8", "介護保険料", kaigo),
+           ("deduction9", "厚生年金", konen), ("deduction10", "厚生年金基金", 0), ("deduction18", "年調過不足額", 0),
+           ("deduction19", "所得税", zei)] + [(f"deduction{i}", f"賞与控除項目{i}", 0) for i in range(1, 6)]
+    oth = [("other13", "雇用保険料", 1867), ("other14", "労災保険料", 659), ("other15", "健康保険料", other15 if other15 is not None else kenpo),
+           ("other16", "介護保険料", kaigo), ("other17", "厚生年金", other17 if other17 is not None else konen),
+           ("other19", "子ども・子育て拠出金", kyoshutsu), ("other31", "健保標準賞与額", sb), ("other32", "厚年標準賞与額", sb)]
+    return {"employee_id": emp, "statements": [{
+        "executed_on": "2026-09", "count": count, "paid_on": paid_on,
+        "basic_info": {"last_name": last, "first_name": first},
+        "payroll_info": {"is_calculated": True,
+                         "bonus_items": [{"id": "allowance1", "label": "賞与", "value": total}],
+                         "bonus_deduction_items": [{"id": i, "label": l, "value": v} for i, l, v in ded],
+                         "bonus_payment_items": [{"id": "payment1", "label": "差引支給額", "value": sashihiki}],
+                         "bonus_other_items": [{"id": i, "label": l, "value": v} for i, l, v in oth]}}]}
+
+
+class ApiRowsTests(unittest.TestCase):
+    def test_api_record_becomes_csv_shaped_row_with_computed_shien(self):
+        from services.keiri_bonus import rows_from_api
+        alerts = defaultdict(set)
+        rows = rows_from_api([_api_person("2018012", "山田", "太郎")], rates=dict(DEFAULT_RATES), alerts=alerts,
+                             paid_on="2026-09-25")
+        r = rows[0]
+        self.assertEqual((r["社員番号"], r["氏名"], r["総支給額"], r["支給日"]), ("2018012", "山田 太郎", "219670", "2026/09/25"))
+        self.assertEqual((r["健康保険料"], r["厚生年金"], r["雇用保険料"], r["所得税"]), ("10151", "20038", "1098", "23049"))
+        self.assertEqual(r["子ども・子育て支援金"], "252")            # 219,000×0.23%÷2=251.85→五捨六入 252
+        self.assertEqual(r["事業主子ども・子育て支援金"], "252")      # 本人と同額（谷津さん確認）
+        self.assertEqual((r["事業主健康保険料"], r["事業主厚生年金"], r["事業主子ども・子育て拠出金"]), ("10151", "20038", "788"))
+        self.assertEqual((r["健保標準賞与額"], r["厚年標準賞与額"]), ("219000", "219000"))
+        self.assertEqual(int(r["総支給額"]) - int(r["控除合計"]), int(r["差引支給額"]))
+        self.assertFalse(alerts["bonus_check"])
+        # そのまま build_bonus に流せる
+        files = build_bonus(rows, month="2026-09", hassei="2026-09-15", resolver=FakeResolver(),
+                            ridx={}, rates=dict(DEFAULT_RATES), alerts=alerts)
+        self.assertEqual(files["支給"][0]["支払期日"], "2026/9/25")
+        self.assertEqual(files["健康保険"][0]["rows"][0]["金額"], 10403)
+
+    def test_special_target_and_unknown_deduction_and_paid_on_note(self):
+        from services.keiri_bonus import rows_from_api
+        alerts = defaultdict(set)
+        p = _api_person("7777777", "監査", "太郎")                     # 非 20YY だが計上対象（SPECIAL_TARGET_EMPLOYEES）
+        q = _api_person("2018012", "山田", "太郎")
+        q["statements"][0]["payroll_info"]["bonus_deduction_items"].append({"id": "deduction3", "label": "貸付金返済", "value": 5000})
+        q["statements"][0]["payroll_info"]["bonus_payment_items"][0]["value"] -= 5000
+        r_skip = _api_person("5000001", "派遣", "太郎")
+        rows = rows_from_api([p, q, r_skip], rates=dict(DEFAULT_RATES), alerts=alerts)      # paid_on 未指定
+        self.assertEqual([r["社員番号"] for r in rows], ["7777777", "2018012"])
+        msgs = [m for _e, _n, m in alerts["bonus_check"]]
+        self.assertTrue(any("対象外の社員番号の人を 1 人読み飛ばしました: 5000001" in m for m in msgs))
+        self.assertTrue(any("支払期日に API の支給日 2026-09-08 を使いました" in m for m in msgs))
+        self.assertEqual({(e, col, amt) for e, _n, col, amt in alerts["bonus_unmapped"]}, {("2018012", "控除「貸付金返済」（API）", 5000)})
+        self.assertTrue(any("支援金の計算値" in m for m in msgs))      # 未知の控除は listed に入らないので逆算と食い違う
+
+    def test_nencho_refund_and_kaigo_keep_shien_check_consistent(self):
+        from services.keiri_bonus import rows_from_api
+        alerts = defaultdict(set)
+        p = _api_person("2019002", "鈴木", "花子", total=150000, kenpo=6952, kaigo=1350, konen=13725, zei=8000, sb=150000)
+        # 年調過不足額 −1,200（還付）と介護あり。差引 = 総支給 − (雇用+健保+介護+厚年+所得税+年調(−1200)+支援金172)
+        pi = p["statements"][0]["payroll_info"]
+        for it in pi["bonus_deduction_items"]:
+            if it["label"] == "年調過不足額": it["value"] = -1200
+        pi["bonus_payment_items"][0]["value"] = 150000 - (1098 + 6952 + 1350 + 13725 + 8000 - 1200 + 172)
+        rows = rows_from_api([p], rates=dict(DEFAULT_RATES), alerts=alerts, paid_on="2026-09-25")
+        self.assertEqual(rows[0]["子ども・子育て支援金"], "172")
+        self.assertFalse(any("支援金の計算値" in m for _e, _n, m in alerts["bonus_check"]))
+        # 年調過不足額の要確認は build_bonus 側で出す（変換関数の責務ではない）
+
+    def test_shien_mismatch_with_sashihiki_is_flagged(self):
+        from services.keiri_bonus import rows_from_api
+        alerts = defaultdict(set)
+        # 差引支給額が支援金 252 を引いていない（＝支援金 0 で計算された明細）と、計算値と食い違う
+        rows_from_api([_api_person("2018012", "山田", "太郎", sashihiki=219670 - (1098 + 10151 + 20038 + 23049))],
+                      rates=dict(DEFAULT_RATES), alerts=alerts)
+        self.assertTrue(any("支援金の計算値" in m for _e, _n, m in alerts["bonus_check"]))
+
+    def test_multiple_counts_require_selection(self):
+        from services.keiri_bonus import rows_from_api
+        a = _api_person("2018012", "山田", "太郎", count=1)
+        b = _api_person("2019002", "鈴木", "花子", count=2)
+        with self.assertRaises(ValueError):
+            rows_from_api([a, b], rates=dict(DEFAULT_RATES), alerts=defaultdict(set))
+        rows = rows_from_api([a, b], rates=dict(DEFAULT_RATES), alerts=defaultdict(set), count=2)
+        self.assertEqual([r["社員番号"] for r in rows], ["2019002"])
+
+    def test_non_target_and_uncalculated_are_skipped(self):
+        from services.keiri_bonus import rows_from_api
+        p = _api_person("5000001", "派遣", "太郎")
+        q = _api_person("2018012", "山田", "太郎")
+        q["statements"][0]["payroll_info"]["is_calculated"] = False
+        with self.assertRaises(ValueError):
+            rows_from_api([p, q], rates=dict(DEFAULT_RATES), alerts=defaultdict(set))
+
+
+class FetchAndGenerateApiTests(unittest.TestCase):
+    def _fake_client(self, data):
+        class C:
+            def __init__(self): self.calls = 0
+            def get_bonus_statements(self, ym, employee_ids=None):
+                self.calls += 1; return data
+        return C()
+
+    def test_empty_or_uncalculated_response_is_not_cached(self):
+        import tempfile
+        import os
+        from services.keiri_bonus import fetch_bonus_statements
+        d = tempfile.mkdtemp()
+        with self.assertRaises(ValueError):
+            fetch_bonus_statements(d, "2026-09", client=self._fake_client([]))
+        unc = _api_person("2018012", "山田", "太郎"); unc["statements"][0]["payroll_info"]["is_calculated"] = False
+        with self.assertRaises(ValueError):
+            fetch_bonus_statements(d, "2026-09", client=self._fake_client([unc]))
+        self.assertFalse(os.path.exists(os.path.join(d, "raw", "bonus_statements_2026-09.json")))
+        # 計算済みがあれば保存され、2 回目はキャッシュから（client を呼ばない）
+        c = self._fake_client([_api_person("2018012", "山田", "太郎")])
+        data, t1 = fetch_bonus_statements(d, "2026-09", client=c)
+        data2, t2 = fetch_bonus_statements(d, "2026-09", client=c)
+        self.assertEqual((c.calls, len(data2), t1), (1, 1, t2))
+        c2 = self._fake_client([_api_person("2018012", "山田", "太郎"), _api_person("2019002", "鈴木", "花子")])
+        data3, _ = fetch_bonus_statements(d, "2026-09", client=c2, refresh=True)
+        self.assertEqual(len(data3), 2)
+
+    def test_generate_bonus_from_api_end_to_end(self):
+        import tempfile
+        import os
+        import json
+        from unittest import mock
+        from services import keiri_bonus as kb
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "raw"))
+        roster = [{"id": "2018012", "company": {"last_name": "山田", "first_name": "太郎", "joined_on": "2018-04-01"}}]
+        json.dump({"fetched_at": "x", "data": roster}, io.open(os.path.join(d, "raw", "roster.json"), "w", encoding="utf-8"))
+        with mock.patch.object(kb, "load_custom_histories", lambda out_base, ids, refresh=False: {}), \
+             mock.patch.object(kb, "load_or_fetch_roster", lambda client, path, refresh=False: roster):
+            res = kb.generate_bonus("2026-09", None, "FE部賞与", "2026-09-15", out_base=d,
+                                    client=self._fake_client([_api_person("2018012", "山田", "太郎")]),
+                                    source="api", paid_on="2026-09-25", rates_csv=r"C:\__no_such__\rates.csv")
+        self.assertEqual(res["people"], 1)
+        self.assertIn("API bonus-statements 2026-09", res["input_src"])
+        self.assertTrue(os.path.exists(os.path.join(d, "raw", "bonus_statements_2026-09.json")))
+        md = res["yokakunin_md"]
+        self.assertIn("- 入力: API bonus-statements 2026-09", md)
+        pay = io.open(res["files"]["支給"]["path"], encoding="cp932").read()
+        self.assertIn("2026/9/25", pay)          # 支払期日は画面指定
+        self.assertIn("-252", pay)               # 支援金（計算値）の預り金行
+
+
 class LoadTests(unittest.TestCase):
     def test_csv_requires_columns(self):
         with self.assertRaises(ValueError):

@@ -3046,9 +3046,11 @@ KEIRI_BONUS_LABEL_RE = re.compile(r"^[0-9A-Za-z\u3040-\u30ff\u4e00-\u9fff（）�
 def route_keiri_bonus_run():
     """賞与の freee 取引インポート CSV（支給／健康保険／厚生年金）を作る（2026-09-10）。
 
-    multipart: month（yyyy-MM）, label（FE部賞与 など。ファイル名になる）, hassei（支給ファイルの発生日 yyyy-MM-dd）,
-               shaho_hassei / shaho_kigen（任意）, refresh_custom（"1" で部門・人件費区分を取り直す）,
-               file（jinjer の賞与支給控除項目一覧表 CSV）
+    multipart: month（yyyy-MM。API 入力では計算対象月）, label（FE部賞与 など。ファイル名になる）,
+               hassei（支給ファイルの発生日 yyyy-MM-dd）, source（api=既定 / csv）, count（同月複数回のときの回数）,
+               paid_on（支払期日＝支給日。API 入力のとき。空欄なら API の支給日）,
+               refresh_statements（"1" で賞与計算結果を API から取り直す）, shaho_hassei / shaho_kigen（任意）,
+               refresh_custom（"1" で部門・人件費区分を取り直す）, file（csv のときの賞与支給控除項目一覧表 CSV）
     出力は outputs/keiri/{YYYYMM}/ に置くので、ダウンロードは /keiri_download/<ym>/<filename> をそのまま使う。
     """
     from services.keiri_bonus import generate_bonus
@@ -3073,35 +3075,57 @@ def route_keiri_bonus_run():
         if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
             return jsonify({"success": False, "errors": [f"{key} は YYYY-MM-DD で指定してください"]}), 400
         optional[key] = v or None
-    up = request.files.get("file")
-    if up is None or not up.filename:
-        return jsonify({"success": False, "errors": ["賞与 CSV（jinjer の賞与支給控除項目一覧表）を選んでください"]}), 400
-    raw = up.read()
-    if not raw:
-        return jsonify({"success": False, "errors": ["賞与 CSV が空です"]}), 400
+    source = (request.form.get("source") or "csv").strip()
+    if source not in ("csv", "api"):
+        return jsonify({"success": False, "errors": ["source は csv か api です"]}), 400
+    count = (request.form.get("count") or "").strip()
+    if count and not count.isdigit():
+        return jsonify({"success": False, "errors": ["回数は数字で指定してください"]}), 400
+    paid_on = (request.form.get("paid_on") or "").strip()
+    if paid_on and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", paid_on):
+        return jsonify({"success": False, "errors": ["支払期日（支給日）は YYYY-MM-DD で指定してください"]}), 400
+    raw = b""
+    if source == "csv":
+        up = request.files.get("file")
+        if up is None or not up.filename:
+            return jsonify({"success": False, "errors": ["賞与 CSV（jinjer の賞与支給控除項目一覧表）を選んでください"]}), 400
+        raw = up.read()
+        if not raw:
+            return jsonify({"success": False, "errors": ["賞与 CSV が空です"]}), 400
     refresh = (request.form.get("refresh_custom") or "") == "1"
+    refresh_statements = (request.form.get("refresh_statements") or "") == "1"
     client = None
-    if refresh:
+    if refresh or (source == "api" and refresh_statements):
         from services.keiri_api import get_client
         try:
             client = get_client()
         except Exception as e:
             return jsonify({"success": False, "errors": [f"jinjer API に接続できません: {e}"]}), 500
+    from services.jinjer_api_client import JinjerAPIError
     try:
-        result = generate_bonus(month, raw, label, hassei, client=client, refresh=refresh,
-                                shaho_hassei=optional["shaho_hassei"], shaho_kigen=optional["shaho_kigen"])
+        result = generate_bonus(month, raw or None, label, hassei, client=client, refresh=refresh,
+                                shaho_hassei=optional["shaho_hassei"], shaho_kigen=optional["shaho_kigen"],
+                                source=source, count=int(count) if count else None, paid_on=paid_on or None,
+                                refresh_statements=refresh_statements)
+    except JinjerAPIError as e:
+        msg = f"jinjer API エラー: {e}"
+        if "429" in str(e):
+            msg += "（レート制限はテナント単位です。他の取得と重ならないよう 10〜15 分空けて再実行してください）"
+        return jsonify({"success": False, "errors": [msg]}), 500
     except ValueError as e:
         return jsonify({"success": False, "errors": [str(e)]}), 400
     except Exception as e:
         logger.exception("keiri_bonus_run failed")
         return jsonify({"success": False, "errors": [f"生成に失敗しました: {e}"]}), 500
-    # 監査用に入力 CSV の写しを残す（成功したときだけ。uploads は 7 日で掃除される）
-    keep = os.path.join(Config.UPLOAD_FOLDER, f"bonus_{month.replace('-', '')}_{label}_{uuid.uuid4().hex}.csv")
-    try:
-        with open(keep, "wb") as f:
-            f.write(raw)
-    except OSError:
-        keep = ""
+    # 監査用に入力 CSV の写しを残す（CSV 入力で成功したときだけ。uploads は 7 日で掃除される）
+    keep = ""
+    if raw:
+        keep = os.path.join(Config.UPLOAD_FOLDER, f"bonus_{month.replace('-', '')}_{label}_{uuid.uuid4().hex}.csv")
+        try:
+            with open(keep, "wb") as f:
+                f.write(raw)
+        except OSError:
+            keep = ""
     files = [{"種別": kind, "filename": info["name"], "取引数": info["transactions"], "行数": info["rows"],
               "金額合計": info["total"]} for kind, info in result["files"].items()]
     logger.info("keiri bonus generated: %s %s people=%d out=%s", month, label, result["people"], result["out_dir"])
@@ -3109,7 +3133,7 @@ def route_keiri_bonus_run():
                     "hassei": hassei, "people": result["people"], "files": files,
                     "out_dir": result["out_dir"], "rates_src": result["rates_src"],
                     "yokakunin_md": result["yokakunin_md"], "alerts": result["alerts"], "input_copy": keep,
-                    "overwritten": result.get("overwritten", [])})
+                    "overwritten": result.get("overwritten", []), "input_src": result.get("input_src", "")})
 
 
 @app.route("/keiri_sonota_save", methods=["POST"])

@@ -35,6 +35,9 @@ def test_subtabs_and_panes_exist(html):
                   "keiri-bonus-files", "keiri-bonus-yokakunin"):
         assert f'id="{el_id}"' in html, el_id
     assert 'data-keiri-sub="salary"' in html and 'data-keiri-sub="bonus"' in html
+    for el_id in ("keiri-bonus-file-field", "keiri-bonus-paid-on", "keiri-bonus-count", "keiri-bonus-refresh-statements"):
+        assert f'id="{el_id}"' in html, el_id
+    assert 'name="keiri-bonus-source" value="api" checked' in html
     # 既存の給与側 id はそのまま
     for el_id in ("keiri-month", "keiri-run-btn", "keiri-result-area", "keiri-error-area"):
         assert f'id="{el_id}"' in html, el_id
@@ -50,10 +53,12 @@ def test_subtab_wiring_mirrors_health_mode(js):
     assert "#keiri-subtabs [data-keiri-sub]" in js
     assert "'/keiri_bonus_run'" in js
     assert "function keiriRenderBonus(" in js and "function keiriBonusLabel(" in js
+    assert "function keiriBonusSource(" in js and "fd.append('source', source)" in js
+    assert "if (source === 'csv') fd.append('file', fileEl.files[0]);" in js
 
 
 def _post(client, **over):
-    data = {"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15",
+    data = {"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15", "source": "csv",
             "file": (io.BytesIO("社員番号,氏名\n1,a\n".encode("cp932")), "bonus.csv")}
     data.update(over)
     return client.post("/keiri_bonus_run", data=data, content_type="multipart/form-data")
@@ -70,6 +75,28 @@ def test_route_validates_inputs():
     res = c.post("/keiri_bonus_run", data={"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15"},
                  content_type="multipart/form-data")
     assert res.status_code == 400 and "賞与 CSV" in res.get_json()["errors"][0]
+
+
+def test_route_api_source_does_not_require_file(monkeypatch):
+    import services.keiri_bonus as kb
+    seen = {}
+
+    def fake_generate(month, raw, label, hassei, **kw):
+        seen.update(kw); seen["raw"] = raw
+        return {"people": 30, "out_dir": "x", "rates_src": "既定値", "yokakunin_md": "#", "alerts": {},
+                "files": {}, "input_src": "API bonus-statements 2026-09"}
+
+    monkeypatch.setattr(kb, "generate_bonus", fake_generate)
+    c = app.test_client()
+    res = c.post("/keiri_bonus_run", data={"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15",
+                                           "source": "api", "paid_on": "2026-09-25", "count": "1"},
+                 content_type="multipart/form-data")
+    assert res.status_code == 200, res.get_data(as_text=True)
+    assert seen["raw"] is None and seen["source"] == "api" and seen["paid_on"] == "2026-09-25" and seen["count"] == 1
+    assert res.get_json()["input_src"].startswith("API")
+    res = c.post("/keiri_bonus_run", data={"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15",
+                                           "source": "api", "paid_on": "2026/9/25"}, content_type="multipart/form-data")
+    assert res.status_code == 400
 
 
 def test_route_reports_missing_columns_as_400():
