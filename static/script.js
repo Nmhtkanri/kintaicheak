@@ -2388,7 +2388,6 @@ if (keiriBonusRunBtn) {
         fd.append('hassei', hassei);
         fd.append('source', source);
         fd.append('count', count);
-        fd.append('paid_on', (document.getElementById('keiri-bonus-paid-on').value || '').trim());
         fd.append('shaho_hassei', (document.getElementById('keiri-bonus-shaho-hassei').value || '').trim());
         fd.append('shaho_kigen', (document.getElementById('keiri-bonus-shaho-kigen').value || '').trim());
         fd.append('refresh_custom', document.getElementById('keiri-bonus-refresh-custom').checked ? '1' : '0');

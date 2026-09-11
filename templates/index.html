@@ -762,18 +762,13 @@
                 <label class="field field-inline">
                     <span class="field-label">支給ファイルの発生日 <span class="tag tag-req">必須</span></span>
                     <input type="date" id="keiri-bonus-hassei" style="width:170px">
-                    <span class="field-sub">経理担当の実績: 9月は 9/15、6月は 6/15、決算賞与は 3/31。支払期日は下の「支払期日（支給日）」（空欄なら API の支給日）</span>
+                    <span class="field-sub">経理担当の実績: 9月は 9/15、6月は 6/15、決算賞与は 3/31。支払期日は jinjer の支給日をそのまま使います</span>
                 </label>
                 <div class="field">
                     <span class="field-label">入力</span>
                     <span class="field-sub">jinjer の賞与計算結果を API から取ります（計算対象月＝支給月。jinjer で賞与計算を実行済みであること）。
                         API に無い子ども・子育て支援金は 標準賞与額×率÷2（本人は五捨六入、事業主は同額）で計算し、差引支給額との差で検算します。</span>
                 </div>
-                <label class="field field-inline" id="keiri-bonus-paid-on-field">
-                    <span class="field-label">支払期日（支給日）</span>
-                    <input type="date" id="keiri-bonus-paid-on" style="width:170px">
-                    <span class="field-sub">空欄なら API の支給日を使い要確認に注記します。API の支給日は処理基準日と同じ値になることがあるので（9月賞与で実例）、経理の支給日を入れるのが確実です</span>
-                </label>
                 <label class="field field-inline">
                     <span class="field-label">回数</span>
                     <input type="text" id="keiri-bonus-count" placeholder="空欄=1回だけの月" style="width:120px">

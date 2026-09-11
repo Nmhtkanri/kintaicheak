@@ -251,7 +251,6 @@ class ApiRowsTests(unittest.TestCase):
         self.assertEqual([r["社員番号"] for r in rows], ["7777777", "2018012"])
         msgs = [m for _e, _n, m in alerts["bonus_check"]]
         self.assertTrue(any("対象外の社員番号の人を 1 人読み飛ばしました: 5000001" in m for m in msgs))
-        self.assertTrue(any("支払期日に API の支給日 2026-09-08 を使いました" in m for m in msgs))
         self.assertEqual({(e, col, amt) for e, _n, col, amt in alerts["bonus_unmapped"]}, {("2018012", "控除「貸付金返済」（API）", 5000)})
         self.assertTrue(any("支援金の計算値" in m for m in msgs))      # 未知の控除は listed に入らないので逆算と食い違う
 

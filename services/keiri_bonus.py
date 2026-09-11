@@ -199,7 +199,7 @@ def rows_from_api(data: list, *, rates: dict, alerts, count: int | None = None,
     - 子ども・子育て支援金は API に無いので、本人＝標準賞与額×率÷2 の五捨六入、事業主＝本人と同額（谷津さん確認）。
       検算: 総支給額 − 差引支給額 − API に載っている控除の合計 ＝ 支援金 のはず（差引支給額は支援金控除後）。合わなければ要確認。
     - 同じ月に賞与が複数回あるとき（count が複数）は count を指定する。未指定で複数あれば ValueError。
-    - paid_on を渡すとその日付を支給日にする（API の paid_on は処理基準日と同じ値のことがある）。
+    - paid_on を渡すとその日付を支給日にする（通常は渡さず jinjer の支給日を正とする。裏口）。
     """
     counts = set()
     for person in data:
@@ -239,10 +239,8 @@ def rows_from_api(data: list, *, rates: dict, alerts, count: int | None = None,
                     alerts["bonus_unmapped"].add((emp, name, f"控除「{lab}」（API）", int(round(to_number(val)))))
             total = sum(int(round(to_number(it.get("value")) or 0)) for it in pi.get("bonus_items") or [])
             # paid_on は給与側の実測では payroll_info 直下、賞与の実測（2026-09-11）では statement 直下。両方を見る
+            # jinjer の支給日を正とする（2026-09-11 谷津さん判断。9 月は API でも 9/25 で最終 CSV と一致）
             api_paid_on = normalize_ymd(str(statement_flag(person, st, "paid_on") or ""))
-            if not paid_on and api_paid_on:
-                alerts["bonus_check"].add((emp, name, f"支払期日に API の支給日 {api_paid_on} を使いました"
-                                                     "（処理基準日と同じ値のことがあるので、経理の支給日と違えば画面の「支払期日（支給日）」に入れて作り直す）"))
             row = {COL_EMP: emp, COL_NAME: name, COL_TOTAL: str(total),
                    COL_PAID_ON: (paid_on or api_paid_on).replace("-", "/"), "_source": "api"}
             g = lambda d, lab: str(int(round(to_number(d.get(normalize_label(lab))) or 0)))   # noqa: E731

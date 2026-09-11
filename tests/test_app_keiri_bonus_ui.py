@@ -35,8 +35,9 @@ def test_subtabs_and_panes_exist(html):
                   "keiri-bonus-files", "keiri-bonus-yokakunin"):
         assert f'id="{el_id}"' in html, el_id
     assert 'data-keiri-sub="salary"' in html and 'data-keiri-sub="bonus"' in html
-    for el_id in ("keiri-bonus-paid-on", "keiri-bonus-count", "keiri-bonus-refresh-statements"):
+    for el_id in ("keiri-bonus-count", "keiri-bonus-refresh-statements"):
         assert f'id="{el_id}"' in html, el_id
+    assert 'id="keiri-bonus-paid-on"' not in html      # 支払期日は jinjer の支給日を正とする（入力欄なし）
     # 賞与 CSV のアップロード欄は画面に出さない（入力は API のみ。2026-09-11）
     assert 'id="keiri-bonus-file"' not in html and 'name="keiri-bonus-source"' not in html
     # 既存の給与側 id はそのまま
@@ -90,10 +91,10 @@ def test_route_api_source_does_not_require_file(monkeypatch):
     monkeypatch.setattr(kb, "generate_bonus", fake_generate)
     c = app.test_client()
     res = c.post("/keiri_bonus_run", data={"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15",
-                                           "source": "api", "paid_on": "2026-09-25", "count": "1"},
+                                           "source": "api", "count": "1"},
                  content_type="multipart/form-data")
     assert res.status_code == 200, res.get_data(as_text=True)
-    assert seen["raw"] is None and seen["source"] == "api" and seen["paid_on"] == "2026-09-25" and seen["count"] == 1
+    assert seen["raw"] is None and seen["source"] == "api" and seen["paid_on"] is None and seen["count"] == 1
     assert res.get_json()["input_src"].startswith("API")
     res = c.post("/keiri_bonus_run", data={"month": "2026-09", "label": "FE部賞与", "hassei": "2026-09-15",
                                            "source": "api", "paid_on": "2026/9/25"}, content_type="multipart/form-data")
