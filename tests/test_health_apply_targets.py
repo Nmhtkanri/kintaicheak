@@ -176,7 +176,7 @@ def test_build_target_rows_column_order_and_hub_columns_only():
     assert len(rows) == 2 and all(len(r) == S.TARGET_HUB_COLUMNS for r in rows)
     assert rows[0] == ["2027", "2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "履歴",
                        "1310528885", "医療法人社団 同友会 春日クリニック", "10", "定期健康診断", "",
-                       "医療法人社団 同友会 春日クリニック", "2027-01-10T09:00:00", "yatsu", ""]
+                       "医療法人社団 同友会 春日クリニック", "2027-01-10T09:00:00", "yatsu", "", ""]
     assert rows[1][1] == "2099002" and rows[1][10] == "GYN" and rows[1][6] == "0301619"
 
 
@@ -250,3 +250,13 @@ def test_candidate_dict_roundtrip_keeps_age():
     back = T.candidate_from_dict(c.as_dict())
     assert back.age == c.age == 37 and T.candidate_key_values(back) == T.candidate_key_values(c)
     assert T.candidate_from_dict({"employee_id": "2099001"}).age is None
+
+
+def test_gender_flows_into_target_row_and_key():
+    profiles = {"2099001": EmployeeProfile("2099001", "試験 太郎", "t.shiken@nmht.co.jp", "0", "在籍", "", "1990-05-01", "男性")}
+    c = T.build_candidates(["2099001"], profiles, {}, catalog(), fiscal_year=2027)[0]
+    assert c.gender == "男性" and T.candidate_key_values(c)["性別"] == "男性" and c.as_dict()["gender"] == "男性"
+    rows = T.build_target_rows(T.plan_targets([c], [], [], 2027), "yatsu", "2027-01-10T09:00:00")
+    assert rows[0][S.TARGET_HEADERS.index("性別")] == "男性" and len(rows[0]) == S.TARGET_HUB_COLUMNS
+    assert T.candidate_from_dict(c.as_dict()).gender == "男性"
+    assert S.gyn_allowed("男性") is False and S.gyn_allowed("女性") is True and S.gyn_allowed("") is True

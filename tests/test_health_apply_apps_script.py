@@ -140,8 +140,6 @@ def test_validate_same_copies_previous_and_needs_previous():
     (change_payload(clinicCode="130192"), "健診機関"),                       # 無効化された機関は選べない
     (change_payload(courseCode="99"), "健診種別"),
     (change_payload(extraCodes=["XRAY"]), "追加検査"),
-    (change_payload(dependentRequested=True, dependentRelationship="妻", dependentName=""), "続柄と氏名"),
-    (change_payload(dependentRequested=True, dependentRelationship="子", dependentName="x"), "続柄と氏名"),
     (change_payload(agreement=False), "確認欄"),
     (change_payload(applicationType="keep"), "申込内容"),
 ])
@@ -154,7 +152,7 @@ def test_validate_other_clinic_and_dependent():
                                        dependentRequested=True, dependentRelationship="夫", dependentName="試験 一郎"))
     assert out["error"] is None
     r = out["result"]
-    assert (r["inst"], r["other"], r["date"], r["dep"], r["rel"], r["depName"]) == ("OTHER", "南町健診センター", "2027-09-10", True, "夫", "試験 一郎")
+    assert (r["inst"], r["other"], r["date"], r["dep"], r["rel"], r["depName"]) == ("OTHER", "南町健診センター", "2027-09-10", False, "", "")   # 被扶養者は受け付けない
 
 
 # --- 回答の受付 ------------------------------------------------------------------------------
@@ -390,3 +388,25 @@ def test_index_wording_2026_09_11_is_bilingual():
     assert "現時点で受診を予定している健診機関名と受診予定時期をご入力ください" in html and "Planned timing" in html
     assert 'type="date"' not in html                 # 受診予定時期は自由記述
     assert "田町三田・新宿・東京駅八重洲" in html and "Tamachi-Mita, Shinjuku, Tokyo Station Yaesu" in html
+
+
+# --- 性別と婦人科検診・被扶養者の廃止（2027.3） ------------------------------------------------
+
+def test_gyn_hidden_and_rejected_for_male():
+    assert "婦人科検診は選択できません" in validate({"性別": "男性"}, change_payload(extraCodes=["GYN"]))["error"]
+    assert validate({"性別": "女性"}, change_payload(extraCodes=["GYN"]))["error"] is None
+    assert validate({"性別": ""}, change_payload(extraCodes=["GYN"]))["error"] is None          # 不明なら出す
+    # 前年度と同じ: 男性なら前年度の GYN は引き継がない
+    out = validate({"性別": "男性", "前年度追加検査": "GYN"}, {"applicationType": "same", "agreement": True})
+    assert out["error"] is None and out["result"]["extras"] == []
+    scenario = ("(() => { const o = readOptions_(); const t = findTargetByHash_('%s');"
+                " return activeOptions_(o, KIND.extra).filter(x => x.code !== EXTRA_GYN || gynAllowed_(t['性別'])).map(x => x.code); })()" % HASH)
+    assert run_gas(workbook(targets=[sent_target(性別="男性")]), scenario)["result"] == []
+    assert run_gas(workbook(targets=[sent_target(性別="女性")]), scenario)["result"] == ["GYN"]
+
+
+def test_dependent_section_is_gone():
+    html = (CODE.parent / "Index.html").read_text(encoding="utf-8")
+    assert "dependentRequested" not in html and "被扶養者" not in html
+    r = run_gas(workbook(), "(() => { const t = demoTarget_({gender: 'm'}, readOptions_()); return [t['性別'], demoTarget_({}, readOptions_())['性別']]; })()")["result"]
+    assert r == ["男性", "女性"]

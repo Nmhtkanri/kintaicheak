@@ -56,6 +56,7 @@ class EmployeeProfile:
     enrollment_name: str
     retirement_date: str = ""
     birth_date: str = ""        # personal.date_of_birth（yyyy-mm-dd）。年度末年齢の計算にだけ使い、シートには書かない
+    gender: str = ""            # personal.gender.name（男性／女性）。対象者シートに書き、男性には婦人科検診を出さない
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -97,6 +98,7 @@ def profiles_from_employees(employees: list[dict]) -> dict[str, EmployeeProfile]
             enrollment_name=_text(_dig(emp, "company", "enrollment_classification", "name")),
             retirement_date=_text(_dig(emp, "company", "retirement_date")),
             birth_date=_text(_dig(emp, "personal", "date_of_birth")),
+            gender=_text(_dig(emp, "personal", "gender", "name")),
         )
     return out
 

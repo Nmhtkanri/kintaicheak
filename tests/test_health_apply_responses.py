@@ -246,3 +246,14 @@ def test_exam_type_outside_age_band_is_warned():
     idx, _ = R.index_targets(targets, 2027)
     views, _ = R.validate_responses(idx, resp, cat, 2027)
     assert "exam_type_age_mismatch" not in [i.code for i in views[0].issues]
+
+
+def test_gyn_for_male_target_is_warned():
+    cat = OptionCatalog.from_rows(S.rows_to_dicts(S.OPTION_HEADERS, options_rows()[1:]))
+    resp = S.rows_to_dicts(S.RESPONSE_HEADERS, [response_row(追加検査="GYN")])
+    for gender, expected in (("男性", True), ("女性", False), ("", False)):
+        targets = S.rows_to_dicts(S.TARGET_HEADERS, [target_row(性別=gender, 申込状態=S.STATUS_ANSWERED, 受付番号="HC-2027-2099001-01", 回答版="1")])
+        idx, _ = R.index_targets(targets, 2027)
+        views, _ = R.validate_responses(idx, resp, cat, 2027)
+        assert ("extra_gender_mismatch" in [i.code for i in views[0].issues]) is expected, gender
+        assert views[0].importable and views[0].target["gender"] == gender

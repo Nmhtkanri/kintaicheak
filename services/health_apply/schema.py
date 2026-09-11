@@ -12,7 +12,8 @@ from __future__ import annotations
 import datetime as _dt
 
 # 2027.2: 対象者に「年度末年齢」（Hub が jinjer の生年月日から計算）を足し、年齢で健診種別を制限する
-SCHEMA_VERSION = "2027.2"
+# 2027.3: 対象者に「性別」（jinjer の personal.gender）を足し、男性には婦人科検診を出さない。被扶養者の申込は廃止（列は残す）
+SCHEMA_VERSION = "2027.3"
 
 SHEET_SETTINGS = "設定"
 SHEET_OPTIONS = "選択肢"
@@ -31,12 +32,12 @@ TARGET_HEADERS = (
     "年度", "社員番号", "氏名", "社用メール", "在籍区分",
     "前年度情報元", "前年度健診機関コード", "前年度健診機関名",
     "前年度健診種別コード", "前年度健診種別名", "前年度追加検査", "前年度健診機関(原文)",
-    "登録日時", "登録者", "年度末年齢",
-    # 16列〜: Apps Script（案内送信・回答受付）が更新する
+    "登録日時", "登録者", "年度末年齢", "性別",
+    # 17列〜: Apps Script（案内送信・回答受付）が更新する
     "トークンハッシュ", "送信日時", "送信回数", "初回アクセス日時",
     "申込状態", "受付番号", "回答版", "回答日時", "備考",
 )
-TARGET_HUB_COLUMNS = 15
+TARGET_HUB_COLUMNS = 16
 
 # 年齢による健診種別の制限（Apps Script の画面と Hub の検証で同じ規則を使う）
 #   年度末（翌年3月31日）時点の満年齢で、34歳以下は定期健康診断だけ、35歳以上は人間ドックA/B/Cから必ず選ぶ。
@@ -44,6 +45,16 @@ TARGET_HUB_COLUMNS = 15
 EXAM_TYPE_REGULAR = "10"
 EXAM_TYPES_DOCK = ("11", "12", "13")
 DOCK_AGE_FROM = 35
+
+
+# 性別と追加検査（婦人科検診）。性別は jinjer の personal.gender.name をそのまま持つ（男性／女性。空＝不明）
+GENDER_MALE = "男性"
+EXTRA_GYN = "GYN"
+
+
+def gyn_allowed(gender) -> bool:
+    """婦人科検診を出してよいか。男性だけ出さない（空・不明は出す）。"""
+    return str(gender or "").strip() != GENDER_MALE
 
 
 def fiscal_year_end(fiscal_year: int) -> _dt.date:
