@@ -402,6 +402,11 @@ def test_gyn_hidden_and_rejected_for_male():
     scenario = ("(() => { const o = readOptions_(); const t = findTargetByHash_('%s');"
                 " return activeOptions_(o, KIND.extra).filter(x => x.code !== EXTRA_GYN || gynAllowed_(t['性別'])).map(x => x.code); })()" % HASH)
     assert run_gas(workbook(targets=[sent_target(性別="男性")]), scenario)["result"] == []
+    # 前年度の表示からも消える
+    prev = ("(() => { const o = readOptions_(); const t = findTargetByHash_('%s'); return previousView_(t, o, null).extraNames; })()" % HASH)
+    assert run_gas(workbook(targets=[sent_target(性別="男性", 前年度追加検査="GYN")]), prev)["result"] == []
+    assert run_gas(workbook(targets=[sent_target(性別="女性", 前年度追加検査="GYN")]), prev)["result"] == ["婦人科検診"]
+    assert run_gas(workbook(), "demoTarget_({gender: 'm'}, readOptions_())['前年度追加検査']")["result"] == ""
     assert run_gas(workbook(targets=[sent_target(性別="女性")]), scenario)["result"] == ["GYN"]
 
 

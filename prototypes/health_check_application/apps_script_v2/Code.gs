@@ -269,6 +269,8 @@ function previousView_(target, options, allowedTypes) {
   const previous = previousOf_(target);
   previous.sameAllowed = previous.hasPrevious && (allowedTypes === null || allowedTypes.includes(previous.examTypeCode));
   previous.bookable = isBookable_(options, previous.institutionCode);
+  // 男性には前年度の婦人科検診も見せない（引き継ぎもしない）
+  previous.extraCodes = previous.extraCodes.filter((code) => code !== EXTRA_GYN || gynAllowed_(target['性別']));
   previous.extraNames = previous.extraCodes.map((code) => {
     const o = optionByCode_(options, KIND.extra, code, false);
     return o ? o.name : code;
@@ -377,7 +379,7 @@ function demoTarget_(params, options) {
     Object.assign(target, {
       '前年度情報元': '履歴', '前年度健診機関コード': code,
       '前年度健診機関名': inst ? inst.name : (prev === 'other' ? '東京品川病院 総合健診センター' : 'MYメディカルクリニック 渋谷'),
-      '前年度健診種別コード': EXAM_TYPE_REGULAR, '前年度健診種別名': '定期健康診断', '前年度追加検査': 'GYN',
+      '前年度健診種別コード': EXAM_TYPE_REGULAR, '前年度健診種別名': '定期健康診断', '前年度追加検査': male ? '' : 'GYN',
     });
   }
   return target;
