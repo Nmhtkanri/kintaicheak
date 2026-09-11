@@ -14,7 +14,7 @@
  * Hub の schema.py と同じ規則。年度末年齢が空なら制限しない。
  */
 
-const SCHEMA_VERSION = '2027.2';
+const SCHEMA_VERSION = '2027.3';
 
 const SHEETS = Object.freeze({
   settings: '設定', options: '選択肢', targets: '対象者', responses: '回答', audit: '監査ログ',
@@ -26,7 +26,7 @@ const TARGET_HEADERS = Object.freeze([
   '年度', '社員番号', '氏名', '社用メール', '在籍区分',
   '前年度情報元', '前年度健診機関コード', '前年度健診機関名',
   '前年度健診種別コード', '前年度健診種別名', '前年度追加検査', '前年度健診機関(原文)',
-  '登録日時', '登録者', '年度末年齢',
+  '登録日時', '登録者', '年度末年齢', '性別',
   'トークンハッシュ', '送信日時', '送信回数', '初回アクセス日時',
   '申込状態', '受付番号', '回答版', '回答日時', '備考',
 ]);
@@ -52,6 +52,11 @@ const ACTOR = 'AppsScript';
 const EXAM_TYPE_REGULAR = '10';               // 定期健康診断（34歳以下はこれだけ）
 const EXAM_TYPES_DOCK = Object.freeze(['11', '12', '13']);   // 人間ドックA/B/C（35歳以上はこの中から必ず選ぶ）
 const DOCK_AGE_FROM = 35;
+
+// 性別と追加検査（Hub の schema.py と同じ）: 男性には婦人科検診（GYN）を出さない。空＝不明は出す
+const GENDER_MALE = '男性';
+const EXTRA_GYN = 'GYN';
+function gynAllowed_(gender) { return cleanText_(gender) !== GENDER_MALE; }
 
 /** 列名 → 1始まりの列番号 */
 const TARGET_COL = Object.freeze(TARGET_HEADERS.reduce((m, h, i) => { m[h] = i + 1; return m; }, {}));
@@ -331,7 +336,7 @@ function doGet(e) {
   template.employee = {
     employeeId: target['社員番号'], name: target['氏名'], email: target['社用メール'],
     status: target['申込状態'] || STATUS.unsent, receiptId: target['受付番号'],
-    age: cleanText_(target['年度末年齢']),
+    age: cleanText_(target['年度末年齢']), gender: cleanText_(target['性別']),
   };
   const allowedTypes = allowedExamTypeCodes_(target['年度末年齢']);
   template.previous = previousView_(target, options, allowedTypes);
@@ -339,8 +344,8 @@ function doGet(e) {
   template.options = {
     institutions: activeOptions_(options, KIND.institution),
     examTypes: activeOptions_(options, KIND.examType).filter((o) => allowedTypes === null || allowedTypes.includes(o.code)),
-    extras: activeOptions_(options, KIND.extra),
-    relationships: activeOptions_(options, KIND.relationship),
+    extras: activeOptions_(options, KIND.extra).filter((o) => o.code !== EXTRA_GYN || gynAllowed_(target['性別'])),
+    relationships: [],
   };
   template.demo = demo;
   template.canAnswer = demo || [STATUS.sent, STATUS.reanswer].includes(template.employee.status);
@@ -351,7 +356,7 @@ function doGet(e) {
 
 /**
  * 説明用のサンプル対象者（架空。シートには無い）。URL のパラメータで見せ方を変えられる:
- *   age=34|40（年度末年齢。既定 35）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
+ *   age=34|40（年度末年齢。既定 35）、gender=m（男性＝婦人科検診なし。既定は女性）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
  */
 function demoTarget_(params, options) {
   const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '35';
@@ -360,7 +365,8 @@ function demoTarget_(params, options) {
   TARGET_HEADERS.forEach((h) => { target[h] = ''; });
   Object.assign(target, {
     '年度': '', '社員番号': '2099999', '氏名': 'サンプル 太郎', '社用メール': 'sample.taro@nmht.co.jp', '在籍区分': '0',
-    '年度末年齢': age, '申込状態': STATUS.sent, '前年度情報元': SOURCE_NONE,
+    '年度末年齢': age, '性別': cleanText_(params.gender) === 'm' ? GENDER_MALE : '女性',
+    '申込状態': STATUS.sent, '前年度情報元': SOURCE_NONE,
   });
   if (prev !== 'none') {
     const code = prev === 'other' ? '130192' : '1311337070';
@@ -454,7 +460,9 @@ function validatePayload_(target, payload, options, kv) {
       || { code: previous.institutionCode, name: previous.institutionName };
     examType = optionByCode_(options, KIND.examType, previous.examTypeCode, false)
       || { code: previous.examTypeCode, name: previous.examTypeName };
-    extras = previous.extraCodes.map((code) => optionByCode_(options, KIND.extra, code, false) || { code, name: code });
+    extras = previous.extraCodes
+      .filter((code) => code !== EXTRA_GYN || gynAllowed_(target['性別']))
+      .map((code) => optionByCode_(options, KIND.extra, code, false) || { code, name: code });
     if (!isBookable_(options, previous.institutionCode)) {
       // 会社で予約できない機関（その他扱い）: 本人が予約する。機関名（任意・既定は前年度の機関名）と予定日（任意）を預かる
       otherInstitution = cleanText_(payload.sameClinicName, 100) || previous.institutionName;
@@ -476,22 +484,15 @@ function validatePayload_(target, payload, options, kv) {
     extras = requested.map((code) => {
       const opt = optionByCode_(options, KIND.extra, code, true);
       if (!opt) throw new Error('選択できない追加検査が含まれています。');
+      if (opt.code === EXTRA_GYN && !gynAllowed_(target['性別'])) throw new Error('婦人科検診は選択できません。');
       return opt;
     });
   }
 
-  const dependentRequested = payload.dependentRequested === true;
-  let relationship = '';
-  let dependentName = '';
-  if (dependentRequested) {
-    const rel = optionByCode_(options, KIND.relationship, payload.dependentRelationship, true);
-    dependentName = cleanText_(payload.dependentName, 100);
-    if (!rel || !dependentName) throw new Error('被扶養者の続柄と氏名を入力してください。');
-    relationship = rel.code;
-  }
+  // 被扶養者の健診は受け付けない（2026-09-11）。回答シートの列は残し、常に 0・空で書く
   return {
     applicationType, institution, otherInstitution, otherPlannedDate, examType, extras,
-    dependentRequested, relationship, dependentName, remarks: cleanText_(payload.remarks, 500),
+    dependentRequested: false, relationship: '', dependentName: '', remarks: cleanText_(payload.remarks, 500),
   };
 }
 

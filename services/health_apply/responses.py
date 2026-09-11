@@ -150,6 +150,7 @@ def target_payload(row: dict, catalog: OptionCatalog) -> dict:
         "registered_by": row.get("登録者", ""),
         "age": str(row.get("年度末年齢", "") or "").strip(),
         "age_band": S.age_band_label(row.get("年度末年齢", "")),
+        "gender": str(row.get("性別", "") or "").strip(),
         "sent_at": row.get("送信日時", ""),
         "sent_count": row.get("送信回数", ""),
         "first_access_at": row.get("初回アクセス日時", ""),
@@ -326,6 +327,8 @@ def _build_view(emp: str, target: dict | None, items: list, catalog: OptionCatal
             # 年齢による健診種別の制限（画面でも止めるが、シートを直接いじった場合の見張り）
             allowed = S.allowed_exam_types(target.get("年度末年齢", ""))
             type_code = latest["exam_type"]["code"]
+            if not S.gyn_allowed(target.get("性別", "")) and any(e["code"] == S.EXTRA_GYN for e in latest["extras"]):
+                issues.append(Issue("warning", "extra_gender_mismatch", "対象者は男性なのに追加検査に婦人科検診があります"))
             if allowed is not None and type_code and type_code not in allowed:
                 issues.append(Issue("warning", "exam_type_age_mismatch",
                                     f"年度末年齢 {str(target.get('年度末年齢', '')).strip()} 歳の区分（{S.age_band_label(target.get('年度末年齢', ''))}）"

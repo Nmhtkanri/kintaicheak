@@ -114,8 +114,8 @@ def test_assert_writable_only_targets_and_audit():
 
 def test_target_headers_hub_columns_boundary():
     """Hub が書くのは先頭14列。15列目からは Apps Script の領域。"""
-    assert S.TARGET_HEADERS[S.TARGET_HUB_COLUMNS - 1] == "年度末年齢"
-    assert S.TARGET_HEADERS[S.TARGET_HUB_COLUMNS - 2] == "登録者"
+    assert S.TARGET_HEADERS[S.TARGET_HUB_COLUMNS - 1] == "性別"
+    assert S.TARGET_HEADERS[S.TARGET_HUB_COLUMNS - 2] == "年度末年齢"
     assert S.TARGET_HEADERS[S.TARGET_HUB_COLUMNS] == "トークンハッシュ"
     assert len(set(S.TARGET_HEADERS)) == len(S.TARGET_HEADERS)
     assert len(set(S.RESPONSE_HEADERS)) == len(S.RESPONSE_HEADERS)

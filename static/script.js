@@ -5821,6 +5821,7 @@ function haPaintResponseTable() {
             + `<td>${haEsc(row.name)}</td>`
             + `<td>${haEsc(t.enrollment_label || '')}</td>`
             + `<td title="${haEsc(t.age_band || '')}">${haEsc(t.age || '')}</td>`
+            + `<td>${haEsc(t.gender || '')}</td>`
             + `<td>${l ? haEsc(l.kind_label) : ''}</td>`
             + `<td>${inst}</td>`
             + `<td>${l ? haOptionText(l.exam_type) : ''}</td>`
@@ -5932,6 +5933,7 @@ function haRenderPreview(data) {
                 + `<td>${haEsc(row.email)}</td>`
                 + `<td>${haEsc(row.enrollment_label || row.enrollment || '')}</td>`
                 + `<td title="${haEsc(row.age_band || '')}">${row.age == null ? '' : haEsc(row.age)}</td>`
+                + `<td>${haEsc(row.gender || '')}</td>`
                 + `<td>${haEsc(p.source || '')}</td>`
                 + `<td>${haOptionText(inst)}${raw}</td>`
                 + `<td>${haOptionText(p.exam_type)}</td>`

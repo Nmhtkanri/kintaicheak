@@ -32,7 +32,7 @@ ACTION_LABELS = {ACTION_ADD: "追加", ACTION_UNCHANGED: "変更なし", ACTION_
 
 # 既存行との比較に使う列（これが同値なら「変更なし」）
 KEY_COLUMNS = ("氏名", "社用メール", "前年度情報元", "前年度健診機関コード", "前年度健診種別コード", "前年度追加検査",
-               "年度末年齢")
+               "年度末年齢", "性別")
 
 
 @dataclass
@@ -71,6 +71,7 @@ class Candidate:
     enrollment_name: str = ""
     retirement_date: str = ""
     age: int | None = None          # 年度末年齢（jinjer の生年月日から。無ければ None）
+    gender: str = ""                # 性別（jinjer の personal.gender.name。空＝不明）
     previous: PreviousExam = field(default_factory=PreviousExam)
     issues: list[Issue] = field(default_factory=list)
 
@@ -90,6 +91,7 @@ class Candidate:
             "retirement_date": self.retirement_date,
             "age": self.age,
             "age_band": S.age_band_label(self.age),
+            "gender": self.gender,
             "previous": self.previous.as_dict(),
             "issues": [i.as_dict() for i in self.issues],
         }
@@ -263,7 +265,8 @@ def build_candidates(employee_ids: list[str], profiles: dict[str, EmployeeProfil
             issues.append(Issue("warning", "no_previous", "前年度情報が無いので、本人は「前年度と同じ」を選べません"))
         out.append(Candidate(employee_id=emp, name=profile.name, email=email,
                              enrollment_id=profile.enrollment_id, enrollment_name=profile.enrollment_name,
-                             retirement_date=profile.retirement_date, age=age, previous=prev, issues=issues))
+                             retirement_date=profile.retirement_date, age=age, gender=profile.gender,
+                             previous=prev, issues=issues))
     return out
 
 
@@ -276,6 +279,7 @@ def candidate_key_values(c: Candidate) -> dict[str, str]:
         "前年度健診種別コード": c.previous.exam_type_code,
         "前年度追加検査": ";".join(c.previous.extra_codes),
         "年度末年齢": c.age_text,
+        "性別": c.gender,
     }
 
 
@@ -325,7 +329,7 @@ def confirm_phrase(fiscal_year: int, n_add: int) -> str:
 
 
 def build_target_rows(plan: TargetPlan, user: str, now_iso: str) -> list[list[str]]:
-    """追加分を対象者シートの列順（Hub 管轄の先頭15列）で返す。16列目以降は Apps Script が書く。"""
+    """追加分を対象者シートの列順（Hub 管轄の先頭16列）で返す。17列目以降は Apps Script が書く。"""
     rows: list[list[str]] = []
     for r in plan.by_action(ACTION_ADD):
         c = r.candidate
@@ -346,6 +350,7 @@ def build_target_rows(plan: TargetPlan, user: str, now_iso: str) -> list[list[st
             "登録日時": now_iso,
             "登録者": user,
             "年度末年齢": c.age_text,
+            "性別": c.gender,
         }
         rows.append([values.get(name, "") for name in S.TARGET_HEADERS[:S.TARGET_HUB_COLUMNS]])
     return rows
@@ -399,6 +404,7 @@ def candidate_from_dict(d: dict) -> Candidate:
         enrollment_name=str(d.get("enrollment_label", "")),
         retirement_date=str(d.get("retirement_date", "")),
         age=(int(d["age"]) if isinstance(d.get("age"), int) or str(d.get("age", "")).strip().isdigit() else None),
+        gender=str(d.get("gender", "") or ""),
         previous=previous_from_dict(d.get("previous")),
         issues=issues,
     )
