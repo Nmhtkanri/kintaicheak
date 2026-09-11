@@ -740,7 +740,7 @@
         </div>
         </div><!-- /keiri-salary-pane -->
 
-        <!-- 賞与: jinjer API（賞与計算結果）または「賞与支給控除項目一覧表」CSV → 支給／健康保険／厚生年金 の3CSV（2026-09-10、API 入力は 09-11） -->
+        <!-- 賞与: jinjer API（賞与計算結果）→ 支給／健康保険／厚生年金 の3CSV（2026-09-10、API 入力化 09-11。CSV アップロードはルートの裏口だけ残し画面には出さない） -->
         <div id="keiri-bonus-pane" style="display:none">
             <div class="fields">
                 <label class="field field-inline">
@@ -762,25 +762,17 @@
                 <label class="field field-inline">
                     <span class="field-label">支給ファイルの発生日 <span class="tag tag-req">必須</span></span>
                     <input type="date" id="keiri-bonus-hassei" style="width:170px">
-                    <span class="field-sub">経理担当の実績: 9月は 9/15、6月は 6/15、決算賞与は 3/31。支払期日は CSV 入力なら CSV の支給日、API 入力なら下の「支払期日（支給日）」（空欄なら API の支給日）</span>
+                    <span class="field-sub">経理担当の実績: 9月は 9/15、6月は 6/15、決算賞与は 3/31。支払期日は下の「支払期日（支給日）」（空欄なら API の支給日）</span>
                 </label>
                 <div class="field">
-                    <span class="field-label">入力 <span class="tag tag-req">必須</span></span>
-                    <div class="check-row">
-                        <label><input type="radio" name="keiri-bonus-source" value="api" checked> jinjer API から取る（計算対象月＝支給月）</label>
-                        <label><input type="radio" name="keiri-bonus-source" value="csv"> 賞与支給控除項目一覧表 CSV をアップロード</label>
-                    </div>
-                    <span class="field-sub">API には子ども・子育て支援金が無いので、標準賞与額×率÷2（五捨六入）で計算し、差引支給額との差で検算します。</span>
+                    <span class="field-label">入力</span>
+                    <span class="field-sub">jinjer の賞与計算結果を API から取ります（計算対象月＝支給月。jinjer で賞与計算を実行済みであること）。
+                        API に無い子ども・子育て支援金は 標準賞与額×率÷2（本人は五捨六入、事業主は同額）で計算し、差引支給額との差で検算します。</span>
                 </div>
-                <label class="field field-inline" id="keiri-bonus-file-field" style="display:none">
-                    <span class="field-label">賞与 CSV</span>
-                    <input type="file" id="keiri-bonus-file" accept=".csv">
-                    <span class="field-sub">jinjer → 賞与計算 → 賞与支給控除項目一覧表（項目を絞らずに出力。cp932）</span>
-                </label>
                 <label class="field field-inline" id="keiri-bonus-paid-on-field">
                     <span class="field-label">支払期日（支給日）</span>
                     <input type="date" id="keiri-bonus-paid-on" style="width:170px">
-                    <span class="field-sub">API 入力のとき有効。空欄なら API の支給日を使い要確認に注記します。API の支給日は処理基準日と同じ値になることがあるので（9月賞与で実例）、経理の支給日を入れるのが確実です</span>
+                    <span class="field-sub">空欄なら API の支給日を使い要確認に注記します。API の支給日は処理基準日と同じ値になることがあるので（9月賞与で実例）、経理の支給日を入れるのが確実です</span>
                 </label>
                 <label class="field field-inline">
                     <span class="field-label">回数</span>

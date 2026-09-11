@@ -2363,22 +2363,8 @@ if (keiriBonusLabelSel) {
     });
 }
 
-function keiriBonusSource() {
-    const el = document.querySelector('input[name="keiri-bonus-source"]:checked');
-    return el ? el.value : 'api';
-}
-function keiriBonusSyncSourceUI() {
-    const csv = keiriBonusSource() === 'csv';
-    const f = document.getElementById('keiri-bonus-file-field');
-    if (f) f.style.display = csv ? '' : 'none';
-    // 支払期日の上書きは API 入力のときだけ効く（CSV は CSV の支給日を使う）
-    const p = document.getElementById('keiri-bonus-paid-on-field');
-    if (p) p.style.display = csv ? 'none' : '';
-}
-document.querySelectorAll('input[name="keiri-bonus-source"]').forEach(r => {
-    r.addEventListener('change', keiriBonusSyncSourceUI);
-});
-keiriBonusSyncSourceUI();   // ブラウザがラジオの状態を復元したときにも欄を合わせる
+// 賞与の入力は API のみ（2026-09-11。CSV アップロードは /keiri_bonus_run の source=csv に裏口として残すが画面には無い）
+function keiriBonusSource() { return 'api'; }
 
 const keiriBonusRunBtn = document.getElementById('keiri-bonus-run-btn');
 if (keiriBonusRunBtn) {
@@ -2387,7 +2373,6 @@ if (keiriBonusRunBtn) {
         const month = (document.getElementById('keiri-bonus-month').value || '').trim();
         const label = keiriBonusLabel();
         const hassei = (document.getElementById('keiri-bonus-hassei').value || '').trim();
-        const fileEl = document.getElementById('keiri-bonus-file');
         const source = keiriBonusSource();
         const count = (document.getElementById('keiri-bonus-count').value || '').trim();
         keiriShowError([]);
@@ -2395,7 +2380,6 @@ if (keiriBonusRunBtn) {
         if (!/^\d{4}-\d{2}$/.test(month)) errs.push('支給月は YYYY-MM 形式で入力してください（例: 2026-09）');
         if (!label) errs.push('賞与の種類を選ぶか入力してください');
         if (!hassei) errs.push('支給ファイルの発生日を入れてください');
-        if (source === 'csv' && (!fileEl || !fileEl.files || !fileEl.files.length)) errs.push('賞与 CSV を選んでください');
         if (count && !/^\d+$/.test(count)) errs.push('回数は数字で入れてください');
         if (errs.length) { keiriShowError(errs); return; }
         const fd = new FormData();
@@ -2409,7 +2393,6 @@ if (keiriBonusRunBtn) {
         fd.append('shaho_kigen', (document.getElementById('keiri-bonus-shaho-kigen').value || '').trim());
         fd.append('refresh_custom', document.getElementById('keiri-bonus-refresh-custom').checked ? '1' : '0');
         fd.append('refresh_statements', document.getElementById('keiri-bonus-refresh-statements').checked ? '1' : '0');
-        if (source === 'csv') fd.append('file', fileEl.files[0]);
         keiriBonusRunBtn.disabled = true;
         status.textContent = '生成中…';
         document.getElementById('keiri-bonus-result-area').style.display = 'none';

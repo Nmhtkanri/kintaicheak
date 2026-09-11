@@ -29,15 +29,16 @@ def js():
 
 def test_subtabs_and_panes_exist(html):
     for el_id in ("keiri-subtabs", "keiri-salary-pane", "keiri-bonus-pane", "keiri-bonus-month",
-                  "keiri-bonus-label", "keiri-bonus-label-other", "keiri-bonus-hassei", "keiri-bonus-file",
+                  "keiri-bonus-label", "keiri-bonus-label-other", "keiri-bonus-hassei",
                   "keiri-bonus-shaho-hassei", "keiri-bonus-shaho-kigen", "keiri-bonus-refresh-custom",
                   "keiri-bonus-run-btn", "keiri-bonus-status", "keiri-bonus-result-area",
                   "keiri-bonus-files", "keiri-bonus-yokakunin"):
         assert f'id="{el_id}"' in html, el_id
     assert 'data-keiri-sub="salary"' in html and 'data-keiri-sub="bonus"' in html
-    for el_id in ("keiri-bonus-file-field", "keiri-bonus-paid-on", "keiri-bonus-count", "keiri-bonus-refresh-statements"):
+    for el_id in ("keiri-bonus-paid-on", "keiri-bonus-count", "keiri-bonus-refresh-statements"):
         assert f'id="{el_id}"' in html, el_id
-    assert 'name="keiri-bonus-source" value="api" checked' in html
+    # 賞与 CSV のアップロード欄は画面に出さない（入力は API のみ。2026-09-11）
+    assert 'id="keiri-bonus-file"' not in html and 'name="keiri-bonus-source"' not in html
     # 既存の給与側 id はそのまま
     for el_id in ("keiri-month", "keiri-run-btn", "keiri-result-area", "keiri-error-area"):
         assert f'id="{el_id}"' in html, el_id
@@ -54,7 +55,7 @@ def test_subtab_wiring_mirrors_health_mode(js):
     assert "'/keiri_bonus_run'" in js
     assert "function keiriRenderBonus(" in js and "function keiriBonusLabel(" in js
     assert "function keiriBonusSource(" in js and "fd.append('source', source)" in js
-    assert "if (source === 'csv') fd.append('file', fileEl.files[0]);" in js
+    assert "getElementById('keiri-bonus-file')" not in js          # 画面からファイル入力を外した
 
 
 def _post(client, **over):
