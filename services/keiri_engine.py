@@ -152,6 +152,9 @@ KONEN_AZUKARI = [("salary_deduction_items:deduction31", "厚生年金保険料�
 # C3: 休職者かつ社保が発生している人は、預り金の行は暫定取引に入れ、仮払金だけを
 #     「1行=1取引」（管理番号・支払期日とも空欄）で末尾に分ける（2026-07-28 経理担当確認）。
 SHAHO_KEYS = ("salary_deduction_items:deduction29", "salary_deduction_items:deduction31")
+# 当月末退職者の本人控除が「2 か月分」と判定する倍率（退職月の本人控除 ÷ 前月明細の本人控除）。
+# 通常の月変（1〜2 等級）や介護保険の開始・終了（15% 前後）では跨がない。2026-09-11 実データ: 小池 2.43 倍／大村・国見 1.0 倍
+RETIREE_DOUBLE_RATIO = 1.6
 # 休職者の仮払金の備考。「（○月分社保）」は何月分かを jinjer から決められないため手入力
 KYUSHOKU_BIKO = "傷病手当金の入金があり次第精算予定"
 
@@ -1151,6 +1154,13 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
       ③ 退職者分   発生日=当月末・期日=翌月末 … 当月退職者の翌月分（社保2倍回収の会社負担）
       ④ 退職者預り 発生日=翌月末・期日=翌月末 … ③に対応する預り分
 
+    当月末退職者は 2 つの型がある（2026-09-11 実データで確認）:
+      2 か月分型: 退職月の給与で前月分＋当月分をまとめて徴収（小池 2023019 の 2026-07: 本人控除が 6 月の 2 倍、8 月は 0）
+                  → ①×0.5 ＋ ③④（翌月分の前倒し）。従来どおり。
+      1 か月分型: 有給買取などで退職月の翌月にも給与があり、1 か月分ずつ徴収（大村 2026006・国見 2024012 の 2026-07/08）
+                  → 退職月は ①全額・②全額で ③④は作らない。翌月の実行でその人に本人控除があれば ①②に載せる。
+      判定は退職月の本人控除が前月明細の本人控除（1 か月分）の 1.6 倍以上かどうか。
+
     B7: 健保=健保＋介護＋子ども子育て支援金の合算／厚年=厚年のみ。
         子ども・子育て拠出金は全員分を1行に一括計上（品目=人件費（本社）・厚年ファイル）。
     """
@@ -1200,20 +1210,57 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
         """
         return str(ridx.get(emp, {}).get("joined_on") or "")[:7] == prev
 
+    def is_prev_end_retiree(emp):
+        """前月末で退職した人（退職月の翌月の実行で、残り 1 か月分があるかを見る）。"""
+        return str(ridx.get(emp, {}).get("retired_on") or "") == prev_end
+
+    def retiree_double(emp):
+        """当月末退職者の本人控除が 2 か月分か（退職月に前月分＋当月分をまとめて徴収する通常の型）。
+
+        前月明細の本人控除（1 か月分）の 1.6 倍以上なら 2 か月分。前月明細に本人控除が無ければ
+        前月の会社負担（1 か月分）と比べる。判定材料が無い（両方 0）ときは従来どおり 2 か月分として扱う。
+        """
+        cur = honnin_company_total(st_m[emp])
+        base = honnin_company_total(st_prev[emp]) if emp in st_prev else 0
+        if not base:
+            base = company_total(st_prev[emp]) if emp in st_prev else 0
+        if not base or not cur:
+            return True
+        # 判定材料を md に出す（閾値を跨いだかを人が確かめられるように。ファイルごとに判定する）
+        alerts["retiree_ratio"].add((emp, ridx.get(emp, {}).get("name", emp), file_label,
+                                     int(cur), int(base), round(cur / base, 2)))
+        return cur >= base * RETIREE_DOUBLE_RATIO
+
     def main_ratio(emp):
-        """①の金額に掛ける比率。当月末退職者は社保を2倍徴収されているので半分を1か月分にする。
-        金額の読み元は経路によらず当月明細の本人控除（shaho_total_honnin）。"""
-        return 0.5 if (is_retiree(emp) and emp in st_m) else 1.0
+        """①の金額に掛ける比率。当月末退職者で社保を 2 倍徴収されている人は半分を 1 か月分にする。
+        1 か月分ずつ徴収する型（有給買取など）は全額。金額の読み元は経路によらず当月明細の本人控除。"""
+        return 0.5 if (is_retiree(emp) and emp in st_m and retiree_double(emp)) else 1.0
 
     # ②預り金・拠出金の集計対象（当月給与から控除・負担が発生する人）
     azukari_emps = []
     for emp in sorted(st_m):
         retired = str(ridx.get(emp, {}).get("retired_on") or "")
-        if retired and retired <= prev_end:
-            continue                      # 前月末までに退職＝前月CSVで処理済み
+        if retired and retired < prev_end:
+            if honnin_company_total(st_m[emp]):
+                # 前月末より前に退職した人に当月控除がある＝機械では載せない。手で計上する
+                alerts["retiree_odd"].add((emp, ridx.get(emp, {}).get("name", emp), retired, file_label,
+                                           int(shaho_total_honnin(st_m[emp])),
+                                           "前月末より前の退職者に当月明細で本人控除がある（①②とも載せていない。手で計上）"))
+            continue                      # 前月末より前に退職＝前月までのCSVで処理済み
+        if is_prev_end_retiree(emp):
+            if not honnin_company_total(st_m[emp]):
+                continue                  # 前月末退職で当月に控除なし＝2 か月分型（前月CSVの③④で処理済み）
+            if emp not in st_prev:
+                alerts["retiree_odd"].add((emp, ridx.get(emp, {}).get("name", emp), retired, file_label,
+                                           int(shaho_total_honnin(st_m[emp])),
+                                           "退職月の明細が無いので ②預り金だけ載せた（①の会社負担は手で計上）"))
+            elif honnin_company_total(st_prev[emp]) >= honnin_company_total(st_m[emp]) * RETIREE_DOUBLE_RATIO:
+                alerts["retiree_odd"].add((emp, ridx.get(emp, {}).get("name", emp), retired, file_label,
+                                           int(shaho_total_honnin(st_m[emp])),
+                                           "退職月に 2 か月分徴収した疑い（前月CSVの③④と当月の①②が重複していないか確認）"))
         if is_shaho_menjo(st_m[emp]):
             continue                      # 育休等の社保免除
-        azukari_emps.append((emp, 0.5 if is_retiree(emp) else 1.0))
+        azukari_emps.append((emp, main_ratio(emp)))
 
     # --- ① 主取引（当月も在籍している人。前月末で退職した人は前月のCSVで処理済み）---
     main_rows = []
@@ -1221,14 +1268,24 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
         if emp not in st_m:
             continue
         retired = str(ridx.get(emp, {}).get("retired_on") or "")
-        if retired and retired <= prev_end:
-            continue          # 前月末までに退職＝前月CSVの③④で処理済み
+        if retired and retired < prev_end:
+            continue          # 前月末より前に退職＝前月までのCSVで処理済み
+        if is_prev_end_retiree(emp) and not honnin_company_total(st_m[emp]):
+            continue          # 前月末退職で当月に控除なし＝2 か月分型（前月CSVの③④で処理済み）
         if is_shaho_menjo_prev(st_prev[emp], st_m[emp]):
             alerts["shaho_menjo"].add((emp, ridx.get(emp, {}).get("name", emp), prev))
             continue          # 育休等で社保免除＝計上しない
         ratio = main_ratio(emp)
-        # ①は当月明細の本人控除（＝前月分）から読む。当月末退職者は 2 倍徴収なので半分。
+        # ①は当月明細の本人控除（＝前月分）から読む。当月末退職者は 2 倍徴収なら半分、1 か月分型なら全額。
         total = shaho_total_honnin(st_m[emp]) * ratio
+        if is_retiree(emp) and ratio == 1.0 and total:
+            alerts["retiree_single"].add((emp, ridx.get(emp, {}).get("name", emp), retired,
+                                          int(total), file_label))
+        if is_prev_end_retiree(emp) and total:
+            # 1 か月分型の翌月: 退職月分（当月明細の本人控除）を①に載せる。拠出金も当月明細の other19 が
+            # azukari_emps 経由で①の一括行に入る（2026-08 大村 1,296 円で最終 CSV と一致）
+            alerts["retiree_next"].add((emp, ridx.get(emp, {}).get("name", emp), retired,
+                                        int(total), file_label))
         prev_company = company_total(st_prev[emp])
         cur_honnin = honnin_company_total(st_m[emp]) * ratio      # 同じ範囲（支援金を除く）で比べる
         if not prev_company and total:
@@ -1284,8 +1341,8 @@ def build_shaho(month, prev, st_prev, st_m, ridx, resolver, master_rows, kanri, 
     # --- ③④ 当月退職者の翌月分（社保2倍回収の残り半分）---
     retire_rows, retire_azukari, retire_base = [], [], []
     for emp in sorted(st_m):
-        if not is_retiree(emp):
-            continue
+        if not is_retiree(emp) or not retiree_double(emp):
+            continue          # 1 か月分型は翌月分を前倒ししない（翌月の実行で①②に載る）
         total = shaho_total(st_m[emp]) * 0.5
         if not total:
             continue
@@ -1778,6 +1835,39 @@ def build_yokakunin(month, alerts, master):
             lines.append(f"| {emp} | {name} | {retired} | {amt:,} |")
     else:
         lines.append("- なし")
+    lines += ["", "## 当月末退職者で本人控除が 1 か月分の人（翌月にも 1 か月分ずつ徴収する型）", "",
+              f"退職月の本人控除が前月明細の本人控除の {RETIREE_DOUBLE_RATIO} 倍未満なので、①は前月分の全額にし、③④（翌月分の前倒し）は作らない。"
+              "有給買取などで退職月の翌月にも給与がある人に起きる（2026-07 大村・国見）。判定は健保・厚年のファイルごとに行う。"
+              "**翌月の実行でその人の明細に本人控除が入っているか確認すること**（入っていれば翌月の①②に載る。"
+              "入っていなければ未収入金の可能性）。", ""]
+    if alerts["retiree_single"]:
+        lines += ["| 社員番号 | 氏名 | 退職日 | ファイル | ①の金額 |", "|---|---|---|---|---|"]
+        for emp, name, retired, amt, fl in sorted(alerts["retiree_single"]):
+            lines.append(f"| {emp} | {name} | {retired} | {fl} | {amt:,} |")
+    else:
+        lines.append("- なし")
+    if alerts["retiree_ratio"]:
+        lines += ["", "判定材料（退職月の本人控除 ÷ 前月明細の本人控除。"
+                      f"{RETIREE_DOUBLE_RATIO} 倍以上なら 2 か月分型。1.3〜1.9 倍は微妙なので明細を目で確認）:"]
+        for emp, name, fl, cur, base, ratio in sorted(alerts["retiree_ratio"]):
+            note = "　← 微妙" if 1.3 <= ratio <= 1.9 else ""
+            lines.append(f"- {emp} {name}（{fl}）: {cur:,} ÷ {base:,} = {ratio} 倍{note}")
+    lines += ["", "## 前月末退職者の残り 1 か月分（当月明細に本人控除があるので①②に載せた）", "",
+              "1 か月分型の翌月。退職月分（当月明細の本人控除）を①に、当月の控除を②に載せた。"
+              "拠出金も当月明細の値が①の一括行に入る（2026-08 大村で最終 CSV と一致）。"
+              "**前月の CSV の③④（退職者分）にこの人が居ないことを確認すること**（居れば二重）。", ""]
+    if alerts["retiree_next"]:
+        lines += ["| 社員番号 | 氏名 | 退職日 | ファイル | ①の金額 |", "|---|---|---|---|---|"]
+        for emp, name, retired, amt, fl in sorted(alerts["retiree_next"]):
+            lines.append(f"| {emp} | {name} | {retired} | {fl} | {amt:,} |")
+    else:
+        lines.append("- なし")
+    lines += ["", "### 手で確認する退職者（機械で載せていない、または重複の疑い）", ""]
+    if alerts["retiree_odd"]:
+        for emp, name, retired, fl, amt, why in sorted(alerts["retiree_odd"]):
+            lines.append(f"- {emp} {name}（退職 {retired}・{fl}・当月明細の本人控除 {amt:,}）: {why}")
+    else:
+        lines.append("- なし")
     lines += ["", "## 育成期間だったかもしれない人（人件費区分が既定に落ちた新入社員）", "",
               f"jinjer の人件費区分は 本社／育成 の例外だけを持ち、空欄は既定の"
               f"{JINKENHI_KUBUN_DEFAULT}になる。育成のレコードは 2026-07 の一括投入以降しか"
@@ -1865,7 +1955,9 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
               "keihi_tenki": set(), "keihi_bunkai": [], "keihi_book_missing": set(),
               "keihi_manual": [], "keihi_manual_mismatch": set(), "sonota_ledger_bad_month": set(),
               "tatekae_skip": set(), "split_done": set(),
-              "retiree": set(), "shaho_menjo": set(), "juminzei_shokai": set(),
+              "retiree": set(), "retiree_single": set(), "retiree_next": set(),
+              "retiree_ratio": set(), "retiree_odd": set(),
+              "shaho_menjo": set(), "juminzei_shokai": set(),
               "juminzei_soosai": set(), "karibarai": set(),
               "shaho_chosei_split": set(), "shaho_new_hire": set(), "shaho_prev_diff": set(),
               "watch_used": set(),
@@ -1969,6 +2061,8 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
             "経費転記の分解": len(alerts["keihi_bunkai"]),
             "経費転記で保留": len(alerts["keihi_tenki"]),
             "その他を台帳から計上": len(alerts["keihi_manual"]),
+            "退職者の残り1か月分（翌月計上）": len({e for e, *_ in alerts["retiree_next"]}),
+            "退職者で手確認": len({e for e, *_ in alerts["retiree_odd"]}),
             "未収入金の候補": len(alerts["mishunyukin"]),
             "備考の手入力が必要": len(alerts["biko_needed"]),
             "育成かもしれない人": len(alerts["ikusei_maybe"]),

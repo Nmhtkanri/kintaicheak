@@ -2293,7 +2293,8 @@ if (keiriRunBtn) {
             document.getElementById('keiri-cnt-alert').textContent =
                 (alerts['備考の手入力が必要'] || 0) + (alerts['未収入金の候補'] || 0)
                 + (alerts['経費転記で保留'] || 0) + (alerts['部門未知値'] || 0)
-                + (alerts['対象外項目の新規使用'] || 0);
+                + (alerts['対象外項目の新規使用'] || 0)
+                + (alerts['退職者の残り1か月分（翌月計上）'] || 0) + (alerts['退職者で手確認'] || 0);
             document.getElementById('keiri-cnt-keihi').textContent = alerts['経費転記の分解'] || 0;
             keiriRenderFiles(data);
             keiriRenderDiff(data);

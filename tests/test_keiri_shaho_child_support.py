@@ -25,7 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from services.keiri_engine import KENPO_AZUKARI, Resolver, build_shaho, build_yokakunin, jp_date  # noqa: E402
+from services.keiri_engine import (KENPO_AZUKARI, RETIREE_DOUBLE_RATIO, Resolver, build_shaho,  # noqa: E402
+                                   build_yokakunin, jp_date)
 
 CS = "salary_deduction_items:child_support"
 KENPO_ROWS = [
@@ -38,11 +39,12 @@ KENPO_ROWS = [
 ]
 
 
-def _pi(kenpo_kaisha=0, kaigo_kaisha=0, kenpo_honnin=0, kodomo=0):
+def _pi(kenpo_kaisha=0, kaigo_kaisha=0, kenpo_honnin=0, kodomo=0, kyoshutsu=0):
     """会社負担（当月分）と本人控除（前月分）を持つ payroll_info。"""
     return {"salary_other_items": [{"id": "other15", "value": kenpo_kaisha},
                                    {"id": "other16", "value": kaigo_kaisha},
-                                   {"id": "other17", "value": 0}],
+                                   {"id": "other17", "value": 0},
+                                   {"id": "other19", "value": kyoshutsu}],
             "salary_deduction_items": [{"id": "deduction29", "value": kenpo_honnin},
                                        {"id": "deduction31", "value": 0},
                                        {"id": "child_support", "value": kodomo}]}
@@ -51,7 +53,7 @@ def _pi(kenpo_kaisha=0, kaigo_kaisha=0, kenpo_honnin=0, kodomo=0):
 class ShahoChildSupportTests(unittest.TestCase):
     MONTH, PREV = "2026-08", "2026-07"
 
-    def _run(self, st_prev, st_m, ridx_extra=None):
+    def _run(self, st_prev, st_m, ridx_extra=None, kyoshutsukin=False):
         alerts = defaultdict(set)
         ridx = {e: {"name": f"社員{e}"} for e in set(st_prev) | set(st_m)}
         for e, extra in (ridx_extra or {}).items():
@@ -59,7 +61,7 @@ class ShahoChildSupportTests(unittest.TestCase):
         resolver = Resolver({}, alerts, ridx)
         tx = build_shaho(self.MONTH, self.PREV, st_prev, st_m, ridx, resolver, KENPO_ROWS,
                          "K1", "健保組合", KENPO_AZUKARI, alerts,
-                         kyoshutsukin=False, split_midmonth=False)
+                         kyoshutsukin=kyoshutsukin, split_midmonth=False)
         return tx, alerts
 
     @staticmethod
@@ -118,6 +120,94 @@ class ShahoChildSupportTests(unittest.TestCase):
         items = {r["品目"]: r["金額"] for r in retire_az[0]["rows"]}
         self.assertEqual(items["健康保険料（預り分）"], 20000)
         self.assertEqual(items["子ども・子育て支援金（預り分）"], 506)
+
+    def test_single_month_retiree_books_full_amount_and_no_next_month_rows(self):
+        """1 か月分型（退職月の本人控除が前月と同額）: ①②は全額、③④は作らない（2026-07 大村 2026006）。"""
+        st_prev = {"2026006": _pi(kenpo_kaisha=16686, kenpo_honnin=16686, kodomo=414)}
+        st_m = {"2026006": _pi(kenpo_kaisha=16686, kenpo_honnin=16686, kodomo=414)}
+        tx, alerts = self._run(st_prev, st_m, {"2026006": {"retired_on": "2026-08-31"}})
+        self.assertEqual(self._main_amounts(tx)["社員2026006"], 16686 + 414)          # ①全額（×0.5 しない）
+        self.assertEqual(self._azukari_items(tx)["健康保険料（預り分）"], 16686)       # ②全額
+        self.assertEqual([t for t in tx if t["支払期日"] == jp_date("2026-09-30")], [])  # ③④なし
+        self.assertEqual({(e, fl, a) for e, _n, _r, a, fl in alerts["retiree_single"]}, {("2026006", "K1", 16686 + 414)})
+        self.assertEqual(alerts["retiree"], set())
+        self.assertEqual(alerts["shaho_prev_diff"], set())                             # 前月会社負担＝当月本人控除
+
+    def test_prev_end_retiree_with_deductions_is_booked_next_month(self):
+        """前月末退職者でも当月明細に本人控除があれば（1 か月分型の翌月）①②に載せる。"""
+        st_prev = {"2026006": _pi(kenpo_kaisha=16686, kenpo_honnin=16686, kodomo=414)}
+        st_m = {"2026006": _pi(kenpo_kaisha=16686, kenpo_honnin=16686, kodomo=414)}
+        tx, alerts = self._run(st_prev, st_m, {"2026006": {"retired_on": "2026-07-31"}})
+        self.assertEqual(self._main_amounts(tx)["社員2026006"], 16686 + 414)
+        self.assertEqual(self._azukari_items(tx)["健康保険料（預り分）"], 16686)
+        self.assertEqual({(e, r, a, fl) for e, _n, r, a, fl in alerts["retiree_next"]},
+                         {("2026006", "2026-07-31", 16686 + 414, "K1")})
+        self.assertEqual(alerts["retiree"], set())
+
+    def test_prev_end_retiree_without_deductions_stays_out(self):
+        """前月末退職者で当月明細に本人控除が無い（2 か月分型の翌月。小池 2023019 の 2026-08）は従来どおり対象外。"""
+        st_prev = {"2023019": _pi(kenpo_kaisha=31518, kenpo_honnin=31518, kodomo=782)}
+        st_m = {"2023019": _pi()}
+        tx, alerts = self._run(st_prev, st_m, {"2023019": {"retired_on": "2026-07-31"}})
+        self.assertEqual(tx, [])
+        self.assertEqual(alerts["retiree_next"], set())
+
+    def test_ratio_boundary(self):
+        """閾値ちょうどで 2 か月分型、その手前は 1 か月分型。判定材料は alerts["retiree_ratio"] に出る。"""
+        base = 10000
+        for cur, double in ((int(base * RETIREE_DOUBLE_RATIO), True), (int(base * RETIREE_DOUBLE_RATIO) - 1, False)):
+            st_prev = {"A": _pi(kenpo_kaisha=base, kenpo_honnin=base)}
+            st_m = {"A": _pi(kenpo_kaisha=cur, kenpo_honnin=cur)}
+            tx, alerts = self._run(st_prev, st_m, {"A": {"retired_on": "2026-08-31"}})
+            self.assertEqual(self._main_amounts(tx)["社員A"], cur * 0.5 if double else cur, cur)
+            self.assertEqual(bool([t for t in tx if t["支払期日"] == jp_date("2026-09-30")]), double)
+            self.assertEqual({(e, fl, c, b) for e, _n, fl, c, b, _r in alerts["retiree_ratio"]}, {("A", "K1", cur, base)})
+
+    def test_prev_end_retiree_kyoshutsukin_uses_current_statement(self):
+        """1 か月分型の翌月は拠出金も当月明細の other19 が①の一括行に入る（2026-08 大村 1,296 で最終 CSV と一致）。"""
+        st_prev = {"2026006": _pi(kenpo_kaisha=16686, kenpo_honnin=16686, kyoshutsu=1296),
+                   "B": _pi(kenpo_kaisha=10000, kenpo_honnin=10000, kyoshutsu=800)}
+        st_m = {"2026006": _pi(kenpo_kaisha=16686, kenpo_honnin=16686, kyoshutsu=1296),
+                "B": _pi(kenpo_kaisha=10000, kenpo_honnin=10000, kyoshutsu=800)}
+        tx, _ = self._run(st_prev, st_m, {"2026006": {"retired_on": "2026-07-31"}}, kyoshutsukin=True)
+        main = [t for t in tx if t["発生日"] == jp_date("2026-07-31")][0]
+        kyo = [r["金額"] for r in main["rows"] if r["備考"] and "拠出" in r["備考"]]
+        self.assertEqual(kyo, [1296 + 800])
+
+    def test_prev_end_retiree_missing_from_prev_statements_is_flagged(self):
+        """退職月の明細が無い前月末退職者に当月控除がある: ②だけ載り、手確認の alert に出る。"""
+        st_prev = {"B": _pi(kenpo_kaisha=10000, kenpo_honnin=10000)}
+        st_m = {"A": _pi(kenpo_kaisha=5000, kenpo_honnin=5000), "B": _pi(kenpo_kaisha=10000, kenpo_honnin=10000)}
+        tx, alerts = self._run(st_prev, st_m, {"A": {"retired_on": "2026-07-31"}})
+        self.assertNotIn("社員A", self._main_amounts(tx))
+        self.assertEqual(self._azukari_items(tx)["健康保険料（預り分）"], 15000)
+        self.assertEqual({(e, why.split("（")[0]) for e, _n, _r, _fl, _a, why in alerts["retiree_odd"]},
+                         {("A", "退職月の明細が無いので ②預り金だけ載せた")})
+        self.assertEqual(alerts["retiree_next"], set())
+
+    def test_earlier_retiree_with_deductions_is_flagged_not_booked(self):
+        """前月末より前の退職者に当月控除がある（国見の修正が 9 月明細に入った場合など）: 載せずに手確認へ。"""
+        st_prev = {"A": _pi()}
+        st_m = {"A": _pi(kenpo_kaisha=12051, kenpo_honnin=12051, kodomo=299)}
+        tx, alerts = self._run(st_prev, st_m, {"A": {"retired_on": "2026-06-30"}})
+        self.assertEqual(tx, [])
+        self.assertEqual({(e, a) for e, _n, _r, _fl, a, _w in alerts["retiree_odd"]}, {("A", 12051 + 299)})
+
+    def test_double_type_prev_month_then_deductions_again_is_flagged(self):
+        """退職月に 2 か月分徴収した人が翌月にも控除を持つ（三重取り）: ①②には載せるが重複の疑いを出す。"""
+        st_prev = {"A": _pi(kenpo_kaisha=31518, kenpo_honnin=31518)}
+        st_m = {"A": _pi(kenpo_kaisha=15759, kenpo_honnin=15759)}
+        tx, alerts = self._run(st_prev, st_m, {"A": {"retired_on": "2026-07-31"}})
+        self.assertEqual(self._main_amounts(tx)["社員A"], 15759)
+        self.assertTrue(any("2 か月分徴収した疑い" in why for *_, why in alerts["retiree_odd"]))
+
+    def test_double_type_judged_against_prev_company_share_when_prev_honnin_missing(self):
+        """前月明細に本人控除が無い（入社月退職など）ときは前月の会社負担と比べる。判定材料が無ければ従来どおり 2 か月分。"""
+        st_prev = {"A": _pi(kenpo_kaisha=10000, kenpo_honnin=0), "B": _pi()}
+        st_m = {"A": _pi(kenpo_kaisha=20000, kenpo_honnin=20000), "B": _pi(kenpo_kaisha=20000, kenpo_honnin=20000)}
+        tx, alerts = self._run(st_prev, st_m, {"A": {"retired_on": "2026-08-31"}, "B": {"retired_on": "2026-08-31"}})
+        self.assertEqual(self._main_amounts(tx), {"社員A": 10000, "社員B": 10000})     # どちらも ×0.5
+        self.assertEqual({e for e, *_ in alerts["retiree"]}, {"A", "B"})
 
     def test_new_hire_path_is_unchanged(self):
         """前月入社（前月明細に社保なし）は当月明細をそのまま読む。修正前後で同じ。"""
@@ -188,6 +278,20 @@ class YokakuninShahoSectionsTests(unittest.TestCase):
         self.assertIn("| 2026020 | 社員2026020 | 2026-07-01 | 入社月 | 健保 | 13,944 |", md)
         self.assertIn("## 前月明細の会社負担と当月明細の本人控除が違う人", md)
         self.assertIn("| 2011001 | 社員2011001 | 健保 | 20,000 | 22,000 | +2,000 |", md)
+
+    def test_retiree_sections_render(self):
+        alerts = defaultdict(set)
+        alerts["retiree_single"].add(("2026006", "大村 賢治", "2026-07-31", 17100, "健保"))
+        alerts["retiree_next"].add(("2026006", "大村 賢治", "2026-07-31", 17100, "健保"))
+        alerts["retiree_ratio"].add(("2026006", "大村 賢治", "健保", 16686, 16686, 1.0))
+        alerts["retiree_odd"].add(("2024012", "国見", "2026-07-31", "健保", 12350, "前月末より前の退職者に当月明細で本人控除がある"))
+        md = chr(10).join(build_yokakunin("2026-08", alerts, {}))
+        self.assertIn("## 当月末退職者で本人控除が 1 か月分の人", md)
+        self.assertIn("| 2026006 | 大村 賢治 | 2026-07-31 | 健保 | 17,100 |", md)
+        self.assertIn("- 2026006 大村 賢治（健保）: 16,686 ÷ 16,686 = 1.0 倍", md)
+        self.assertIn("## 前月末退職者の残り 1 か月分", md)
+        self.assertIn("### 手で確認する退職者", md)
+        self.assertIn("- 2024012 国見（退職 2026-07-31・健保・当月明細の本人控除 12,350）: 前月末より前", md)
 
     def test_sections_say_none_when_empty(self):
         md = chr(10).join(build_yokakunin("2026-08", defaultdict(set), {}))
