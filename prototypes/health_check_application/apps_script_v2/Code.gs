@@ -277,15 +277,9 @@ function isBookable_(options, institutionCode) {
   return !!code && code !== OTHER_INSTITUTION_CODE && !!optionByCode_(options, KIND.institution, code, true);
 }
 
-/** 健診予定日（任意）。空なら ''、形式外・受診期間外はエラー。 */
+/** 受診予定時期（任意・自由記述。「2027-06」「6月頃」など。確定していなくてよいので形式は検査しない）。 */
 function plannedDate_(kv, value) {
-  const s = cleanText_(value, 10);
-  if (!s) return '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error('健診予定日の形式が正しくありません。');
-  if (s < kv['受診期間開始'] || s > kv['受診期間終了']) {
-    throw new Error(`健診予定日は受診期間（${kv['受診期間開始']}〜${kv['受診期間終了']}）内で入力してください。`);
-  }
-  return s;
+  return cleanText_(value, 40);
 }
 
 function recordFirstAccess_(target) {
@@ -357,10 +351,10 @@ function doGet(e) {
 
 /**
  * 説明用のサンプル対象者（架空。シートには無い）。URL のパラメータで見せ方を変えられる:
- *   age=34|40（年度末年齢。既定 34）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
+ *   age=34|40（年度末年齢。既定 35）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
  */
 function demoTarget_(params, options) {
-  const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '34';
+  const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '35';
   const prev = ['same', 'other', 'none'].includes(cleanText_(params.prev)) ? cleanText_(params.prev) : 'same';
   const target = { rowNumber: 0 };
   TARGET_HEADERS.forEach((h) => { target[h] = ''; });

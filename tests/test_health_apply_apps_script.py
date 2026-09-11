@@ -140,8 +140,6 @@ def test_validate_same_copies_previous_and_needs_previous():
     (change_payload(clinicCode="130192"), "健診機関"),                       # 無効化された機関は選べない
     (change_payload(courseCode="99"), "健診種別"),
     (change_payload(extraCodes=["XRAY"]), "追加検査"),
-    (change_payload(clinicCode="OTHER", otherPlannedDate="2028-04-01"), "受診期間"),
-    (change_payload(clinicCode="OTHER", otherPlannedDate="2027/05/01"), "形式"),
     (change_payload(dependentRequested=True, dependentRelationship="妻", dependentName=""), "続柄と氏名"),
     (change_payload(dependentRequested=True, dependentRelationship="子", dependentName="x"), "続柄と氏名"),
     (change_payload(agreement=False), "確認欄"),
@@ -345,7 +343,8 @@ def test_validate_same_with_unbookable_previous_keeps_code_and_captures_self_boo
     assert (out["result"]["inst"], out["result"]["other"], out["result"]["date"]) == ("130192", "東京品川病院 総合健診センター", "")
     out = validate(t, {"applicationType": "same", "agreement": True, "sameClinicName": "品川の別のクリニック", "samePlannedDate": "2027-06-01"})
     assert (out["result"]["other"], out["result"]["date"]) == ("品川の別のクリニック", "2027-06-01")
-    assert "受診期間" in validate(t, {"applicationType": "same", "agreement": True, "samePlannedDate": "2028-04-01"})["error"]
+    out = validate(t, {"applicationType": "same", "agreement": True, "samePlannedDate": "6月頃"})
+    assert out["error"] is None and out["result"]["date"] == "6月頃"        # 受診予定時期は自由記述
     # 予約できる機関（春日）が前年度なら、その他欄は空のまま
     out = validate({}, {"applicationType": "same", "agreement": True, "sameClinicName": "無視される"})
     assert (out["result"]["inst"], out["result"]["other"]) == ("1310528885", "")
@@ -367,12 +366,12 @@ def test_demo_target_variants_have_no_real_person():
                 " return {d: pick(demoTarget_({}, o)), a40: pick(demoTarget_({age: '40'}, o)), other: pick(demoTarget_({prev: 'other'}, o)),"
                 " none: pick(demoTarget_({prev: 'none'}, o)), junk: pick(demoTarget_({age: 'abc', prev: 'x'}, o))}; })()")
     r = run_gas(workbook(), scenario)["result"]
-    assert r["d"] == {"id": "2099999", "age": "34", "src": "履歴", "inst": "1311337070", "name": "MYメディカルクリニック 渋谷", "status": S.STATUS_SENT, "row": 0} \
-        or (r["d"]["id"], r["d"]["age"], r["d"]["src"], r["d"]["inst"], r["d"]["row"]) == ("2099999", "34", "履歴", "1311337070", 0)
+    assert r["d"] == {"id": "2099999", "age": "35", "src": "履歴", "inst": "1311337070", "name": "MYメディカルクリニック 渋谷", "status": S.STATUS_SENT, "row": 0} \
+        or (r["d"]["id"], r["d"]["age"], r["d"]["src"], r["d"]["inst"], r["d"]["row"]) == ("2099999", "35", "履歴", "1311337070", 0)
     assert r["a40"]["age"] == "40"
     assert r["other"]["inst"] == "130192" and r["other"]["name"] == "東京品川病院 総合健診センター"
     assert r["none"]["src"] == S.SOURCE_NONE and r["none"]["inst"] == ""
-    assert r["junk"]["age"] == "34" and r["junk"]["inst"] == "1311337070"     # 変な値は既定に戻す
+    assert r["junk"]["age"] == "35" and r["junk"]["inst"] == "1311337070"     # 変な値は既定（35歳）に戻す
 
 
 def test_demo_page_never_submits():
@@ -382,3 +381,12 @@ def test_demo_page_never_submits():
     src = CODE.read_text(encoding="utf-8")
     assert "const demo = !token || cleanText_(e && e.parameter ? e.parameter.demo : '') === '1';" in src
     assert "if (!demo) {\n    try {\n      recordFirstAccess_(target);" in src          # サンプルでは初回アクセスを記録しない
+
+
+def test_index_wording_2026_09_11_is_bilingual():
+    html = (CODE.parent / "Index.html").read_text(encoding="utf-8")
+    assert "管理部にて予約手配が可能な健診機関は、以下となります。" in html and "Kanto IT Software Health Insurance Society" in html
+    assert html.count("関東ITソフトウェア健康保険組合の提携病院を受診してください") == 3
+    assert "現時点で受診を予定している健診機関名と受診予定時期をご入力ください" in html and "Planned timing" in html
+    assert 'type="date"' not in html                 # 受診予定時期は自由記述
+    assert "田町三田・新宿・東京駅八重洲" in html and "Tamachi-Mita, Shinjuku, Tokyo Station Yaesu" in html
