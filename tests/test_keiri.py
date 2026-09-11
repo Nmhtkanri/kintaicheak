@@ -652,6 +652,72 @@ class SonotaManualTests(unittest.TestCase):
             save_sonota_manual([self._entry(0.5)], self.ledger)
         self.assertFalse(os.path.exists(self.ledger))
 
+    def test_ledger_bumon_and_name_override_journal_row(self):
+        """台帳の氏名・部門が入っていればその値で仕訳（空欄なら名簿の氏名・履歴の部門）。"""
+        manual = {("2026-08", "2024047"): [dict(self._entry(20000), 部門="OT：その他", 氏名="能美 龍郎（修正）"),
+                                          dict(self._entry(13000), 勘定科目="福利厚生費", 品目="福利厚生費")]}
+        tx, alerts = self._run(33000, manual)
+        jisseki = [t for t in tx if t["発生日"] == "2026/7/31"][0]
+        rows = [(r["部門"], r["従業員"], r["金額"]) for r in jisseki["rows"]
+                if r["勘定科目"] in ("支払手数料", "福利厚生費")]
+        self.assertEqual(rows[0], ("OT：その他", "能美 龍郎（修正）", 20000))
+        self.assertEqual((rows[1][1], rows[1][2]), ("能美 龍郎", 13000))        # 2 行目は既定のまま
+        self.assertFalse(alerts["bumon_unknown"])
+        manual2 = {("2026-08", "2024047"): [dict(self._entry(33000), 部門="謎部門")]}
+        _tx, alerts2 = self._run(33000, manual2)
+        self.assertEqual(alerts2["bumon_unknown"], {("2024047", "謎部門")})
+
+    def test_ledger_employee_change_with_unknown_number_flags_and_blanks_name(self):
+        """計上先が名簿に無い番号なら、元の人の氏名で隠さず md 用 alert に出し、従業員は空にする。"""
+        manual = {("2026-08", "2024047"): [dict(self._entry(33000), 社員番号="2024074", 氏名="", 明細社員番号="2024047")]}
+        tx, alerts = self._run(33000, manual)
+        jisseki = [t for t in tx if t["発生日"] == "2026/7/31"][0]
+        got = [(r["従業員"], r["金額"]) for r in jisseki["rows"] if r["勘定科目"] == "支払手数料"]
+        self.assertEqual(got, [("", 33000)])
+        self.assertIn(("2024047", "能美 龍郎", "2024074"), alerts["sonota_emp_unknown"])
+        self.assertIn(("2024047", "能美 龍郎", "2024074（部門が取れない）"), alerts["sonota_emp_unknown"])
+        moved = [row[7] for row in alerts["keihi_manual"]]
+        self.assertEqual(moved, ["2024074 "])
+
+    def test_ledger_employee_change_books_row_to_that_person(self):
+        """社員番号を別人にした行は、その人の名簿の氏名で仕訳に載る（金額の突合は明細社員番号の人）。"""
+        manual = {("2026-08", "2024047"): [dict(self._entry(33000), 社員番号="2025001", 氏名="",
+                                               明細社員番号="2024047")]}
+        alerts = defaultdict(set)
+        resolver = Resolver({}, alerts, {})
+        tx = build_kyuyo("2026-08", "2026-07", {"2024047": self._pi(33000)}, {},
+                         {"2024047": {"name": "能美 龍郎"}, "2025001": {"name": "別人 太郎"}},
+                         resolver, self.MASTER, "2026-08-25", alerts, sonota_manual=manual)
+        jisseki = [t for t in tx if t["発生日"] == "2026/7/31"][0]
+        got = [(r["従業員"], r["金額"]) for r in jisseki["rows"] if r["勘定科目"] == "支払手数料"]
+        self.assertEqual(got, [("別人 太郎", 33000)])
+        self.assertFalse(alerts["keihi_tenki"])
+
+    def test_save_keeps_key_on_statement_employee_when_employee_edited(self):
+        """社員番号を書き換えて保存しても、台帳のキーは明細社員番号（jinjer の金額の持ち主）のまま。"""
+        save_sonota_manual([self._entry()], self.ledger)
+        save_sonota_manual([dict(self._entry(), 社員番号="2025001", 明細社員番号="2024047", 部門="OT：その他")],
+                           self.ledger)
+        loaded = load_sonota_manual(self.ledger)
+        self.assertEqual(list(loaded), [("2026-08", "2024047")])                 # 置き換え（増えない）
+        row = loaded[("2026-08", "2024047")][0]
+        self.assertEqual((row["社員番号"], row["明細社員番号"], row["部門"]), ("2025001", "2024047", "OT：その他"))
+        with self.assertRaises(ValueError):
+            save_sonota_manual([dict(self._entry(), 社員番号="abc")], self.ledger)
+        save_sonota_manual([dict(self._entry(), 社員番号="２０２５００１", 明細社員番号="２０２４０４７")], self.ledger)
+        loaded = load_sonota_manual(self.ledger)                                # 全角は半角に直して保存
+        self.assertEqual(loaded[("2026-08", "2024047")][0]["社員番号"], "2025001")
+        with open(self.ledger, "a", encoding="utf-8-sig", newline="") as f:      # Excel で全角に直された行
+            f.write("2026-09,２０２４０４７,能美 龍郎,1000,雑費,雑費,対象外,,,\n")
+        self.assertIn(("2026-09", "2024047"), load_sonota_manual(self.ledger))
+
+    def test_run_result_carries_bumon_choices_from_master(self):
+        """/keiri_run に渡す部門の候補は KNOWN_BUMON の 8 種（app.py はこのキーを payload に載せる）。"""
+        from services.keiri_engine import KNOWN_BUMON
+        self.assertEqual(len(KNOWN_BUMON), 8)
+        src = open(os.path.join(os.path.dirname(__file__), "..", "services", "keiri_engine.py"), encoding="utf-8").read()
+        self.assertIn('"sonota_bumon_choices": sorted(KNOWN_BUMON),', src)
+
     def test_split_rows_whose_total_differs_fall_back_to_pending(self):
         """分けた行の合計（30,000）が jinjer（33,000）と違えば 1 行も載せず要確認へ。"""
         manual = {("2026-08", "2024047"): [self._entry(20000), self._entry(10000)]}

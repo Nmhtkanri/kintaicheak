@@ -720,10 +720,12 @@
                     勘定科目・品目・税区分を入れて「台帳に保存して作り直す」を押すと、その科目で仕訳に入ります。
                     入力は支給月ごとに台帳へ残るので、同じ月をやり直しても入れ直しは不要です。
                     1 つの金額に複数の科目が混ざっているときは「＋」で行を増やして金額を分けます（合計は jinjer の金額と一致させる）。「−」で行を消せます（消しても台帳の前回分は残ります。保留のまま次に進めたいときにお使いください）。
+                    社員番号・氏名・部門も直せます（部門は候補から選べます。空欄で保存すると jinjer の値に戻ります。社員番号を別人にすると氏名・部門の既定はその人の値になります）。
                     <span id="keiri-sonota-path" style="display:block; margin-top:2px; opacity:.8"></span>
                 </div>
                 <div id="keiri-sonota-rows"></div>
                 <datalist id="keiri-sonota-choices"></datalist>
+                <datalist id="keiri-sonota-bumon-choices"></datalist>
                 <div style="margin-top:8px; display:flex; align-items:center; gap:10px">
                     <button type="button" class="btn btn-primary" id="keiri-sonota-save-btn">💾 台帳に保存して作り直す</button>
                     <span id="keiri-sonota-status" class="status-text"></span>

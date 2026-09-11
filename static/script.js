@@ -2129,6 +2129,8 @@ function keiriRenderSonota(data) {
     }
     const pathEl = document.getElementById('keiri-sonota-path');
     if (pathEl) pathEl.textContent = '台帳: ' + (data.sonota_manual_csv || '');
+    const bdl = document.getElementById('keiri-sonota-bumon-choices');
+    if (bdl) bdl.innerHTML = (data.sonota_bumon_choices || []).map(b => '<option value="' + mailEsc(b) + '">').join('');
 
     let html = '<table class="keiri-md-table"><tr><th>社員番号</th><th>氏名</th><th>金額</th>'
              + '<th>部門</th><th>勘定科目｜品目｜税区分</th><th>備考</th><th></th></tr>';
@@ -2141,12 +2143,17 @@ function keiriRenderSonota(data) {
 
 /** 保留者 1 人分の入力行。＋で同じ人の行を増やし（金額を分ける）、−で行を消す。 */
 function keiriSonotaRowHtml(p, srcIdx, amount) {
+    // 社員番号・氏名・部門も直せる（2026-09-11）。既定は jinjer の値。
+    // 氏名・部門は data-init（初期値）と同じなら台帳に書かず空で送る＝これまでどおり毎回 jinjer から決める
     return '<tr data-emp="' + mailEsc(p['社員番号']) + '" data-src="' + srcIdx + '">'
-         + '<td>' + mailEsc(p['社員番号']) + '</td>'
-         + '<td>' + mailEsc(p['氏名']) + '</td>'
+         + '<td><input type="text" class="keiri-sonota-emp" value="' + mailEsc(p['社員番号']) + '"'
+         + ' title="仕訳を載せる人。別人にすると氏名・部門の既定はその人の値になります" style="width:84px"></td>'
+         + '<td><input type="text" class="keiri-sonota-name" value="' + mailEsc(p['氏名']) + '"'
+         + ' data-init="' + mailEsc(p['氏名']) + '" style="width:130px"></td>'
          + '<td><input type="number" class="keiri-sonota-amt" value="' + Number(amount || 0) + '"'
          + ' step="1" style="width:110px; text-align:right"></td>'
-         + '<td>' + mailEsc(p['部門']) + '</td>'
+         + '<td><input type="text" class="keiri-sonota-bumon" list="keiri-sonota-bumon-choices"'
+         + ' value="' + mailEsc(p['部門']) + '" data-init="' + mailEsc(p['部門']) + '" style="width:150px"></td>'
          + '<td><input type="text" class="keiri-sonota-combo" list="keiri-sonota-choices"'
          + ' placeholder="選ぶか直接入力" style="width:280px"></td>'
          + '<td><input type="text" class="keiri-sonota-biko"'
@@ -2185,9 +2192,26 @@ function keiriCollectSonota() {
             return;
         }
         const bikoEl = tr.querySelector('.keiri-sonota-biko');
+        const empEl = tr.querySelector('.keiri-sonota-emp');
+        const nameEl = tr.querySelector('.keiri-sonota-name');
+        const bumonEl = tr.querySelector('.keiri-sonota-bumon');
+        const emp = empEl ? (empEl.value || '').trim() || p['社員番号'] : p['社員番号'];
+        if (!/^\d+$/.test(emp)) {
+            errors.push(p['社員番号'] + ' ' + p['氏名'] + '：社員番号は数字で入れてください（入力: ' + emp + '）');
+            return;
+        }
+        // 合計の検証と台帳のキーは、表を出したときの社員番号（jinjer の金額の持ち主＝明細社員番号）
         sums[p['社員番号']] = (sums[p['社員番号']] || 0) + amt;
+        // 氏名・部門は初期値（data-init）のままなら空で送る＝台帳に焼き付けず、毎回 jinjer の名簿・履歴から決める
+        // （別人にした行なら、その人の既定になる）
+        const untouched = (el) => !el || (el.value || '').trim() === (el.dataset.init || '');
+        const nameV = untouched(nameEl) ? '' : nameEl.value.trim();
+        const bumonV = untouched(bumonEl) ? '' : bumonEl.value.trim();
         entries.push({
-            '社員番号': p['社員番号'], '氏名': p['氏名'], '金額': amt, '明細金額': p['金額'],
+            '社員番号': emp, '明細社員番号': p['社員番号'],
+            '氏名': nameV,
+            '部門': bumonV,
+            '金額': amt, '明細金額': p['金額'],
             '勘定科目': parts[0], '品目': parts[1], '税区分': parts[2],
             '備考': bikoEl ? (bikoEl.value || '').trim() : '',
         });
@@ -2217,7 +2241,13 @@ if (keiriSonotaRowsEl) {
             if (!p) return;
             const tmp = document.createElement('tbody');
             tmp.innerHTML = keiriSonotaRowHtml(p, Number(tr.dataset.src), 0);
-            tr.after(tmp.firstElementChild);
+            const nt = tmp.firstElementChild;
+            // 押した行で直した社員番号・氏名・部門を新しい行にも引き継ぐ（片方だけ元に戻らないように）
+            ['keiri-sonota-emp', 'keiri-sonota-name', 'keiri-sonota-bumon'].forEach(cls => {
+                const src = tr.querySelector('.' + cls), dst = nt.querySelector('.' + cls);
+                if (src && dst) dst.value = src.value;
+            });
+            tr.after(nt);
         } else if (btn.classList.contains('keiri-sonota-del')) {
             tr.remove();
         }

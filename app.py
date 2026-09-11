@@ -3022,6 +3022,7 @@ def route_keiri_run():
         # 「その他」で科目が決まらず保留になった人（画面で手入力して作り直せる）
         "sonota_pending": result["sonota_pending"],
         "sonota_choices": result["sonota_choices"],
+        "sonota_bumon_choices": result.get("sonota_bumon_choices", []),   # 部門の候補（8 種）
         "sonota_manual_csv": result["sonota_manual_csv"],
         # 対象外(全期間ゼロ)のはずの項目に金額が出た検知（jinjerの項目移設の疑い）
         "new_usage_pending": result.get("new_usage_pending", []),
@@ -3144,10 +3145,12 @@ def route_keiri_sonota_save():
     台帳は共有フォルダなので、Excel で開いたままだと書けずにエラーになる。
 
     JSON: {"month": "2026-08",
-           "entries": [{"社員番号","氏名","金額","勘定科目","品目","税区分","備考",
+           "entries": [{"社員番号","氏名","金額","勘定科目","品目","税区分","備考","部門",
+                        "明細社員番号"(任意: jinjer で「その他」が入っている人。空欄なら社員番号),
                         "明細金額"(任意: jinjer の「その他」の金額)}, ...]}
-    同じ社員番号の行が複数あってよい（1 人を複数の科目に割る）。「明細金額」が付いていれば、
-    その人の行の金額合計が一致しないときは 1 行も保存しない（合計が違うと仕訳に載らないため）。
+    同じ人の行が複数あってよい（1 人を複数の科目に割る）。「明細金額」が付いていれば、
+    その人（明細社員番号）の行の金額合計が一致しないときは 1 行も保存しない（合計が違うと仕訳に載らないため）。
+    「社員番号」は仕訳を載せる人（2026-09-11 から画面で別人に直せる）。氏名・部門が空欄ならその人の既定になる。
     """
     from services.keiri_engine import save_sonota_manual, to_number
 
@@ -3167,9 +3170,10 @@ def route_keiri_sonota_save():
     sum_errors = []
     by_emp = {}
     for e in entries:
-        by_emp.setdefault(str(e.get("社員番号") or "").strip(), []).append(e)
+        # 画面で社員番号を書き換えた行も、jinjer の金額の持ち主（明細社員番号）で合計を見る
+        by_emp.setdefault(str(e.get("明細社員番号") or e.get("社員番号") or "").strip(), []).append(e)
     for emp, rows in by_emp.items():
-        name = str(rows[0].get("氏名") or "")
+        name = next((str(r.get("氏名") or "") for r in rows if str(r.get("氏名") or "").strip()), "")
         targets = {to_number(r.get("明細金額")) for r in rows if str(r.get("明細金額") or "").strip() != ""}
         if not targets:
             continue                      # 画面以外からの呼び出し（明細金額なし）は台帳側の一致判定に任せる

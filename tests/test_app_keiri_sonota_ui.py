@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -39,7 +40,8 @@ def test_sonota_area_ids_still_exist(html):
 def test_row_html_has_plus_minus_and_amount_input(js):
     assert "function keiriSonotaRowHtml(" in js
     for cls in ("keiri-sonota-add", "keiri-sonota-del", "keiri-sonota-amt",
-                "keiri-sonota-combo", "keiri-sonota-biko"):
+                "keiri-sonota-combo", "keiri-sonota-biko",
+                "keiri-sonota-emp", "keiri-sonota-name", "keiri-sonota-bumon"):
         assert cls in js, cls
     assert 'data-src="' in js
 
@@ -54,12 +56,23 @@ def test_plus_minus_use_delegated_listener_not_inline_onclick(js, html):
     assert 'keiri-sonota-add" onclick' not in html
 
 
-def test_collect_sends_row_amount_and_statement_amount(js):
+def test_collect_sends_row_amount_and_statement_amount(js, html):
     i = js.index("function keiriCollectSonota(")
     body = js[i:js.index("const keiriSonotaRowsEl")]
     assert "'明細金額': p['金額']" in body
     assert "'金額': amt" in body
+    assert "'明細社員番号': p['社員番号']" in body
+    assert "(el.value || '').trim() === (el.dataset.init || '')" in body   # 初期値のままの氏名・部門は空で送る
+    assert "data-init=" in js[js.index("function keiriSonotaRowHtml("):js.index("function keiriCollectSonota(")]
+    assert 'id="keiri-sonota-bumon-choices"' in html
     assert "行の金額の合計" in body          # 合計不一致は保存前に画面で止める
+
+
+def test_run_payload_carries_bumon_choices():
+    """/keiri_run の応答に部門の候補が載る（載っていないと画面の datalist が空のまま）。"""
+    src = open(os.path.join(os.path.dirname(__file__), "..", "app.py"), encoding="utf-8").read()
+    i = src.index('"sonota_pending": result["sonota_pending"]')
+    assert '"sonota_bumon_choices": result.get("sonota_bumon_choices", [])' in src[i:i + 400]
 
 
 def test_save_route_rejects_split_rows_whose_total_differs():
@@ -86,6 +99,18 @@ def test_save_route_rejects_fractional_amount_and_missing_statement_amount():
     res = client.post("/keiri_sonota_save", json={"month": "2026-08", "entries": [
         dict(base, 金額=20000, 明細金額=33000), dict(base, 金額=13000)]})
     assert res.status_code == 400 and "明細金額" in res.get_json()["errors"][0]
+
+
+def test_save_route_groups_total_by_statement_employee_when_employee_edited():
+    """社員番号を別人に書き換えた行も、合計は明細社員番号（jinjer の金額の持ち主）でまとめて検証する。"""
+    client = app.test_client()
+    base = {"氏名": "", "勘定科目": "支払手数料", "品目": "雑費", "税区分": "課対仕入10%", "備考": "", "明細金額": 33000,
+            "明細社員番号": "2024047"}
+    res = client.post("/keiri_sonota_save", json={"month": "2026-08", "entries": [
+        dict(base, 社員番号="2025001", 金額=20000, 部門="OT：その他"),
+        dict(base, 社員番号="2024047", 金額=10000)]})
+    assert res.status_code == 400
+    assert "2024047" in res.get_json()["errors"][0] and "30,000" in res.get_json()["errors"][0]
 
 
 def test_save_route_writes_split_rows_when_total_matches(tmp_path, monkeypatch):

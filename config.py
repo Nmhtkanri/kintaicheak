@@ -135,7 +135,9 @@ class Config:
         "KEIRI_MASTER_CSV", r"Z:\API連携\docs\経理モード_品目マッピングマスタ_draftC.csv")
     # 給与の「その他」(allowance52) のうち経費一覧表マクロに明細が無いもの（jinjer へ手入力
     # された有給買取・事務手数料など）を、画面で入力して仕訳に載せるための台帳。
-    # 列: 支給月, 社員番号, 氏名, 金額, 勘定科目, 品目, 税区分, 備考
+    # 列: 支給月, 社員番号, 氏名, 金額, 勘定科目, 品目, 税区分, 備考, 部門, 明細社員番号
+    #   （部門・明細社員番号は 2026-09-11 追加。明細社員番号＝jinjer で「その他」が入っている人＝キー、
+    #     社員番号＝仕訳を載せる人。列の正は services/keiri_engine.SONOTA_MANUAL_COLS）
     # 画面から追記するが、共有フォルダに置くので Excel で直接直しても次回実行から効く。
     KEIRI_SONOTA_MANUAL_CSV = os.environ.get(
         "KEIRI_SONOTA_MANUAL_CSV", r"Z:\API連携\docs\経理モード_その他手入力.csv")

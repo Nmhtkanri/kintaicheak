@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -238,7 +239,11 @@ KEIHI_TENKI_KEY = "salary_items:allowance52"
 #   手入力された分（有給買取・事務手数料など）を、画面で入れた勘定科目／品目／税区分で計上する。
 #   金額は jinjer の allowance52 と一致したときだけ使う（ズレたら計上せず要確認へ戻す）。
 SONOTA_MANUAL_COLS = ["支給月", "社員番号", "氏名", "金額",
-                      "勘定科目", "品目", "税区分", "備考"]
+                      "勘定科目", "品目", "税区分", "備考", "部門", "明細社員番号"]
+# 「部門」「明細社員番号」は 2026-09-11 に追加（画面で社員番号・氏名・部門を直せるようにした）。
+#   明細社員番号 = jinjer で「その他」が入っている人（台帳のキー・金額の突合相手）。空欄なら 社員番号。
+#   社員番号     = 仕訳を載せる人。氏名・部門が空欄ならその人の名簿・履歴から決める。
+# 古い台帳（列なし）は DictReader が空欄として読むので互換。
 
 # 台帳の入力候補（画面のプルダウン）。マッピング表に無い科目も実在するので自由入力も許す
 #   （2026-08 実例: 能美2024047 の 支払手数料／雑費、山田2025xxx の 新聞図書費／雑費）。
@@ -717,10 +722,19 @@ def load_sonota_manual(path=None):
         return {}
     out = {}
     for r in rows:
-        ym, emp = _txt(r.get("支給月")), _txt(r.get("社員番号"))
+        ym = _txt(r.get("支給月"))
+        # Excel で全角に直した番号も当たるように（保存側と同じ正規化）
+        r = dict(r, 社員番号=unicodedata.normalize("NFKC", _txt(r.get("社員番号"))),
+                 明細社員番号=unicodedata.normalize("NFKC", _txt(r.get("明細社員番号"))))
+        emp = sonota_manual_key_emp(r)
         if ym and emp:
             out.setdefault((ym, emp), []).append({c: _txt(r.get(c)) for c in SONOTA_MANUAL_COLS})
     return out
+
+
+def sonota_manual_key_emp(row):
+    """台帳の行のキーになる社員番号（jinjer で「その他」が入っている人）。明細社員番号が空欄なら社員番号。"""
+    return _txt(row.get("明細社員番号")) or _txt(row.get("社員番号"))
 
 
 def sonota_manual_bad_months(ledger):
@@ -756,6 +770,15 @@ def save_sonota_manual(entries, path=None):
         row = {c: _txt(e.get(c)) for c in SONOTA_MANUAL_COLS}
         if not row["支給月"] or not row["社員番号"]:
             raise ValueError("支給月と社員番号は必須です")
+        # 全角数字は半角に直してから判定（Excel で直した台帳を保存し直すことがある）
+        row["社員番号"] = unicodedata.normalize("NFKC", row["社員番号"])
+        row["明細社員番号"] = unicodedata.normalize("NFKC", row["明細社員番号"])
+        if not row["社員番号"].isdigit():
+            raise ValueError(f"{row['社員番号']} {row['氏名']}: 社員番号は数字で入れてください")
+        if not row["明細社員番号"]:
+            row["明細社員番号"] = row["社員番号"]
+        if not row["明細社員番号"].isdigit():
+            raise ValueError(f"{row['社員番号']} {row['氏名']}: 明細社員番号が数字ではありません（{row['明細社員番号']}）")
         missing = [c for c in ("勘定科目", "品目", "税区分") if not row[c]]
         if missing:
             raise ValueError(f"{row['社員番号']} {row['氏名']}: "
@@ -773,7 +796,7 @@ def save_sonota_manual(entries, path=None):
     ledger = load_sonota_manual(path)
     replaced = set()
     for row in cleaned:
-        key = (row["支給月"], row["社員番号"])
+        key = (row["支給月"], sonota_manual_key_emp(row))
         if key not in replaced:
             ledger[key] = []            # 渡された人の既存行はまとめて置き換える
             replaced.add(key)
@@ -948,14 +971,34 @@ def build_kyuyo(month, prev, st_m, st_prev, ridx, resolver, master, paid_on, ale
                             amt = to_number(manual.get("金額"))
                             if not amt:
                                 continue
+                            # 画面で社員番号・氏名・部門を直した行はそれを使う（2026-09-11）。
+                            # 社員番号を別人にしたら、氏名・部門の既定はその人の名簿・履歴になる
+                            emp_row = _txt(manual.get("社員番号")) or emp
+                            if emp_row != emp:
+                                name_default = (ridx.get(emp_row) or {}).get("name") or ""
+                                if not name_default:
+                                    # 打ち間違いを元の人の氏名で隠さない（md に出す。仕訳の従業員は空になる）
+                                    alerts["sonota_emp_unknown"].add((emp, name, emp_row))
+                                bumon_default = resolver.bumon(emp_row, prev_end, f"{prev}実績差分（その他台帳）")
+                            else:
+                                name_default, bumon_default = name, bumon_p
+                            name_row = _txt(manual.get("氏名")) or name_default
+                            bumon_row = _txt(manual.get("部門")) or bumon_default
+                            if emp_row != emp and not bumon_row:
+                                # 計上先の部門履歴が無い（役員・退職者など）→ 仕訳の部門が空になるので md に出す
+                                alerts["sonota_emp_unknown"].add((emp, name, f"{emp_row}（部門が取れない）"))
+                            if _txt(manual.get("部門")) and bumon_row not in KNOWN_BUMON:
+                                alerts["bumon_unknown"].add((emp_row, bumon_row))   # 画面で入れた部門だけ検査
                             others.append(detail_row(manual["勘定科目"], manual["税区分"], amt,
-                                                     manual["品目"], bumon_p, name,
+                                                     manual["品目"], bumon_row, name_row,
                                                      manual.get("備考", "")))
                             # 同額・同内容に分けた行が set で潰れて md の合計が減らないよう list
                             # （generate() は list で初期化。テスト等が set を渡しても動くようにする）
                             _alert_add(alerts["keihi_manual"], (emp, name, int(amt), manual["勘定科目"],
                                                                 manual["品目"], manual["税区分"],
-                                                                manual.get("備考", "")))
+                                                                manual.get("備考", ""),
+                                                                "" if emp_row == emp else f"{emp_row} {name_row}",
+                                                                bumon_row))
                         continue
                     alerts["keihi_manual_mismatch"].add(
                         (emp, name, int(v), int(ledger_amt) if ledger_amt is not None else None))
@@ -1566,14 +1609,18 @@ def build_yokakunin(month, alerts, master):
               "**科目と備考が今月の内容として正しいか確認すること**"
               "（台帳は支給月ごとに持つので前月の入力が勝手に効くことはない）。", ""]
     if alerts["keihi_manual"]:
-        lines += ["| 社員番号 | 氏名 | 金額 | 勘定科目 | 品目 | 税区分 | 備考 |",
-                  "|---|---|---|---|---|---|---|"]
-        for emp, name, amt, acc, item, tax, biko in sorted(alerts["keihi_manual"]):
-            lines.append(f"| {emp} | {name} | {amt:,} | {acc} | {item} | {tax} | {biko} |")
-        total = sum(a for _e, _n, a, _ac, _i, _t, _b in alerts["keihi_manual"])
-        lines.append(f"| **合計** | | **{total:,}** | | | | |")
+        lines += ["| 社員番号 | 氏名 | 金額 | 勘定科目 | 品目 | 税区分 | 備考 | 計上先（別人にした場合） | 部門 |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        for emp, name, amt, acc, item, tax, biko, moved, bumon in sorted(alerts["keihi_manual"]):
+            lines.append(f"| {emp} | {name} | {amt:,} | {acc} | {item} | {tax} | {biko} | {moved} | {bumon} |")
+        total = sum(row[2] for row in alerts["keihi_manual"])
+        lines.append(f"| **合計** | | **{total:,}** | | | | | | |")
     else:
         lines.append("- なし")
+    if alerts["sonota_emp_unknown"]:
+        lines += ["", "### 台帳の計上先の社員番号が名簿に無い／部門が取れない（打ち間違いの疑い。仕訳の従業員か部門が空になっている）", ""]
+        for emp, name, emp_row in sorted(alerts["sonota_emp_unknown"]):
+            lines.append(f"- {emp} {name} の行の計上先 「{emp_row}」")
     lines += ["", "## ⚠️ 手入力台帳の支給月が YYYY-MM でない行（台帳が効いていない）", "",
               "Excel で台帳を開いて保存すると支給月が日付に化ける（例 Aug-26）。その行はどの月にも"
               "一致せず黙って無効になる。台帳を直すこと（`Z:\\API連携\\docs\\経理モード_その他手入力.csv`）。", ""]
@@ -1812,6 +1859,7 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
     target_ids = {e for e in ridx if classify_employee(e) == "target"}
     histories = load_custom_histories(out_base, target_ids, refresh=refresh_custom)
     alerts = {"bumon_missing": set(), "bumon_unknown": set(), "midmonth": set(),
+              "sonota_emp_unknown": set(),
               "new_usage": set(), "mishunyukin": set(), "biko_needed": set(),
               "genbutsu": set(), "kyushoku": set(), "loan_mismatch": set(),
               "keihi_tenki": set(), "keihi_bunkai": [], "keihi_book_missing": set(),
@@ -1910,6 +1958,7 @@ def generate(month, out_base=None, master_csv=None, keihi_mapping_csv=None,
             for emp, name, amt, bumon, det_total in sorted(alerts["keihi_tenki"],
                                                            key=lambda x: (x[0], x[1]))],
         "sonota_choices": sonota_manual_choices(master, keihi_mapping),
+        "sonota_bumon_choices": sorted(KNOWN_BUMON),
         # 画面の赤枠警告用: 対象外(全期間ゼロ)項目に金額が出た検知（月×項目ごとに人数・合計）
         "new_usage_pending": new_usage_pending,
         "alerts": {
