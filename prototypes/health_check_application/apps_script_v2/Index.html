@@ -9,7 +9,7 @@
 <body>
   <header class="header"><div class="header-inner"><div class="mark">＋</div><div><p class="eyebrow">NMHT Health Check</p><p class="brand">健康診断申込 / Health Check Application</p></div></div></header>
   <main class="shell">
-    <? if (demo) { ?><div class="demo-banner">これは説明用のサンプル画面です。入力しても送信されません。実際の申込は、メールで届く本人専用のURLから行います。<small>表示の切替: URL の末尾に ?age=34（34歳以下の例）／?gender=m（男性の例：婦人科検診が出ません）／?prev=other（前年度が会社で予約できない機関の例）／?prev=none（前年度の情報が無い例）を付けます。</small></div><? } ?>
+    <? if (demo) { ?><div class="demo-banner">これは説明用のサンプル画面です。入力しても送信されません。実際の申込は、メールで届く本人専用のURLから行います。<small>表示の切替: URL の末尾に ?age=35（35歳以上の例）／?gender=m（男性の例：婦人科検診が出ません）／?prev=other（前年度が会社で予約できない機関の例）／?prev=none（前年度の情報が無い例）を付けます。</small></div><? } ?>
     <section class="hero"><span class="pill"><?= demo ? 'サンプル / Demo' : '受付中 / Accepting' ?></span><h1><?= settings['年度'] ?>年度 健康診断申込<br><span>Health Check Application</span></h1><p>受診期間：<?= settings['受診期間開始'] ?> 〜 <?= settings['受診期間終了'] ?><br>受付期限：<?= settings['受付終了'] ?></p></section>
     <? if (!canAnswer) { ?>
       <section class="card success"><div class="success-icon">✓</div><h2>このURLでは既に申込済みです</h2><p>This personal link has already been used.</p><div class="receipt">受付番号 / Receipt ID<br><?= employee.receiptId ?></div><p class="helper">内容を訂正したい場合は健康診断担当者へご連絡ください（担当者が再回答を許可すると、同じURLから再回答できます）。</p></section>

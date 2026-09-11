@@ -364,12 +364,12 @@ def test_demo_target_variants_have_no_real_person():
                 " return {d: pick(demoTarget_({}, o)), a40: pick(demoTarget_({age: '40'}, o)), other: pick(demoTarget_({prev: 'other'}, o)),"
                 " none: pick(demoTarget_({prev: 'none'}, o)), junk: pick(demoTarget_({age: 'abc', prev: 'x'}, o))}; })()")
     r = run_gas(workbook(), scenario)["result"]
-    assert r["d"] == {"id": "2099999", "age": "35", "src": "履歴", "inst": "1311337070", "name": "MYメディカルクリニック 渋谷", "status": S.STATUS_SENT, "row": 0} \
-        or (r["d"]["id"], r["d"]["age"], r["d"]["src"], r["d"]["inst"], r["d"]["row"]) == ("2099999", "35", "履歴", "1311337070", 0)
+    assert r["d"] == {"id": "2099999", "age": "34", "src": "履歴", "inst": "1311337070", "name": "MYメディカルクリニック 渋谷", "status": S.STATUS_SENT, "row": 0} \
+        or (r["d"]["id"], r["d"]["age"], r["d"]["src"], r["d"]["inst"], r["d"]["row"]) == ("2099999", "34", "履歴", "1311337070", 0)
     assert r["a40"]["age"] == "40"
     assert r["other"]["inst"] == "130192" and r["other"]["name"] == "東京品川病院 総合健診センター"
     assert r["none"]["src"] == S.SOURCE_NONE and r["none"]["inst"] == ""
-    assert r["junk"]["age"] == "35" and r["junk"]["inst"] == "1311337070"     # 変な値は既定（35歳）に戻す
+    assert r["junk"]["age"] == "34" and r["junk"]["inst"] == "1311337070"     # 変な値は既定（34歳）に戻す
 
 
 def test_demo_page_never_submits():

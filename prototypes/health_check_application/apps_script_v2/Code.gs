@@ -356,10 +356,10 @@ function doGet(e) {
 
 /**
  * 説明用のサンプル対象者（架空。シートには無い）。URL のパラメータで見せ方を変えられる:
- *   age=34|40（年度末年齢。既定 35）、gender=m（男性＝婦人科検診なし。既定は女性）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
+ *   age=34|40（年度末年齢。既定 34）、gender=m（男性＝婦人科検診なし。既定は女性）、prev=same|other|none（前年度: 予約できる機関／予約できない機関／なし。既定 same）
  */
 function demoTarget_(params, options) {
-  const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '35';
+  const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '34';
   const prev = ['same', 'other', 'none'].includes(cleanText_(params.prev)) ? cleanText_(params.prev) : 'same';
   const target = { rowNumber: 0 };
   TARGET_HEADERS.forEach((h) => { target[h] = ''; });
