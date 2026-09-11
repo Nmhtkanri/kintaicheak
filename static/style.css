@@ -1587,3 +1587,10 @@ details.hh-needs-check ul { margin: 4px 0 0; color: #62707c; }
 
 /* 経理モード「その他」手入力の ＋／− ボタン（2026-09-10） */
 #keiri-sonota-rows .btn-sm { padding: 2px 8px; font-size: 12px; line-height: 1.2; }
+
+/* 経理モードの 給与／賞与 切替は暖色（オレンジ系）にする（2026-09-11 谷津さん指定。健診モードの緑はそのまま） */
+#keiri-subtabs { background: #fdf3e7; border-color: #f0d3b0; }
+#keiri-subtabs .health-subtabs-caption { color: #8a5a2b; }
+#keiri-subtabs .health-subtab { border-color: #e6b98a; color: #6b3d10; }
+#keiri-subtabs .health-subtab:hover { background: #fbe4c8; }
+#keiri-subtabs .health-subtab.is-active { background: #d9701a; border-color: #d9701a; color: #fff; }
