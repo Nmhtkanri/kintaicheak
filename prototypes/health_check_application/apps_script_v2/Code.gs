@@ -361,11 +361,14 @@ function doGet(e) {
 function demoTarget_(params, options) {
   const age = /^\d{1,3}$/.test(cleanText_(params.age)) ? cleanText_(params.age) : '34';
   const prev = ['same', 'other', 'none'].includes(cleanText_(params.prev)) ? cleanText_(params.prev) : 'same';
+  const male = cleanText_(params.gender) === 'm';
   const target = { rowNumber: 0 };
   TARGET_HEADERS.forEach((h) => { target[h] = ''; });
   Object.assign(target, {
-    '年度': '', '社員番号': '2099999', '氏名': 'サンプル 太郎', '社用メール': 'sample.taro@nmht.co.jp', '在籍区分': '0',
-    '年度末年齢': age, '性別': cleanText_(params.gender) === 'm' ? GENDER_MALE : '女性',
+    '年度': '', '社員番号': '2099999', '在籍区分': '0', '年度末年齢': age,
+    '性別': male ? GENDER_MALE : '女性',
+    '氏名': male ? 'サンプル 太郎' : 'サンプル 花子',
+    '社用メール': male ? 'sample.taro@nmht.co.jp' : 'sample.hanako@nmht.co.jp',
     '申込状態': STATUS.sent, '前年度情報元': SOURCE_NONE,
   });
   if (prev !== 'none') {

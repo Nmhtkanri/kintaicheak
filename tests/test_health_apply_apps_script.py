@@ -408,5 +408,5 @@ def test_gyn_hidden_and_rejected_for_male():
 def test_dependent_section_is_gone():
     html = (CODE.parent / "Index.html").read_text(encoding="utf-8")
     assert "dependentRequested" not in html and "被扶養者" not in html
-    r = run_gas(workbook(), "(() => { const t = demoTarget_({gender: 'm'}, readOptions_()); return [t['性別'], demoTarget_({}, readOptions_())['性別']]; })()")["result"]
-    assert r == ["男性", "女性"]
+    r = run_gas(workbook(), "(() => { const m = demoTarget_({gender: 'm'}, readOptions_()); const f = demoTarget_({}, readOptions_()); return [m['性別'], m['氏名'], f['性別'], f['氏名']]; })()")["result"]
+    assert r == ["男性", "サンプル 太郎", "女性", "サンプル 花子"]
